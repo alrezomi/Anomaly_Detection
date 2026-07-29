@@ -20,16 +20,27 @@ from visualization import (
 
 # ============================================================
 # 1. INPUT VIDEOS
-# Edit only these paths when you change the experiment.
+# Paths are derived from this file, so they do not depend on the current
+# working directory, Windows username, drive letter, or clone location.
 # ============================================================
 
+VISION_DIRECTORY = Path(__file__).resolve().parent
+SCRIPT_VS_DIRECTORY = VISION_DIRECTORY.parent
+PROJECT_DIRECTORY = SCRIPT_VS_DIRECTORY.parent
+DATA_DIRECTORY = PROJECT_DIRECTORY / "data"
+VIDEO_DIRECTORY = (
+    DATA_DIRECTORY
+    / "Exp_1"
+    / "Exp_1"
+    / "Exp_1_Videos_u_Fotos"
+)
+
 NOMINAL_VIDEO_PATHS = [
-    r"C:/Users/ali76665/Desktop/AD/data/Exp_1/Exp_1/Exp_1_Videos_u_Fotos/i11_pick_place.MP4",
+    VIDEO_DIRECTORY / "i6_pick_place.MP4",
+    VIDEO_DIRECTORY / "i7_pick_place.MP4",
 ]
 
-TEST_VIDEO_PATH = (
-    r"C:/Users/ali76665/Desktop/AD/data/Exp_1/Exp_1/Exp_1_Videos_u_Fotos/i11_pick_place.MP4"
-)
+TEST_VIDEO_PATH = VIDEO_DIRECTORY / "i11_pick_place.MP4"
 
 
 # ============================================================
@@ -67,7 +78,7 @@ THRESHOLD_FLOOR_QUANTILE = 0.20
 # 4. OUTPUT PATHS
 # ============================================================
 
-OUTPUT_DIRECTORY = Path("outputs")
+OUTPUT_DIRECTORY = SCRIPT_VS_DIRECTORY / "outputs"
 THRESHOLD_CSV = OUTPUT_DIRECTORY / "adaptive_visual_threshold.csv"
 CALIBRATION_CSV = OUTPUT_DIRECTORY / "adaptive_visual_calibration.csv"
 TEST_RESULT_CSV = OUTPUT_DIRECTORY / "vision_test_results.csv"
@@ -89,13 +100,19 @@ def check_input_paths() -> None:
         raise FileNotFoundError(
             "The following video files were not found:\n"
             f"{missing_text}\n\n"
-            "Correct the paths at the top of run_vision_test.py."
+            f"Expected video directory:\n  {VIDEO_DIRECTORY}\n\n"
+            "Add the videos there or update VIDEO_DIRECTORY in "
+            "run_vision_test.py."
         )
 
 
 def main() -> None:
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
     check_input_paths()
+
+    print(f"Project directory: {PROJECT_DIRECTORY}")
+    print(f"Video directory: {VIDEO_DIRECTORY}")
+    print(f"Output directory: {OUTPUT_DIRECTORY}")
 
     # --------------------------------------------------------
     # Step 1: Load DINOv2 once

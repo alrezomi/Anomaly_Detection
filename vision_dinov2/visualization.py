@@ -40,7 +40,8 @@ def show_attention_map(
     plt.axis("off")
     plt.title(title)
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(0.1)
 
 
 def show_anomaly_heatmap(
@@ -64,7 +65,8 @@ def show_anomaly_heatmap(
     plt.axis("off")
     plt.title(title)
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(0.1)
 
 
 def make_heatmap_overlay(
@@ -134,7 +136,8 @@ def plot_adaptive_calibration(
     plt.legend()
     plt.grid(True, alpha=0.35)
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(0.1)
 
 
 def plot_test_scores(
@@ -177,7 +180,8 @@ def plot_test_scores(
     plt.legend()
     plt.grid(True, alpha=0.35)
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(0.1)
 
 
 def plot_test_epsilon(
@@ -221,7 +225,8 @@ def plot_test_epsilon(
     plt.legend()
     plt.grid(True, alpha=0.35)
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(0.1)
 
 
 def _draw_text_panel(
