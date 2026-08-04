@@ -1,0 +1,16 @@
+{
+  "nominal_bags": [
+    "/data/normal_run_01",
+    "/data/normal_run_02"
+  ],
+  "test_bag": "/data/test_run_01",
+  "camera_topics": [
+    "/flange_camera/cam33/color/image_raw"
+  ],
+  "output_dir": "/outputs/experiment_01",
+  "stage_topic": "/recording_stage",
+  "stage_count": 3,
+  "ignore_recorded_stages": false,
+  "preview_only": false,
+  "max_preview_frames": null
+}

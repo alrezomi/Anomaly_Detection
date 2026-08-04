@@ -6,5 +6,6 @@ __pycache__
 *.py[cod]
 .mplconfig
 outputs
+pipeline_config.json
+.env
 *.ipynb_checkpoints
-

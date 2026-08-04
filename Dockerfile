@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     MPLBACKEND=Agg \
     HF_HOME=/cache/huggingface
 
-WORKDIR /workspace/AD/Script_VS
+WORKDIR /workspace/anomaly_detection
 
 ARG TORCH_VERSION=2.11.0
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -28,7 +29,9 @@ TEST_BAG_REPETITION = 1
 
 SCRIPT_VS_DIRECTORY = Path(__file__).resolve().parent
 PROJECT_DIRECTORY = SCRIPT_VS_DIRECTORY.parent
-DATA_DIRECTORY = PROJECT_DIRECTORY / "data"
+DATA_DIRECTORY = Path(
+    os.environ.get("ANOMALY_DATA_ROOT", PROJECT_DIRECTORY / "data")
+).resolve()
 
 VIDEO_DIRECTORY = (
     DATA_DIRECTORY
@@ -43,7 +46,9 @@ BAG_DIRECTORY = (
     / "Exp_1_Force_log_files"
     / "Bags"
 )
-OUTPUT_DIRECTORY = SCRIPT_VS_DIRECTORY / "outputs"
+OUTPUT_DIRECTORY = Path(
+    os.environ.get("ANOMALY_OUTPUT_ROOT", SCRIPT_VS_DIRECTORY / "outputs")
+).resolve()
 
 TASK_NAME_MAP = {
     "pick_place": {
@@ -116,4 +121,3 @@ def print_experiment_summary() -> None:
         f"{list(NOMINAL_BAG_REPETITIONS)}"
     )
     print(f"  test bag repetition: {TEST_BAG_REPETITION}")
-

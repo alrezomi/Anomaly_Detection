@@ -1,18 +1,42 @@
+x-pipeline-common: &pipeline-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: anomaly-detection:local
+  init: true
+  shm_size: "2gb"
+  environment:
+    ANOMALY_DATA_ROOT: /data
+    ANOMALY_OUTPUT_ROOT: /outputs
+  volumes:
+    # Host paths are configured in the local .env file.
+    - ${ANOMALY_DATA_DIR:-../data}:/data:ro
+    - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
+    - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
+    - huggingface-cache:/cache/huggingface
+
 services:
+  # Legacy MP4/MCAP launcher.
   pipeline:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: anomaly-detection:local
-    init: true
-    shm_size: "2gb"
-    volumes:
-      # Keep the large dataset outside the image and make it read-only.
-      - ../data:/workspace/AD/data:ro
-      # Keep generated CSV and video files on the host computer.
-      - ./outputs:/workspace/AD/Script_VS/outputs
-      # Avoid downloading DINOv2 again after every disposable container run.
-      - huggingface-cache:/cache/huggingface
+    <<: *pipeline-common
+    entrypoint: ["python", "launch_pipeline.py"]
+    command: ["both"]
+
+  # Configured ROS bag vision launcher.
+  rosbag-vision:
+    <<: *pipeline-common
+    entrypoint: ["python", "run_rosbag_vision.py"]
+    command: ["--config", "/config/pipeline_config.json"]
+
+  # Generate /outputs/dataset_manifest.csv from recorded stage labels.
+  bag-labels:
+    <<: *pipeline-common
+    entrypoint: ["python", "build_dataset_manifest.py"]
+    command:
+      - /data
+      - --output
+      - /outputs/dataset_manifest.csv
+      - --recursive
 
 volumes:
   huggingface-cache:

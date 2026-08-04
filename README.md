@@ -157,11 +157,11 @@ For example, inside Docker the mounted data and output paths are:
 ```bash
 docker compose -p anomaly-detection run --rm \
   --entrypoint python pipeline run_rosbag_vision.py \
-  --nominal-bag /workspace/AD/data/normal_run_01 \
-  --nominal-bag /workspace/AD/data/normal_run_02 \
-  --test-bag /workspace/AD/data/test_run_01 \
+  --nominal-bag /data/normal_run_01 \
+  --nominal-bag /data/normal_run_02 \
+  --test-bag /data/test_run_01 \
   --camera-topic /flange_camera/cam33/color/image_raw \
-  --output-dir /workspace/AD/Script_VS/outputs
+  --output-dir /outputs/experiment_01
 ```
 
 For the older MP4/MCAP dataset, edit nominal/test IDs and paths in
@@ -258,7 +258,54 @@ displayed, but calculations, CSV output, and annotated videos still work.
 
 ### Build once
 
-Run from the `Script_VS` directory:
+Run from the cloned `anomaly_detection` repository directory:
+
+Create local configuration files first. They are ignored by Git, so each
+computer can use its own paths and experiment selection:
+
+```bash
+cp .env.example .env
+cp pipeline_config.example.json pipeline_config.json
+```
+
+Edit `.env` to configure host filesystem paths only:
+
+```dotenv
+ANOMALY_DATA_DIR=../data
+ANOMALY_OUTPUT_DIR=./outputs
+PIPELINE_CONFIG_FILE=./pipeline_config.json
+COMPOSE_PROJECT_NAME=anomaly-detection
+```
+
+Relative paths are resolved from the folder containing `compose.yaml`.
+Absolute paths are also supported. Only the left/host paths change between
+computers; the container always sees them as `/data` and `/outputs`.
+
+Edit `pipeline_config.json` to select the experiment:
+
+```json
+{
+  "nominal_bags": [
+    "/data/normal_run_01",
+    "/data/normal_run_02"
+  ],
+  "test_bag": "/data/test_run_01",
+  "camera_topics": [
+    "/flange_camera/cam33/color/image_raw"
+  ],
+  "output_dir": "/outputs/experiment_01",
+  "stage_topic": "/recording_stage",
+  "stage_count": 3,
+  "ignore_recorded_stages": false,
+  "preview_only": false,
+  "max_preview_frames": null
+}
+```
+
+The bag paths above are container paths underneath the host data folder from
+`.env`. The output subfolder is created underneath the host output folder.
+
+Build the image:
 
 ```powershell
 docker compose -p anomaly-detection build
@@ -266,6 +313,24 @@ docker compose -p anomaly-detection build
 
 The default image installs CPU PyTorch and works without an NVIDIA GPU. Later
 builds reuse Docker's cache when dependencies have not changed.
+
+### Run configured ROS bag processing
+
+No paths are required in the run command:
+
+```bash
+docker compose run --rm rosbag-vision
+```
+
+Generate or refresh normal/fail labels from every bag under the configured
+data directory:
+
+```bash
+docker compose run --rm bag-labels
+```
+
+The label file is written to `dataset_manifest.csv` in the configured host
+output directory.
 
 ### Run without GPU
 
