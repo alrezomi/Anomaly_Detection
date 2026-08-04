@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: anomaly-detection:local
+    image: alrezomi-anomaly-detection:local
     init: true
     shm_size: "2gb"
     volumes:
@@ -16,4 +16,3 @@ services:
 
 volumes:
   huggingface-cache:
-

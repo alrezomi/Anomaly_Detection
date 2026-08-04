@@ -237,7 +237,7 @@ displayed, but calculations, CSV output, and annotated videos still work.
 Run from the `Script_VS` directory:
 
 ```powershell
-docker compose build
+docker compose -p alrezomi-ad build
 ```
 
 The default image installs CPU PyTorch and works without an NVIDIA GPU. Later
@@ -248,14 +248,14 @@ builds reuse Docker's cache when dependencies have not changed.
 Both sections:
 
 ```powershell
-docker compose run --rm pipeline
+docker compose -p alrezomi-ad run --rm pipeline
 ```
 
 Only vision or time series:
 
 ```powershell
-docker compose run --rm pipeline vision
-docker compose run --rm pipeline time-series
+docker compose -p alrezomi-ad run --rm pipeline vision
+docker compose -p alrezomi-ad run --rm pipeline time-series
 ```
 
 The Hugging Face model cache is stored in a Docker volume, so DINOv2 is not
