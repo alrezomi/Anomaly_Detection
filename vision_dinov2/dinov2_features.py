@@ -10,6 +10,11 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+
+from rosbag_io import RosbagImageSource, iter_rosbag_image_frames
+
+
+FrameSource = str | Path | RosbagImageSource
 from transformers import AutoImageProcessor, AutoModel
 
 
@@ -287,3 +292,30 @@ def iter_video_frames(
             current_frame_index += 1
     finally:
         cap.release()
+
+
+def iter_source_frames(
+    source: FrameSource,
+    sample_fps: float = 2.0,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+    max_frames: int | None = None,
+) -> Iterator[tuple[int, float, Image.Image]]:
+    """Yield sampled frames from either a normal video or a ROS bag camera."""
+    if isinstance(source, RosbagImageSource):
+        yield from iter_rosbag_image_frames(
+            source=source,
+            sample_fps=sample_fps,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            max_frames=max_frames,
+        )
+        return
+
+    yield from iter_video_frames(
+        video_path=source,
+        sample_fps=sample_fps,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        max_frames=max_frames,
+    )

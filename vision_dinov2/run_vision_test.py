@@ -1,6 +1,7 @@
 """Run the complete DINOv2 vision anomaly-detection pipeline."""
 
 from pathlib import Path
+from rosbag_io import RosbagImageSource
 
 from experiment_config import (
     OUTPUT_DIRECTORY,
@@ -84,13 +85,17 @@ def check_input_paths() -> None:
     missing_paths = [
         path
         for path in [*NOMINAL_VIDEO_PATHS, TEST_VIDEO_PATH]
-        if not Path(path).is_file()
+        if not (
+            path.bag_path.exists()
+            if isinstance(path, RosbagImageSource)
+            else Path(path).is_file()
+        )
     ]
 
     if missing_paths:
         missing_text = "\n".join(f"  - {path}" for path in missing_paths)
         raise FileNotFoundError(
-            "The following video files were not found:\n"
+            "The following vision sources were not found:\n"
             f"{missing_text}\n\n"
             f"Expected video directory:\n  {VIDEO_DIRECTORY}\n\n"
             "Add the videos there or update VIDEO_DIRECTORY in "

@@ -96,6 +96,133 @@ For example, the force topic remains configured in
 Generated CSV files and the annotated video are written to
 `Script_VS/outputs`.
 
+## Read the new ROS 2 bag format
+
+The bag is the source of truth; you do not need to convert camera topics to
+MP4 before inference. First inspect any new recording:
+
+```powershell
+.\.venv\Scripts\python.exe .\inspect_rosbag.py topics ..\data\bag_20260730_094942
+```
+
+The example bag contains three RGB viewpoints, joint states, TCP pose, and
+stage markers. It does not currently contain a force/wrench topic. Topic names
+are recording-dependent, so inspect each dataset instead of hard-coding an
+assumption.
+
+To preview exactly what DINOv2 receives (sampled at 2 FPS and resized to
+518 x 518), run:
+
+```powershell
+.\.venv\Scripts\python.exe .\run_rosbag_vision.py `
+  --test-bag ..\data\bag_20260730_094942 `
+  --camera-topic /flange_camera/cam33/color/image_raw `
+  --preview-only
+```
+
+The result is `outputs/flange_camera_cam33_color_image_raw_model_input.mp4`.
+This is a visualization copy; inference reads the image messages directly
+from the bag.
+
+### Train/test one or several camera viewpoints
+
+Adaptive threshold calibration requires at least two separate nominal
+recordings. Supply each normal bag once, then repeat `--camera-topic` for any
+number of viewpoints:
+
+```powershell
+.\.venv\Scripts\python.exe .\run_rosbag_vision.py `
+  --nominal-bag ..\data\normal_run_01 `
+  --nominal-bag ..\data\normal_run_02 `
+  --test-bag ..\data\test_run_01 `
+  --camera-topic /flange_camera/cam01/color/image_raw `
+  --camera-topic /flange_camera/cam33/color/image_raw `
+  --camera-topic /flange_camera/cam45/color/image_raw
+```
+
+Each viewpoint deliberately gets its own nominal memory, thresholds, CSVs,
+and heatmap video. Do not pool different viewpoints into one DINO memory:
+camera-position differences would then be confused with process anomalies.
+
+### Select time-series topics
+
+Any supported pose, joint-state, or wrench topic can be exported independently:
+
+```powershell
+.\.venv\Scripts\python.exe .\inspect_rosbag.py export-topic `
+  ..\data\bag_20260730_094942 `
+  --topic /tcp_pose_broadcaster/pose `
+  --output outputs\tcp_pose.csv
+
+.\.venv\Scripts\python.exe .\inspect_rosbag.py export-topic `
+  ..\data\bag_20260730_094942 `
+  --topic /joint_states `
+  --output outputs\joint_states.csv
+
+.\.venv\Scripts\python.exe .\inspect_rosbag.py export-stages `
+  ..\data\bag_20260730_094942 `
+  --output outputs\recording_stages.csv
+```
+
+When a future bag contains `geometry_msgs/msg/Wrench` or `WrenchStamped`, use
+the same `export-topic` command with that topic name. The readers retain bag
+timestamps and keep topics as separate tables because cameras, joints, poses,
+and force sensors may publish at different rates. Synchronization/resampling
+should happen explicitly when those signals are selected for a model.
+
+### Recorded stages and automatic fallback
+
+For rosbag camera inputs, the vision pipeline reads `/recording_stage` by
+default. A recorded sequence is used only when it contains the complete,
+ordered numeric sequence `1, 2, 3`. Non-numeric messages such as `Error` are
+kept in the raw stage export but ignored as stage transitions.
+
+Some recorders publish a rapid `1, 2, 3` initialization sequence. The resolver
+works backwards from the final stage and selects the latest valid preceding
+markers, which prevents this startup sequence from defining the operation.
+For `bag_20260730_094942`, the selected starts are approximately 0.64, 31.62,
+and 55.22 seconds.
+
+If the stage topic is absent, a marker is missing, or the sequence is out of
+order, that recording automatically uses equal-duration intervals. This is
+equivalent to the previous frame-progress behavior. The console reports either
+`recorded` or `equal_intervals` for every nominal bag so the decision is
+visible during a run.
+
+The vision result CSV also includes `execution_stage`, `execution_progress`,
+`stage_source`, and `latest_recorded_marker`. Therefore an `Error` marker is
+preserved for later evaluation even though it does not change the numeric
+stage sequence. Because it was entered manually after the physical anomaly,
+it should be treated as an approximate annotation rather than the exact
+anomaly onset time.
+
+If a recording uses another topic or number of stages, pass for example
+`--stage-topic /my_stage --stage-count 4`. To force the former behavior for
+an experiment, add `--ignore-recorded-stages`.
+
+### Labels from recorded stage messages
+
+Generate or refresh one label for every bag with:
+
+```powershell
+.\.venv\Scripts\python.exe .\build_dataset_manifest.py `
+  ..\data --output dataset_manifest.csv
+```
+
+This scans every immediate ROS bag directory automatically. Add `--recursive`
+if bags are nested more deeply. The label is derived only from recorded stage
+messages:
+
+- A stage marker containing `Error`, `Anomaly`, `Fail`, or a related spelling
+  gives the whole bag the label `fail`.
+- Recorded stage messages without a failure marker give the bag `normal`.
+- A missing stage topic, no stage messages, or an unreadable bag gives it
+  `unknown`.
+
+The generated CSV contains no nominal/test split and no manual label override.
+You continue selecting nominal and test bag paths yourself when launching the
+pipeline.
+
 ## Run with Docker
 
 Docker provides the same Linux, Python, PyTorch, and package environment on

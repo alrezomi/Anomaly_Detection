@@ -8,7 +8,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .dinov2_features import DINOv2FeatureExtractor, iter_video_frames
+from rosbag_io import (
+    RosbagImageSource,
+    read_stage_events,
+    resolve_stage_timeline,
+)
+
+from .dinov2_features import DINOv2FeatureExtractor, iter_source_frames
 
 
 NominalItem = dict[str, Any]
@@ -41,8 +47,8 @@ def build_nominal_video_memory(
 
         frames_found = 0
 
-        for frame_id, timestamp_sec, frame in iter_video_frames(
-            video_path=video_path,
+        for frame_id, timestamp_sec, frame in iter_source_frames(
+            source=video_path,
             sample_fps=sample_fps,
             start_sec=start_sec,
             end_sec=end_sec,
@@ -66,6 +72,7 @@ def build_nominal_video_memory(
                 {
                     "video_id": video_id,
                     "video_path": str(video_path),
+                    "source": video_path,
                     "frame_id": frame_id,
                     "timestamp_sec": timestamp_sec,
                     "frame": frame,
@@ -110,6 +117,7 @@ def add_progress_to_nominal_memory(
         raise ValueError("Nominal memory is empty.")
 
     max_frame_by_video: dict[int, int] = {}
+    items_by_video: dict[int, list[NominalItem]] = {}
 
     for item in nominal_memory:
         video_id = int(item["video_id"])
@@ -118,16 +126,41 @@ def add_progress_to_nominal_memory(
             frame_id,
             max_frame_by_video.get(video_id, frame_id),
         )
+        items_by_video.setdefault(video_id, []).append(item)
 
-    for item in nominal_memory:
-        video_id = int(item["video_id"])
+    for video_id, video_items in items_by_video.items():
         max_frame_id = max_frame_by_video[video_id]
+        source = video_items[0].get("source")
+        timeline = None
+        if isinstance(source, RosbagImageSource) and source.stage_topic:
+            end_sec = max(float(item["timestamp_sec"]) for item in video_items)
+            if end_sec > 0:
+                timeline = resolve_stage_timeline(
+                    bag_path=source.bag_path,
+                    end_sec=end_sec,
+                    topic=source.stage_topic,
+                    stage_count=source.stage_count,
+                )
+                print(
+                    f"Stage assignment for {source}: {timeline.source}; "
+                    f"starts={list(timeline.starts)}"
+                )
 
-        item["progress"] = (
-            float(item["frame_id"]) / float(max_frame_id)
-            if max_frame_id > 0
-            else 0.0
-        )
+        for item in video_items:
+            if timeline is not None:
+                stage, progress = timeline.locate(float(item["timestamp_sec"]))
+                item["stage"] = stage
+                item["stage_source"] = timeline.source
+                item["progress"] = progress
+            else:
+                progress = (
+                    float(item["frame_id"]) / float(max_frame_id)
+                    if max_frame_id > 0
+                    else 0.0
+                )
+                item["progress"] = progress
+                item["stage"] = min(3, int(progress * 3) + 1)
+                item["stage_source"] = "frame_progress"
 
     return nominal_memory
 
@@ -357,8 +390,8 @@ def run_video_test(
 
     rows: list[dict[str, Any]] = []
 
-    for frame_id, timestamp_sec, frame in iter_video_frames(
-        video_path=test_video_path,
+    for frame_id, timestamp_sec, frame in iter_source_frames(
+        source=test_video_path,
         sample_fps=sample_fps,
         start_sec=start_sec,
         end_sec=end_sec,
@@ -449,4 +482,37 @@ def run_video_test(
             "and the selected start/end times."
         )
 
-    return pd.DataFrame(rows)
+    results = pd.DataFrame(rows)
+    if isinstance(test_video_path, RosbagImageSource):
+        source = test_video_path
+        last_time = float(results["timestamp_sec"].max())
+        if source.stage_topic and last_time > 0:
+            timeline = resolve_stage_timeline(
+                source.bag_path,
+                end_sec=last_time,
+                topic=source.stage_topic,
+                stage_count=source.stage_count,
+            )
+            locations = [
+                timeline.locate(timestamp)
+                for timestamp in results["timestamp_sec"]
+            ]
+            results["execution_stage"] = [value[0] for value in locations]
+            results["execution_progress"] = [value[1] for value in locations]
+            results["stage_source"] = timeline.source
+
+            try:
+                events = read_stage_events(source.bag_path, source.stage_topic)
+                event_times = events["time"].to_numpy(dtype=float)
+                event_labels = events["stage"].astype(str).to_numpy()
+                marker_values: list[str | None] = []
+                for timestamp in results["timestamp_sec"]:
+                    event_index = int(np.searchsorted(event_times, timestamp, side="right") - 1)
+                    marker_values.append(
+                        str(event_labels[event_index]) if event_index >= 0 else None
+                    )
+                results["latest_recorded_marker"] = marker_values
+            except (FileNotFoundError, TypeError, ValueError):
+                results["latest_recorded_marker"] = None
+
+    return results

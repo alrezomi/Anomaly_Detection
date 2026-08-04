@@ -16,7 +16,7 @@ from .anomaly_detection import (
     compare_frame_to_nominal_memory,
     threshold_for_progress,
 )
-from .dinov2_features import DINOv2FeatureExtractor, iter_video_frames
+from .dinov2_features import DINOv2FeatureExtractor, iter_source_frames
 
 
 def show_attention_map(
@@ -341,8 +341,8 @@ def create_anomaly_heatmap_video(
     rows: list[dict[str, float | int | bool | str | None]] = []
 
     try:
-        for frame_id, timestamp_sec, frame in iter_video_frames(
-            video_path=test_video_path,
+        for frame_id, timestamp_sec, frame in iter_source_frames(
+            source=test_video_path,
             sample_fps=sample_fps,
             start_sec=start_sec,
             end_sec=end_sec,
