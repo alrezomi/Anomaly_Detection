@@ -1,0 +1,15 @@
+# Local Python environments
+.venv/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# Local plotting cache
+.mplconfig/
+
+# Generated experiment results
+outputs/
+
+# Machine-specific Docker GPU override
+/compose.gpu.yaml

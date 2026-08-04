@@ -1,0 +1,19 @@
+services:
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: anomaly-detection:local
+    init: true
+    shm_size: "2gb"
+    volumes:
+      # Keep the large dataset outside the image and make it read-only.
+      - ../data:/workspace/AD/data:ro
+      # Keep generated CSV and video files on the host computer.
+      - ./outputs:/workspace/AD/Script_VS/outputs
+      # Avoid downloading DINOv2 again after every disposable container run.
+      - huggingface-cache:/cache/huggingface
+
+volumes:
+  huggingface-cache:
+

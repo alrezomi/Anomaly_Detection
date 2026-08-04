@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from anomaly_detection import (
+from .anomaly_detection import (
     NominalItem,
     add_progress_to_nominal_memory,
     compare_frame_to_nominal_memory,

@@ -2,15 +2,23 @@
 
 from pathlib import Path
 
-from anomaly_detection import (
+from experiment_config import (
+    OUTPUT_DIRECTORY,
+    PROJECT_DIRECTORY,
+    VIDEO_DIRECTORY,
+    nominal_video_paths,
+    print_experiment_summary,
+    test_video_path,
+)
+from .anomaly_detection import (
     build_nominal_video_memory,
     run_video_test,
 )
-from dinov2_features import DINOv2FeatureExtractor
-from threshold import (
+from .dinov2_features import DINOv2FeatureExtractor
+from .threshold import (
     calibrate_adaptive_threshold_leave_one_video_out,
 )
-from visualization import (
+from .visualization import (
     create_anomaly_heatmap_video,
     plot_adaptive_calibration,
     plot_test_epsilon,
@@ -20,27 +28,12 @@ from visualization import (
 
 # ============================================================
 # 1. INPUT VIDEOS
-# Paths are derived from this file, so they do not depend on the current
-# working directory, Windows username, drive letter, or clone location.
+# Both modalities derive these paths from the shared experiment selection in
+# experiment_config.py.
 # ============================================================
 
-VISION_DIRECTORY = Path(__file__).resolve().parent
-SCRIPT_VS_DIRECTORY = VISION_DIRECTORY.parent
-PROJECT_DIRECTORY = SCRIPT_VS_DIRECTORY.parent
-DATA_DIRECTORY = PROJECT_DIRECTORY / "data"
-VIDEO_DIRECTORY = (
-    DATA_DIRECTORY
-    / "Exp_1"
-    / "Exp_1"
-    / "Exp_1_Videos_u_Fotos"
-)
-
-NOMINAL_VIDEO_PATHS = [
-    VIDEO_DIRECTORY / "i6_pick_place.MP4",
-    VIDEO_DIRECTORY / "i7_pick_place.MP4",
-]
-
-TEST_VIDEO_PATH = VIDEO_DIRECTORY / "i11_pick_place.MP4"
+NOMINAL_VIDEO_PATHS = nominal_video_paths()
+TEST_VIDEO_PATH = test_video_path()
 
 
 # ============================================================
@@ -78,7 +71,6 @@ THRESHOLD_FLOOR_QUANTILE = 0.20
 # 4. OUTPUT PATHS
 # ============================================================
 
-OUTPUT_DIRECTORY = SCRIPT_VS_DIRECTORY / "outputs"
 THRESHOLD_CSV = OUTPUT_DIRECTORY / "adaptive_visual_threshold.csv"
 CALIBRATION_CSV = OUTPUT_DIRECTORY / "adaptive_visual_calibration.csv"
 TEST_RESULT_CSV = OUTPUT_DIRECTORY / "vision_test_results.csv"
@@ -110,6 +102,7 @@ def main() -> None:
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
     check_input_paths()
 
+    print_experiment_summary()
     print(f"Project directory: {PROJECT_DIRECTORY}")
     print(f"Video directory: {VIDEO_DIRECTORY}")
     print(f"Output directory: {OUTPUT_DIRECTORY}")

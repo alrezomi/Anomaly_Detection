@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from dinov2_features import DINOv2FeatureExtractor, iter_video_frames
+from .dinov2_features import DINOv2FeatureExtractor, iter_video_frames
 
 
 NominalItem = dict[str, Any]

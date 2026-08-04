@@ -10,13 +10,13 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from anomaly_detection import (
+from .anomaly_detection import (
     NominalItem,
     add_progress_to_nominal_memory,
     compare_frame_to_nominal_memory,
     threshold_for_progress,
 )
-from dinov2_features import DINOv2FeatureExtractor, iter_video_frames
+from .dinov2_features import DINOv2FeatureExtractor, iter_video_frames
 
 
 def show_attention_map(
