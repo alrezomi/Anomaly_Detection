@@ -32,6 +32,12 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--preview-only", action="store_true")
     parser.add_argument("--max-preview-frames", type=int)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=run_vision_test.OUTPUT_DIRECTORY,
+        help="Host/container output directory for videos and CSV files.",
+    )
     parser.add_argument("--stage-topic", default="/recording_stage")
     parser.add_argument("--stage-count", type=int, default=3)
     parser.add_argument(
@@ -44,7 +50,8 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     arguments = parse_arguments()
-    output_directory = run_vision_test.OUTPUT_DIRECTORY
+    output_directory = arguments.output_dir.resolve()
+    run_vision_test.OUTPUT_DIRECTORY = output_directory
     output_directory.mkdir(parents=True, exist_ok=True)
 
     for topic in arguments.camera_topic:

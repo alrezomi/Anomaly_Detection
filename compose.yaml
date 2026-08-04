@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: alrezomi-anomaly-detection:local
+    image: anomaly-detection:local
     init: true
     shm_size: "2gb"
     volumes:

@@ -144,6 +144,30 @@ Each viewpoint deliberately gets its own nominal memory, thresholds, CSVs,
 and heatmap video. Do not pool different viewpoints into one DINO memory:
 camera-position differences would then be confused with process anomalies.
 
+The rosbag input selection is made directly in this command:
+
+- Repeat `--nominal-bag PATH` for every successful training recording.
+- Set `--test-bag PATH` to the recording being evaluated.
+- Repeat `--camera-topic TOPIC` for every selected camera viewpoint.
+- Set `--output-dir PATH` when outputs should go somewhere other than the
+  default `outputs` directory.
+
+For example, inside Docker the mounted data and output paths are:
+
+```bash
+docker compose -p anomaly-detection run --rm \
+  --entrypoint python pipeline run_rosbag_vision.py \
+  --nominal-bag /workspace/AD/data/normal_run_01 \
+  --nominal-bag /workspace/AD/data/normal_run_02 \
+  --test-bag /workspace/AD/data/test_run_01 \
+  --camera-topic /flange_camera/cam33/color/image_raw \
+  --output-dir /workspace/AD/Script_VS/outputs
+```
+
+For the older MP4/MCAP dataset, edit nominal/test IDs and paths in
+`experiment_config.py`; its shared `OUTPUT_DIRECTORY` controls those legacy
+pipeline outputs.
+
 ### Select time-series topics
 
 Any supported pose, joint-state, or wrench topic can be exported independently:
@@ -237,7 +261,7 @@ displayed, but calculations, CSV output, and annotated videos still work.
 Run from the `Script_VS` directory:
 
 ```powershell
-docker compose -p alrezomi-ad build
+docker compose -p anomaly-detection build
 ```
 
 The default image installs CPU PyTorch and works without an NVIDIA GPU. Later
@@ -248,14 +272,14 @@ builds reuse Docker's cache when dependencies have not changed.
 Both sections:
 
 ```powershell
-docker compose -p alrezomi-ad run --rm pipeline
+docker compose -p anomaly-detection run --rm pipeline
 ```
 
 Only vision or time series:
 
 ```powershell
-docker compose -p alrezomi-ad run --rm pipeline vision
-docker compose -p alrezomi-ad run --rm pipeline time-series
+docker compose -p anomaly-detection run --rm pipeline vision
+docker compose -p anomaly-detection run --rm pipeline time-series
 ```
 
 The Hugging Face model cache is stored in a Docker volume, so DINOv2 is not
