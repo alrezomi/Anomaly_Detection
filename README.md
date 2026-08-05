@@ -250,8 +250,9 @@ pipeline.
 ## Run with Docker
 
 Docker provides the same Linux, Python, PyTorch, and package environment on
-Windows and Ubuntu. The large `data` directory is mounted read-only and is not
-copied into the image. Generated files are mounted back to `Script_VS/outputs`.
+Windows and Ubuntu. The large data directory is mounted read-only and is not
+copied into the image. Generated files are written to the host output directory
+selected in `.env`.
 
 The Docker container is headless. Native Matplotlib windows are therefore not
 displayed, but calculations, CSV output, and annotated videos still work.
@@ -260,12 +261,11 @@ displayed, but calculations, CSV output, and annotated videos still work.
 
 Run from the cloned `anomaly_detection` repository directory:
 
-Create local configuration files first. They are ignored by Git, so each
-computer can use its own paths and experiment selection:
+Create the local host-path file first. It is ignored by Git, so each computer
+can use its own paths:
 
 ```bash
 cp .env.example .env
-cp pipeline_config.example.json pipeline_config.json
 ```
 
 Edit `.env` to configure host filesystem paths only:
@@ -281,15 +281,33 @@ Relative paths are resolved from the folder containing `compose.yaml`.
 Absolute paths are also supported. Only the left/host paths change between
 computers; the container always sees them as `/data` and `/outputs`.
 
+Before selecting nominal and test bags, build the image and scan all recordings:
+
+```bash
+docker compose build
+docker compose run --rm bag-labels
+```
+
+This recursively discovers every ROS 2 bag underneath `ANOMALY_DATA_DIR`;
+timestamp names such as `bag_20260730_094554` require no code changes. Review
+`dataset_manifest.csv` inside `ANOMALY_OUTPUT_DIR` to see each bag's `normal`,
+`fail`, or `unknown` label.
+
+Only after reviewing those labels, create the experiment configuration:
+
+```bash
+cp pipeline_config.example.json pipeline_config.json
+```
+
 Edit `pipeline_config.json` to select the experiment:
 
 ```json
 {
   "nominal_bags": [
-    "/data/normal_run_01",
-    "/data/normal_run_02"
+    "/data/bag_20260730_094554",
+    "/data/bag_20260730_094800"
   ],
-  "test_bag": "/data/test_run_01",
+  "test_bag": "/data/bag_20260730_110856",
   "camera_topics": [
     "/flange_camera/cam33/color/image_raw"
   ],
@@ -304,12 +322,6 @@ Edit `pipeline_config.json` to select the experiment:
 
 The bag paths above are container paths underneath the host data folder from
 `.env`. The output subfolder is created underneath the host output folder.
-
-Build the image:
-
-```powershell
-docker compose -p anomaly-detection build
-```
 
 The default image installs CPU PyTorch and works without an NVIDIA GPU. Later
 builds reuse Docker's cache when dependencies have not changed.

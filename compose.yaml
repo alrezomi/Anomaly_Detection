@@ -12,7 +12,6 @@ x-pipeline-common: &pipeline-common
     # Host paths are configured in the local .env file.
     - ${ANOMALY_DATA_DIR:-../data}:/data:ro
     - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
-    - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
     - huggingface-cache:/cache/huggingface
 
 services:
@@ -27,6 +26,11 @@ services:
     <<: *pipeline-common
     entrypoint: ["python", "run_rosbag_vision.py"]
     command: ["--config", "/config/pipeline_config.json"]
+    volumes:
+      - ${ANOMALY_DATA_DIR:-../data}:/data:ro
+      - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
+      - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
+      - huggingface-cache:/cache/huggingface
 
   # Generate /outputs/dataset_manifest.csv from recorded stage labels.
   bag-labels:
