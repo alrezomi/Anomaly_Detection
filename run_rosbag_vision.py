@@ -7,7 +7,11 @@ import json
 from pathlib import Path
 import re
 
-from rosbag_io import RosbagImageSource, export_model_input_video
+from rosbag_io import (
+    RosbagImageSource,
+    export_model_input_video,
+    resolve_bag_path,
+)
 from vision_dinov2 import run_vision_test
 
 
@@ -103,6 +107,21 @@ def main() -> None:
     output_directory = Path(output_value).resolve()
     run_vision_test.OUTPUT_DIRECTORY = output_directory
     output_directory.mkdir(parents=True, exist_ok=True)
+
+    paths_to_validate = [test_bag]
+    if not preview_only:
+        paths_to_validate.extend(nominal_bags)
+    invalid_paths: list[str] = []
+    for path in paths_to_validate:
+        try:
+            resolve_bag_path(path)
+        except (FileNotFoundError, ValueError) as error:
+            invalid_paths.append(f"  - {path}: {error}")
+    if invalid_paths:
+        raise FileNotFoundError(
+            "Invalid ROS bag paths in pipeline_config.json:\n"
+            + "\n".join(invalid_paths)
+        )
 
     for topic in camera_topics:
         name = _slug(topic)

@@ -81,7 +81,7 @@ OUTPUT_VIDEO = (
 
 
 def check_input_paths() -> None:
-    """Stop early when one of the input-video paths is incorrect."""
+    """Stop early when one of the configured vision sources is incorrect."""
     missing_paths = [
         path
         for path in [*NOMINAL_VIDEO_PATHS, TEST_VIDEO_PATH]
@@ -93,13 +93,20 @@ def check_input_paths() -> None:
     ]
 
     if missing_paths:
-        missing_text = "\n".join(f"  - {path}" for path in missing_paths)
+        missing_text = "\n".join(
+            (
+                f"  - bag={path.bag_path}, topic={path.topic}"
+                if isinstance(path, RosbagImageSource)
+                else f"  - video={path}"
+            )
+            for path in missing_paths
+        )
         raise FileNotFoundError(
             "The following vision sources were not found:\n"
             f"{missing_text}\n\n"
-            f"Expected video directory:\n  {VIDEO_DIRECTORY}\n\n"
-            "Add the videos there or update VIDEO_DIRECTORY in "
-            "run_vision_test.py."
+            "For rosbag inputs, verify the directory name under /data and "
+            "ensure it contains metadata.yaml. For legacy video inputs, "
+            "verify experiment_config.py."
         )
 
 
@@ -107,9 +114,17 @@ def main() -> None:
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
     check_input_paths()
 
-    print_experiment_summary()
+    using_rosbag = isinstance(TEST_VIDEO_PATH, RosbagImageSource)
+    if not using_rosbag:
+        print_experiment_summary()
     print(f"Project directory: {PROJECT_DIRECTORY}")
-    print(f"Video directory: {VIDEO_DIRECTORY}")
+    if using_rosbag:
+        print("Vision input mode: ROS 2 bag image topic")
+        print(f"Nominal sources: {len(NOMINAL_VIDEO_PATHS)}")
+        print(f"Test source: {TEST_VIDEO_PATH.bag_path}")
+        print(f"Camera topic: {TEST_VIDEO_PATH.topic}")
+    else:
+        print(f"Video directory: {VIDEO_DIRECTORY}")
     print(f"Output directory: {OUTPUT_DIRECTORY}")
 
     # --------------------------------------------------------
