@@ -275,6 +275,7 @@ ANOMALY_DATA_DIR=../data
 ANOMALY_OUTPUT_DIR=./outputs
 PIPELINE_CONFIG_FILE=./pipeline_config.json
 COMPOSE_PROJECT_NAME=anomaly-detection
+STAGE_STARTUP_IGNORE_SEC=0.1
 ```
 
 Relative paths are resolved from the folder containing `compose.yaml`.

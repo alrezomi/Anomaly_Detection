@@ -43,7 +43,7 @@ services:
       - --details-output
       - /outputs/dataset_labels_details.csv
       - --startup-ignore-sec
-      - "0.1"
+      - ${STAGE_STARTUP_IGNORE_SEC:-0.1}
       - --recursive
 
 volumes:
