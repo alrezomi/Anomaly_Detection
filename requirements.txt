@@ -1,4 +1,4 @@
-# PyTorch is provided by the CUDA-capable base image in Dockerfile.
+# Matching PyTorch and TorchVision wheels are installed by Dockerfile.
 transformers==5.14.1
 opencv-python-headless==5.0.0.93
 numpy==2.4.4
@@ -7,4 +7,3 @@ matplotlib==3.11.1
 pillow==12.2.0
 scikit-learn==1.9.0
 rosbags==0.11.3
-
