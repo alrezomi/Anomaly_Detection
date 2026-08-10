@@ -230,7 +230,7 @@ Generate or refresh one label for every bag with:
 
 ```powershell
 .\.venv\Scripts\python.exe .\build_dataset_manifest.py `
-  ..\data --output dataset_manifest.csv
+  ..\data --output dataset_labels.csv --startup-ignore-sec 0.1
 ```
 
 This scans every immediate ROS bag directory automatically. Add `--recursive`
@@ -290,7 +290,7 @@ docker compose run --rm bag-labels
 
 This recursively discovers every ROS 2 bag underneath `ANOMALY_DATA_DIR`;
 timestamp names such as `bag_20260730_094554` require no code changes. Review
-`dataset_manifest.csv` inside `ANOMALY_OUTPUT_DIR` to see each bag's `normal`,
+`dataset_labels.csv` inside `ANOMALY_OUTPUT_DIR` to see each bag's `normal`,
 `fail`, or `unknown` label.
 
 Only after reviewing those labels, create the experiment configuration:
@@ -341,8 +341,10 @@ data directory:
 docker compose run --rm bag-labels
 ```
 
-The label file is written to `dataset_manifest.csv` in the configured host
-output directory.
+The clean label file is written to `dataset_labels.csv` in the configured host
+output directory. `dataset_labels_details.csv` shows timestamped ignored and
+used markers for debugging. By default, stage messages earlier than 0.1 seconds
+are treated as cached startup history and do not affect the label.
 
 ### Run without GPU
 

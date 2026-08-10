@@ -32,14 +32,18 @@ services:
       - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
       - huggingface-cache:/cache/huggingface
 
-  # Generate /outputs/dataset_manifest.csv from recorded stage labels.
+  # Generate clean labels plus timestamp diagnostics from recorded stages.
   bag-labels:
     <<: *pipeline-common
     entrypoint: ["python", "build_dataset_manifest.py"]
     command:
       - /data
       - --output
-      - /outputs/dataset_manifest.csv
+      - /outputs/dataset_labels.csv
+      - --details-output
+      - /outputs/dataset_labels_details.csv
+      - --startup-ignore-sec
+      - "0.1"
       - --recursive
 
 volumes:
