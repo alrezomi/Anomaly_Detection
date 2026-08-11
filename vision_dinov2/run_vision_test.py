@@ -16,6 +16,7 @@ from .anomaly_detection import (
     run_video_test,
 )
 from .dinov2_features import DINOv2FeatureExtractor
+from .nominal_cache import load_nominal_cache, save_nominal_cache
 from .threshold import (
     calibrate_adaptive_threshold_leave_one_video_out,
 )
@@ -78,6 +79,44 @@ TEST_RESULT_CSV = OUTPUT_DIRECTORY / "vision_test_results.csv"
 OUTPUT_VIDEO = (
     OUTPUT_DIRECTORY / "adaptive_cls_attention_heatmap_output.mp4"
 )
+NOMINAL_CACHE_DIRECTORY: Path | None = None
+REBUILD_NOMINAL_CACHE = False
+
+
+def nominal_cache_signature() -> dict:
+    """Describe every setting that changes reusable nominal results."""
+    sources = []
+    for source in NOMINAL_VIDEO_PATHS:
+        if isinstance(source, RosbagImageSource):
+            sources.append(
+                {
+                    "bag_path": str(source.bag_path),
+                    "topic": source.topic,
+                    "stage_topic": source.stage_topic,
+                    "stage_count": source.stage_count,
+                }
+            )
+        else:
+            sources.append({"video_path": str(Path(source).resolve())})
+    return {
+        "format_version": 1,
+        "sources": sources,
+        "model_name": MODEL_NAME,
+        "dino_input_size": DINO_INPUT_SIZE,
+        "sample_fps": SAMPLE_FPS,
+        "start_sec": START_SEC,
+        "end_sec": END_SEC,
+        "max_nominal_frames_per_video": MAX_NOMINAL_FRAMES_PER_VIDEO,
+        "top_k_cls": TOP_K_CLS,
+        "attention_power": ATTENTION_POWER,
+        "min_weight": MIN_WEIGHT,
+        "threshold_quantile": THRESHOLD_QUANTILE,
+        "threshold_margin": THRESHOLD_MARGIN,
+        "threshold_bins": THRESHOLD_BINS,
+        "min_points_per_bin": MIN_POINTS_PER_BIN,
+        "threshold_smooth_window": THRESHOLD_SMOOTH_WINDOW,
+        "threshold_floor_quantile": THRESHOLD_FLOOR_QUANTILE,
+    }
 
 
 def check_input_paths() -> None:
@@ -135,38 +174,56 @@ def main() -> None:
         input_size=DINO_INPUT_SIZE,
     )
 
-    # --------------------------------------------------------
-    # Step 2: Build nominal memory
-    # --------------------------------------------------------
-    nominal_memory, grid_size = build_nominal_video_memory(
-        extractor=extractor,
-        nominal_video_paths=NOMINAL_VIDEO_PATHS,
-        sample_fps=SAMPLE_FPS,
-        start_sec=START_SEC,
-        end_sec=END_SEC,
-        max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO,
-    )
+    signature = nominal_cache_signature()
+    cached = None
+    if NOMINAL_CACHE_DIRECTORY is not None and not REBUILD_NOMINAL_CACHE:
+        cached = load_nominal_cache(NOMINAL_CACHE_DIRECTORY, signature)
+
+    if cached is not None:
+        nominal_memory, grid_size, adaptive_threshold_df, calibration_df = cached
+    else:
+        # ----------------------------------------------------
+        # Step 2: Build nominal memory
+        # ----------------------------------------------------
+        nominal_memory, grid_size = build_nominal_video_memory(
+            extractor=extractor,
+            nominal_video_paths=NOMINAL_VIDEO_PATHS,
+            sample_fps=SAMPLE_FPS,
+            start_sec=START_SEC,
+            end_sec=END_SEC,
+            max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO,
+        )
+
+        # ----------------------------------------------------
+        # Step 3: Calibrate the adaptive threshold
+        # ----------------------------------------------------
+        (
+            adaptive_threshold_df,
+            calibration_df,
+        ) = calibrate_adaptive_threshold_leave_one_video_out(
+            nominal_memory=nominal_memory,
+            quantile=THRESHOLD_QUANTILE,
+            margin=THRESHOLD_MARGIN,
+            top_k_cls=TOP_K_CLS,
+            attention_power=ATTENTION_POWER,
+            min_weight=MIN_WEIGHT,
+            n_bins=THRESHOLD_BINS,
+            min_points_per_bin=MIN_POINTS_PER_BIN,
+            smooth_window=THRESHOLD_SMOOTH_WINDOW,
+            threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE,
+        )
+        if NOMINAL_CACHE_DIRECTORY is not None:
+            save_nominal_cache(
+                NOMINAL_CACHE_DIRECTORY,
+                nominal_memory,
+                grid_size,
+                adaptive_threshold_df,
+                calibration_df,
+                signature,
+            )
+            print(f"Saved reusable nominal cache: {NOMINAL_CACHE_DIRECTORY}")
 
     print("Nominal grid size:", grid_size)
-
-    # --------------------------------------------------------
-    # Step 3: Calibrate the adaptive threshold
-    # --------------------------------------------------------
-    (
-        adaptive_threshold_df,
-        calibration_df,
-    ) = calibrate_adaptive_threshold_leave_one_video_out(
-        nominal_memory=nominal_memory,
-        quantile=THRESHOLD_QUANTILE,
-        margin=THRESHOLD_MARGIN,
-        top_k_cls=TOP_K_CLS,
-        attention_power=ATTENTION_POWER,
-        min_weight=MIN_WEIGHT,
-        n_bins=THRESHOLD_BINS,
-        min_points_per_bin=MIN_POINTS_PER_BIN,
-        smooth_window=THRESHOLD_SMOOTH_WINDOW,
-        threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE,
-    )
 
     adaptive_threshold_df.to_csv(THRESHOLD_CSV, index=False)
     calibration_df.to_csv(CALIBRATION_CSV, index=False)

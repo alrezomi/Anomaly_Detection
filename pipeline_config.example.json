@@ -8,6 +8,8 @@
     "/flange_camera/cam33/color/image_raw"
   ],
   "output_dir": "/outputs/experiment_01",
+  "nominal_cache_dir": "/outputs/nominal_cache",
+  "rebuild_nominal_cache": false,
   "stage_topic": "/recording_stage",
   "stage_count": 3,
   "ignore_recorded_stages": false,

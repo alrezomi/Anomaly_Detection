@@ -44,6 +44,10 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help="Host/container output directory for videos and CSV files.",
     )
+    parser.add_argument("--nominal-cache-dir", type=Path)
+    parser.add_argument(
+        "--rebuild-nominal-cache", action="store_true", default=None
+    )
     parser.add_argument("--stage-topic")
     parser.add_argument("--stage-count", type=int)
     parser.add_argument(
@@ -71,6 +75,16 @@ def main() -> None:
         arguments.output_dir
         or configuration.get("output_dir")
         or run_vision_test.OUTPUT_DIRECTORY
+    )
+    cache_value = (
+        arguments.nominal_cache_dir
+        or configuration.get("nominal_cache_dir")
+        or (Path(output_value).parent / "nominal_cache")
+    )
+    rebuild_nominal_cache = (
+        arguments.rebuild_nominal_cache
+        if arguments.rebuild_nominal_cache is not None
+        else bool(configuration.get("rebuild_nominal_cache", False))
     )
     preview_only = (
         arguments.preview_only
@@ -170,6 +184,8 @@ def main() -> None:
         run_vision_test.CALIBRATION_CSV = output_directory / f"{name}_calibration.csv"
         run_vision_test.TEST_RESULT_CSV = output_directory / f"{name}_results.csv"
         run_vision_test.OUTPUT_VIDEO = output_directory / f"{name}_heatmap.mp4"
+        run_vision_test.NOMINAL_CACHE_DIRECTORY = Path(cache_value) / name
+        run_vision_test.REBUILD_NOMINAL_CACHE = rebuild_nominal_cache
         print(f"\nRunning independent camera detector: {topic}")
         run_vision_test.main()
 

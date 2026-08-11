@@ -115,6 +115,8 @@ def add_progress_to_nominal_memory(
     """
     if not nominal_memory:
         raise ValueError("Nominal memory is empty.")
+    if all(bool(item.get("_progress_locked")) for item in nominal_memory):
+        return nominal_memory
 
     max_frame_by_video: dict[int, int] = {}
     items_by_video: dict[int, list[NominalItem]] = {}

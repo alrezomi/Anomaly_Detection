@@ -313,6 +313,8 @@ Edit `pipeline_config.json` to select the experiment:
     "/flange_camera/cam33/color/image_raw"
   ],
   "output_dir": "/outputs/experiment_01",
+  "nominal_cache_dir": "/outputs/nominal_cache",
+  "rebuild_nominal_cache": false,
   "stage_topic": "/recording_stage",
   "stage_count": 3,
   "ignore_recorded_stages": false,
@@ -323,6 +325,20 @@ Edit `pipeline_config.json` to select the experiment:
 
 The bag paths above are container paths underneath the host data folder from
 `.env`. The output subfolder is created underneath the host output folder.
+
+### Reuse nominal DINOv2 memory
+
+The first full run saves one reusable cache per camera underneath
+`nominal_cache_dir`. Later runs with a different `test_bag` and `output_dir`
+load that cache and skip nominal feature extraction and adaptive-threshold
+calibration. Keep `rebuild_nominal_cache` set to `false` for normal reuse.
+
+The cache signature includes nominal bag paths, camera topic, model and input
+size, sampling, stage configuration, and threshold parameters. If any of those
+change, the runner automatically rejects the old cache and rebuilds it. Set
+`rebuild_nominal_cache` to `true` to force a rebuild manually, then return it
+to `false` afterward. Changing only the test bag or test output directory does
+not invalidate the nominal cache.
 
 The default image installs CPU PyTorch and works without an NVIDIA GPU. Later
 builds reuse Docker's cache when dependencies have not changed.
