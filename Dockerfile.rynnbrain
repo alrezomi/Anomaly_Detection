@@ -1,5 +1,5 @@
 # Initial x86_64 CUDA test image. Jetson requires a JetPack-compatible base.
-ARG RYNNBRAIN_BASE_IMAGE=pytorch/pytorch:2.11.0-cuda12.6-cudnn9-runtime
+ARG RYNNBRAIN_BASE_IMAGE=nvcr.io/nvidia/pytorch:25.08-py3
 FROM ${RYNNBRAIN_BASE_IMAGE}
 
 ENV PYTHONUNBUFFERED=1 \

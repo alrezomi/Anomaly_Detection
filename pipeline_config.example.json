@@ -20,11 +20,7 @@
     "camera_topics": [
       "/flange_camera/cam33/color/image_raw"
     ],
-    "memory_camera_topics": [
-      "/flange_camera/cam01/color/image_raw",
-      "/flange_camera/cam33/color/image_raw",
-      "/flange_camera/cam45/color/image_raw"
-    ],
+    "task_description": "The robot picks up the object at location A, transports it without dropping or losing it, and places it at location B.",
     "input_modes": ["raw"],
     "num_frames": 4,
     "ground_truth_label": "fail",

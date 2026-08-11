@@ -156,15 +156,24 @@ def main() -> None:
     generation = dict(vlm.get("generation", {}))
     model = RynnBrainModel(vlm["model"])
 
-    memory_path = Path(vlm["task_memory_path"])
+    configured_description = str(vlm.get("task_description", "")).strip()
+    memory_path = Path(vlm.get("task_memory_path", "/outputs/rynnbrain_memories/task.json"))
     rebuild_memory = bool(vlm.get("rebuild_task_memory", False))
-    if memory_path.is_file() and not rebuild_memory:
+    if configured_description:
+        nominal_description = configured_description
+        print("Using task_description from pipeline_config.json")
+    elif memory_path.is_file() and not rebuild_memory:
         memory = json.loads(memory_path.read_text(encoding="utf-8"))
         nominal_description = memory["nominal_description"]
         print(f"Loaded nominal task description: {memory_path}")
     else:
         descriptions = []
-        for bag_value in config["nominal_bags"]:
+        reference_bags = list(vlm.get("reference_bags", config["nominal_bags"][:1]))
+        if not reference_bags:
+            raise ValueError(
+                "Set rynnbrain.task_description or provide at least one reference bag"
+            )
+        for bag_value in reference_bags:
             inputs, _ = _raw_inputs(Path(bag_value), memory_topics, frame_count)
             descriptions.append(model.generate(inputs, DESCRIPTION_PROMPT, generation))
         if len(descriptions) == 1:
@@ -181,7 +190,7 @@ def main() -> None:
                 {
                     "nominal_description": nominal_description,
                     "source_descriptions": descriptions,
-                    "nominal_bags": config["nominal_bags"],
+                    "reference_bags": reference_bags,
                     "camera_topics": memory_topics,
                     "num_frames": frame_count,
                 },

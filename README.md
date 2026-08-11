@@ -396,10 +396,10 @@ vision `output_dir`. It does not rerun DINO or decode the test rosbag. Set
 The configuration selects the checkpoint, number of uniformly sampled time
 steps, and input modes.
 Supported modes are `raw`, `heatmap`, and paired `raw_heatmap`.
-`rynnbrain.camera_topics` selects the test viewpoints sent to the VLM, while
-`rynnbrain.memory_camera_topics` independently selects viewpoints used when
-building its nominal task memory. Neither setting changes the top-level DINO
-camera topics.
+`rynnbrain.camera_topics` selects the test viewpoints sent to the VLM and does
+not change the top-level DINO camera topics. Set `rynnbrain.task_description`
+to the expected behavior in plain language; this avoids processing nominal
+videos with the VLM.
 The total visual load is approximately `num_frames x number_of_cameras`, or
 twice that for paired raw/heatmap input.
 
@@ -410,15 +410,14 @@ docker compose build rynnbrain
 docker compose run --rm rynnbrain
 ```
 
-If no saved task memory exists, the first run samples the configured nominal
-bags to create the canonical task description. This does not run DINO. Later
-tests use only the generated test videos and reuse that memory.
-Later test bags reuse it unless `rebuild_task_memory` is set to `true`.
+If `task_description` is omitted, RynnBrain can optionally generate one from
+`reference_bags` (one bag by default) and save it at `task_memory_path`. This
+does not run DINO. A saved description is reused unless
+`rebuild_task_memory` is set to `true`.
 Selected model inputs, parsed decisions, confidence, full responses, and frame
 timestamps are saved under `output_dir`. Each input mode also contains
 `vlm_input_storyboard.jpg`, showing the exact images and order sent to the VLM.
 
-`Dockerfile.rynnbrain` is intended for an x86_64 CUDA workstation. NVIDIA
-Jetson requires a base image matching its exact JetPack/L4T version; determine
-that version and device memory before building a Jetson image. The Python
-pipeline and JSON configuration remain the same across both images.
+The default RynnBrain base is NVIDIA's PyTorch 25.08 container for Jetson AGX
+Thor. It can be overridden with `RYNNBRAIN_BASE_IMAGE` when running on a
+different NVIDIA platform.

@@ -53,7 +53,7 @@ services:
       context: .
       dockerfile: Dockerfile.rynnbrain
       args:
-        RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-pytorch/pytorch:2.11.0-cuda12.6-cudnn9-runtime}
+        RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.08-py3}
     image: anomaly-detection-rynnbrain:local
     init: true
     shm_size: "4gb"
