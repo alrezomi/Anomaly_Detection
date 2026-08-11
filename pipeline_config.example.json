@@ -14,5 +14,33 @@
   "stage_count": 3,
   "ignore_recorded_stages": false,
   "preview_only": false,
-  "max_preview_frames": null
+  "max_preview_frames": null,
+  "rynnbrain": {
+    "source": "generated_videos",
+    "input_modes": ["raw"],
+    "num_frames": 4,
+    "ground_truth_label": "fail",
+    "task_memory_path": "/outputs/rynnbrain_memories/pick_place.json",
+    "rebuild_task_memory": false,
+    "output_dir": "/outputs/experiment_01/rynnbrain",
+    "model": {
+      "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",
+      "dtype": "float16",
+      "device_map": "auto",
+      "input_device": "cuda",
+      "max_image_size": 640,
+      "trust_remote_code": true,
+      "max_memory": {
+        "0": "9GiB",
+        "cpu": "48GiB"
+      }
+    },
+    "generation": {
+      "max_new_tokens": 300,
+      "do_sample": false,
+      "repetition_penalty": 1.1,
+      "no_repeat_ngram_size": 6,
+      "enable_thinking": false
+    }
+  }
 }

@@ -380,3 +380,42 @@ docker compose -p anomaly-detection run --rm pipeline time-series
 
 The Hugging Face model cache is stored in a Docker volume, so DINOv2 is not
 downloaded again for every run.
+
+## RynnBrain VLM experiments
+
+RynnBrain is an optional third pipeline with its own GPU image and dependencies;
+it does not modify the DINO/time-series container. It reuses the existing
+`pipeline_config.json`; copy the `rynnbrain` section from
+`pipeline_config.example.json` into your local configuration.
+
+By default, `source` is `generated_videos`, so RynnBrain reads the existing
+`<camera>_model_input.mp4` and `<camera>_heatmap.mp4` files in the configured
+vision `output_dir`. It does not rerun DINO or decode the test rosbag. Set
+`source` to `rosbag` only when direct bag sampling is specifically wanted.
+
+The configuration selects the checkpoint, number of uniformly sampled time
+steps, and input modes.
+Supported modes are `raw`, `heatmap`, and paired `raw_heatmap`. Camera topics
+reuse the existing top-level `camera_topics` list, so one or more viewpoints can
+be selected without code changes.
+The total visual load is approximately `num_frames x number_of_cameras`, or
+twice that for paired raw/heatmap input.
+
+Build and run the initial x86 CUDA test service with:
+
+```bash
+docker compose -f compose.rynnbrain.yaml build
+docker compose -f compose.rynnbrain.yaml run --rm rynnbrain
+```
+
+If no saved task memory exists, the first run samples the configured nominal
+bags to create the canonical task description. This does not run DINO. Later
+tests use only the generated test videos and reuse that memory.
+Later test bags reuse it unless `rebuild_task_memory` is set to `true`.
+Selected model inputs, parsed decisions, confidence, full responses, and frame
+timestamps are saved under `output_dir`.
+
+`Dockerfile.rynnbrain` is intended for an x86_64 CUDA workstation. NVIDIA
+Jetson requires a base image matching its exact JetPack/L4T version; determine
+that version and device memory before building a Jetson image. The Python
+pipeline and JSON configuration remain the same across both images.

@@ -213,6 +213,53 @@ def iter_rosbag_image_frames(
                 break
 
 
+def sample_rosbag_image_frames_uniform(
+    source: RosbagImageSource,
+    num_frames: int = 4,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+) -> list[tuple[int, float, Image.Image]]:
+    """Decode a fixed number of approximately time-uniform topic frames."""
+    if num_frames < 1:
+        raise ValueError("num_frames must be at least one.")
+    start_value = 0.0 if start_sec is None else float(start_sec)
+
+    with open_bag(source.bag_path) as reader:
+        connections = _connection_for_topic(reader, source.topic)
+        bag_start_ns = int(reader.start_time)
+        timestamps = [
+            (int(timestamp_ns) - bag_start_ns) / 1e9
+            for _, timestamp_ns, _ in reader.messages(connections=connections)
+        ]
+    eligible = [
+        index for index, value in enumerate(timestamps)
+        if value >= start_value and (end_sec is None or value <= end_sec)
+    ]
+    if not eligible:
+        raise ValueError(f"No eligible frames found for {source}.")
+    positions = np.linspace(0, len(eligible) - 1, min(num_frames, len(eligible)))
+    selected_indices = {eligible[int(round(position))] for position in positions}
+
+    sampled: list[tuple[int, float, Image.Image]] = []
+    with open_bag(source.bag_path) as reader:
+        connections = _connection_for_topic(reader, source.topic)
+        bag_start_ns = int(reader.start_time)
+        for message_index, (connection, timestamp_ns, raw_data) in enumerate(
+            reader.messages(connections=connections)
+        ):
+            if message_index not in selected_indices:
+                continue
+            message = reader.deserialize(raw_data, connection.msgtype)
+            sampled.append(
+                (
+                    message_index,
+                    (int(timestamp_ns) - bag_start_ns) / 1e9,
+                    decode_image_message(message, connection.msgtype),
+                )
+            )
+    return sampled
+
+
 def export_model_input_video(
     source: RosbagImageSource,
     output_path: str | Path,

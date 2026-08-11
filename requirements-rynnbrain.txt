@@ -1,0 +1,7 @@
+transformers==4.57.1
+accelerate==1.11.0
+opencv-python-headless==5.0.0.93
+numpy==2.4.4
+pandas==3.0.5
+pillow==12.2.0
+rosbags==0.11.3

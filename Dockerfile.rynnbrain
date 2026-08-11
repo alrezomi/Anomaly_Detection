@@ -1,0 +1,19 @@
+# Initial x86_64 CUDA test image. Jetson requires a JetPack-compatible base.
+FROM pytorch/pytorch:2.11.0-cuda12.6-cudnn9-runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/cache/huggingface
+
+WORKDIR /workspace/anomaly_detection
+
+COPY requirements-rynnbrain.txt ./requirements-rynnbrain.txt
+RUN python -m pip install --no-cache-dir \
+    torchvision==0.26.0 \
+    --index-url https://download.pytorch.org/whl/cu126 \
+    && python -m pip install --no-cache-dir -r requirements-rynnbrain.txt
+
+COPY . .
+
+ENTRYPOINT ["python", "-m", "rynnbrain_vlm.run"]
+CMD ["--config", "/config/pipeline_config.json"]
