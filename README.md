@@ -395,17 +395,19 @@ vision `output_dir`. It does not rerun DINO or decode the test rosbag. Set
 
 The configuration selects the checkpoint, number of uniformly sampled time
 steps, and input modes.
-Supported modes are `raw`, `heatmap`, and paired `raw_heatmap`. Camera topics
-reuse the existing top-level `camera_topics` list, so one or more viewpoints can
-be selected without code changes.
+Supported modes are `raw`, `heatmap`, and paired `raw_heatmap`.
+`rynnbrain.camera_topics` selects the test viewpoints sent to the VLM, while
+`rynnbrain.memory_camera_topics` independently selects viewpoints used when
+building its nominal task memory. Neither setting changes the top-level DINO
+camera topics.
 The total visual load is approximately `num_frames x number_of_cameras`, or
 twice that for paired raw/heatmap input.
 
 Build and run the initial x86 CUDA test service with:
 
 ```bash
-docker compose -f compose.rynnbrain.yaml build
-docker compose -f compose.rynnbrain.yaml run --rm rynnbrain
+docker compose build rynnbrain
+docker compose run --rm rynnbrain
 ```
 
 If no saved task memory exists, the first run samples the configured nominal
@@ -413,7 +415,8 @@ bags to create the canonical task description. This does not run DINO. Later
 tests use only the generated test videos and reuse that memory.
 Later test bags reuse it unless `rebuild_task_memory` is set to `true`.
 Selected model inputs, parsed decisions, confidence, full responses, and frame
-timestamps are saved under `output_dir`.
+timestamps are saved under `output_dir`. Each input mode also contains
+`vlm_input_storyboard.jpg`, showing the exact images and order sent to the VLM.
 
 `Dockerfile.rynnbrain` is intended for an x86_64 CUDA workstation. NVIDIA
 Jetson requires a base image matching its exact JetPack/L4T version; determine

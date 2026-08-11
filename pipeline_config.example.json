@@ -17,6 +17,14 @@
   "max_preview_frames": null,
   "rynnbrain": {
     "source": "generated_videos",
+    "camera_topics": [
+      "/flange_camera/cam33/color/image_raw"
+    ],
+    "memory_camera_topics": [
+      "/flange_camera/cam01/color/image_raw",
+      "/flange_camera/cam33/color/image_raw",
+      "/flange_camera/cam45/color/image_raw"
+    ],
     "input_modes": ["raw"],
     "num_frames": 4,
     "ground_truth_label": "fail",

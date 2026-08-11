@@ -46,5 +46,25 @@ services:
       - ${STAGE_STARTUP_IGNORE_SEC:-0.1}
       - --recursive
 
+  # Optional RynnBrain VLM evaluator. It shares this Compose project but keeps
+  # its model dependencies isolated from the stable DINO/time-series image.
+  rynnbrain:
+    build:
+      context: .
+      dockerfile: Dockerfile.rynnbrain
+      args:
+        RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-pytorch/pytorch:2.11.0-cuda12.6-cudnn9-runtime}
+    image: anomaly-detection-rynnbrain:local
+    init: true
+    shm_size: "4gb"
+    gpus: all
+    volumes:
+      - ${ANOMALY_DATA_DIR:-../data}:/data:ro
+      - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
+      - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
+      - huggingface-cache:/cache/huggingface
+    entrypoint: ["python", "-m", "rynnbrain_vlm.run"]
+    command: ["--config", "/config/pipeline_config.json"]
+
 volumes:
   huggingface-cache:

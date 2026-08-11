@@ -11,7 +11,7 @@ from typing import Any
 import cv2
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
 from .model import RynnBrainModel
@@ -108,6 +108,26 @@ def _save_inputs(
     for index, (_, image) in enumerate(images):
         image.save(directory / f"{index:03d}.jpg", quality=92)
 
+    # One human-readable overview containing the exact images and ordering sent
+    # to the model. Individual full-resolution inputs remain beside it.
+    thumb_width, thumb_height = 320, 240
+    label_height = 46
+    columns = min(4, max(1, len(images)))
+    rows = (len(images) + columns - 1) // columns
+    sheet = Image.new(
+        "RGB", (columns * thumb_width, rows * (thumb_height + label_height)), "white"
+    )
+    draw = ImageDraw.Draw(sheet)
+    for index, (label, image) in enumerate(images):
+        column, row = index % columns, index // columns
+        preview = image.convert("RGB").copy()
+        preview.thumbnail((thumb_width, thumb_height))
+        x = column * thumb_width + (thumb_width - preview.width) // 2
+        y = row * (thumb_height + label_height)
+        sheet.paste(preview, (x, y))
+        draw.text((column * thumb_width + 5, y + thumb_height + 4), label[:55], fill="black")
+    sheet.save(directory / "vlm_input_storyboard.jpg", quality=92)
+
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -126,7 +146,8 @@ def main() -> None:
         vlm.get("output_dir", vision_output_directory / "rynnbrain")
     )
     output_directory.mkdir(parents=True, exist_ok=True)
-    topics = list(config["camera_topics"])
+    topics = list(vlm.get("camera_topics", config["camera_topics"]))
+    memory_topics = list(vlm.get("memory_camera_topics", config["camera_topics"]))
     frame_count = int(vlm.get("num_frames", 4))
     if not topics:
         raise ValueError("camera_topics must contain at least one rosbag image topic")
@@ -144,7 +165,7 @@ def main() -> None:
     else:
         descriptions = []
         for bag_value in config["nominal_bags"]:
-            inputs, _ = _raw_inputs(Path(bag_value), topics, frame_count)
+            inputs, _ = _raw_inputs(Path(bag_value), memory_topics, frame_count)
             descriptions.append(model.generate(inputs, DESCRIPTION_PROMPT, generation))
         if len(descriptions) == 1:
             nominal_description = descriptions[0]
@@ -161,7 +182,7 @@ def main() -> None:
                     "nominal_description": nominal_description,
                     "source_descriptions": descriptions,
                     "nominal_bags": config["nominal_bags"],
-                    "camera_topics": topics,
+                    "camera_topics": memory_topics,
                     "num_frames": frame_count,
                 },
                 indent=2,
