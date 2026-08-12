@@ -33,7 +33,18 @@ services:
       - huggingface-cache:/cache/huggingface
 
   vision-memory:
-    <<: *pipeline-common
+    build:
+      context: .
+      dockerfile: Dockerfile.rynnbrain
+      args:
+        RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.08-py3}
+    image: anomaly-detection-rynnbrain:local
+    init: true
+    shm_size: "4gb"
+    runtime: nvidia
+    environment:
+      ANOMALY_DATA_ROOT: /data
+      ANOMALY_OUTPUT_ROOT: /outputs
     entrypoint: ["python", "run_rosbag_vision.py"]
     command: ["--config", "/config/pipeline_config.json", "--mode", "build-memory"]
     volumes:
@@ -43,7 +54,18 @@ services:
       - huggingface-cache:/cache/huggingface
 
   vision-test:
-    <<: *pipeline-common
+    build:
+      context: .
+      dockerfile: Dockerfile.rynnbrain
+      args:
+        RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.08-py3}
+    image: anomaly-detection-rynnbrain:local
+    init: true
+    shm_size: "4gb"
+    runtime: nvidia
+    environment:
+      ANOMALY_DATA_ROOT: /data
+      ANOMALY_OUTPUT_ROOT: /outputs
     entrypoint: ["python", "run_rosbag_vision.py"]
     command: ["--config", "/config/pipeline_config.json", "--mode", "test"]
     volumes:
