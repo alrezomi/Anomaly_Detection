@@ -25,6 +25,8 @@
     "task_description": "The robot picks up the object at location A, transports it without dropping or losing it, and places it at location B.",
     "input_modes": ["raw"],
     "num_frames": 4,
+    "sampling_start_sec": 0.0,
+    "sampling_end_sec": null,
     "ground_truth_label": "fail",
     "task_memory_path": "/outputs/rynnbrain_memories/pick_place.json",
     "rebuild_task_memory": false,

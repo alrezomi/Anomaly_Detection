@@ -22,20 +22,44 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_").lower()
 
 
-def _video_frames(path: str | Path, count: int) -> list[Image.Image]:
+def _video_frames(
+    path: str | Path,
+    count: int,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+) -> tuple[list[Image.Image], list[dict[str, Any]]]:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
         raise FileNotFoundError(f"Could not open heatmap video: {path}")
     total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    indices = np.linspace(0, max(total - 1, 0), min(count, total)).round().astype(int)
+    if total < 1:
+        capture.release()
+        raise ValueError(f"Video contains no readable frames: {path}")
+    fps = float(capture.get(cv2.CAP_PROP_FPS)) or 1.0
+    first = max(0, min(total - 1, int(round(start_sec * fps))))
+    last = total - 1
+    if end_sec is not None:
+        last = max(first, min(last, int(round(end_sec * fps))))
+    available = max(0, last - first + 1)
+    indices = np.linspace(first, last, min(count, available)).round().astype(int)
     frames: list[Image.Image] = []
+    metadata: list[dict[str, Any]] = []
     for index in indices:
         capture.set(cv2.CAP_PROP_POS_FRAMES, int(index))
         success, bgr = capture.read()
         if success:
             frames.append(Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)))
+            metadata.append(
+                {
+                    "source_video": str(path),
+                    "frame_index": int(index),
+                    "timestamp_sec": float(index) / fps,
+                    "video_fps": fps,
+                    "video_frame_count": total,
+                }
+            )
     capture.release()
-    return frames
+    return frames, metadata
 
 
 def _raw_inputs(
@@ -64,25 +88,29 @@ def _raw_inputs(
 
 
 def _heatmap_inputs(
-    paths: dict[str, str], topics: list[str], frame_count: int
-) -> list[tuple[str, Image.Image]]:
+    paths: dict[str, str], topics: list[str], frame_count: int,
+    start_sec: float = 0.0, end_sec: float | None = None,
+) -> tuple[list[tuple[str, Image.Image]], list[dict[str, Any]]]:
     missing_topics = [topic for topic in topics if topic not in paths]
     if missing_topics:
         raise ValueError(
             "heatmap_video_paths is missing entries for: " + ", ".join(missing_topics)
         )
-    frames_by_topic = {
-        topic: _video_frames(paths[topic], frame_count) for topic in topics
+    sampled_by_topic = {
+        topic: _video_frames(paths[topic], frame_count, start_sec, end_sec)
+        for topic in topics
     }
     output: list[tuple[str, Image.Image]] = []
+    metadata: list[dict[str, Any]] = []
     for time_index in range(frame_count):
         for topic in topics:
-            frames = frames_by_topic[topic]
+            frames, topic_metadata = sampled_by_topic[topic]
             if time_index < len(frames):
                 output.append(
                     (f"Time {time_index + 1}, heatmap {_slug(topic)}:", frames[time_index])
                 )
-    return output
+                metadata.append({"topic": topic, **topic_metadata[time_index]})
+    return output, metadata
 
 
 def _parse_response(response: str) -> tuple[str, str]:
@@ -149,6 +177,9 @@ def main() -> None:
     topics = list(vlm.get("camera_topics", config["camera_topics"]))
     memory_topics = list(vlm.get("memory_camera_topics", config["camera_topics"]))
     frame_count = int(vlm.get("num_frames", 4))
+    sampling_start_sec = float(vlm.get("sampling_start_sec", 0.0))
+    sampling_end_sec = vlm.get("sampling_end_sec")
+    sampling_end_sec = float(sampling_end_sec) if sampling_end_sec is not None else None
     if not topics:
         raise ValueError("camera_topics must contain at least one rosbag image topic")
     if frame_count < 1:
@@ -219,16 +250,13 @@ def main() -> None:
     raw_video_paths.update(vlm.get("raw_video_paths", {}))
     heatmap_paths.update(vlm.get("heatmap_video_paths", {}))
     if source == "generated_videos":
-        raw_inputs = _heatmap_inputs(raw_video_paths, topics, frame_count)
+        raw_inputs, frame_metadata = _heatmap_inputs(
+            raw_video_paths, topics, frame_count, sampling_start_sec, sampling_end_sec
+        )
         raw_inputs = [
             (label.replace("heatmap", "raw frame"), image)
             for label, image in raw_inputs
         ]
-        frame_metadata = [
-            {"source_video": raw_video_paths[topic]}
-            for _ in range(frame_count)
-            for topic in topics
-        ][: len(raw_inputs)]
     elif source == "rosbag":
         raw_inputs, frame_metadata = _raw_inputs(
             Path(config["test_bag"]), topics, frame_count
@@ -241,9 +269,13 @@ def main() -> None:
         if mode == "raw":
             inputs = raw_inputs
         elif mode == "heatmap":
-            inputs = _heatmap_inputs(heatmap_paths, topics, frame_count)
+            inputs, _ = _heatmap_inputs(
+                heatmap_paths, topics, frame_count, sampling_start_sec, sampling_end_sec
+            )
         elif mode == "raw_heatmap":
-            heatmaps = _heatmap_inputs(heatmap_paths, topics, frame_count)
+            heatmaps, _ = _heatmap_inputs(
+                heatmap_paths, topics, frame_count, sampling_start_sec, sampling_end_sec
+            )
             inputs = [item for pair in zip(raw_inputs, heatmaps) for item in pair]
         else:
             raise ValueError(f"Unsupported input mode: {mode}")
@@ -266,6 +298,9 @@ def main() -> None:
         print(f"{mode}: decision={decision}, confidence={confidence}")
 
     pd.DataFrame(rows).to_csv(output_directory / "rynnbrain_results.csv", index=False)
+    pd.DataFrame(frame_metadata).to_csv(
+        output_directory / "selected_vlm_frames.csv", index=False
+    )
     (output_directory / "rynnbrain_responses.json").write_text(
         json.dumps(
             {

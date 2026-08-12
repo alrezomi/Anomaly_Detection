@@ -460,6 +460,10 @@ does not run DINO. A saved description is reused unless
 Selected model inputs, parsed decisions, confidence, full responses, and frame
 timestamps are saved under `output_dir`. Each input mode also contains
 `vlm_input_storyboard.jpg`, showing the exact images and order sent to the VLM.
+`selected_vlm_frames.csv` records the source video, exact frame index, timestamp,
+FPS, and camera topic. Use `rynnbrain.sampling_start_sec` and
+`rynnbrain.sampling_end_sec` to exclude stale frames before or after the actual
+task while keeping raw and heatmap selection aligned.
 
 The default RynnBrain base is NVIDIA's PyTorch 25.08 container for Jetson AGX
 Thor. It can be overridden with `RYNNBRAIN_BASE_IMAGE` when running on a
