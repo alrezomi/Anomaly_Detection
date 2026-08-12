@@ -304,6 +304,48 @@ def export_model_input_video(
     return count
 
 
+def export_original_video(
+    source: RosbagImageSource,
+    output_path: str | Path,
+    sample_fps: float = 2.0,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+    max_frames: int | None = None,
+) -> int:
+    """Export sampled rosbag frames at their recorded size and aspect ratio."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer: cv2.VideoWriter | None = None
+    count = 0
+    try:
+        for _, _, frame in iter_rosbag_image_frames(
+            source=source,
+            sample_fps=sample_fps,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            max_frames=max_frames,
+        ):
+            frame_bgr = cv2.cvtColor(np.asarray(frame.convert("RGB")), cv2.COLOR_RGB2BGR)
+            if writer is None:
+                height, width = frame_bgr.shape[:2]
+                writer = cv2.VideoWriter(
+                    str(output_path),
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    sample_fps,
+                    (width, height),
+                )
+                if not writer.isOpened():
+                    raise RuntimeError(f"Could not create output video: {output_path}")
+            writer.write(frame_bgr)
+            count += 1
+    finally:
+        if writer is not None:
+            writer.release()
+    if count == 0:
+        raise ValueError(f"No frames were exported from {source}.")
+    return count
+
+
 def _safe_name(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_").lower()
 

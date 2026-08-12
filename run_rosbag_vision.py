@@ -10,6 +10,7 @@ import re
 from rosbag_io import (
     RosbagImageSource,
     export_model_input_video,
+    export_original_video,
     resolve_bag_path,
 )
 from vision_dinov2 import run_vision_test
@@ -111,6 +112,17 @@ def main() -> None:
         if arguments.ignore_recorded_stages is not None
         else bool(configuration.get("ignore_recorded_stages", False))
     )
+    memory_name = str(configuration.get("vision_memory_name", "")).strip()
+    if memory_name and _slug(memory_name) != memory_name:
+        raise ValueError(
+            "vision_memory_name may contain only lowercase letters, numbers, and underscores"
+        )
+    dino_input_size = int(
+        configuration.get("dino_input_size", run_vision_test.DINO_INPUT_SIZE)
+    )
+    if dino_input_size < 14 or dino_input_size % 14 != 0:
+        raise ValueError("dino_input_size must be a positive multiple of DINO's patch size 14")
+    run_vision_test.DINO_INPUT_SIZE = dino_input_size
 
     if not test_bag_value:
         raise ValueError("Set test_bag in the config or pass --test-bag.")
@@ -160,6 +172,18 @@ def main() -> None:
             max_frames=max_preview_frames,
         )
         print(f"Exported {count} exact model-input frames: {preview_path}")
+        original_path = output_directory / f"{name}_raw_original.mp4"
+        original_count = export_original_video(
+            source=test_source,
+            output_path=original_path,
+            sample_fps=run_vision_test.SAMPLE_FPS,
+            start_sec=run_vision_test.START_SEC,
+            end_sec=run_vision_test.END_SEC,
+            max_frames=max_preview_frames,
+        )
+        print(
+            f"Exported {original_count} original-resolution frames: {original_path}"
+        )
         if preview_only:
             continue
 
@@ -184,7 +208,10 @@ def main() -> None:
         run_vision_test.CALIBRATION_CSV = output_directory / f"{name}_calibration.csv"
         run_vision_test.TEST_RESULT_CSV = output_directory / f"{name}_results.csv"
         run_vision_test.OUTPUT_VIDEO = output_directory / f"{name}_heatmap.mp4"
-        run_vision_test.NOMINAL_CACHE_DIRECTORY = Path(cache_value) / name
+        cache_root = Path(cache_value)
+        if memory_name:
+            cache_root = cache_root / memory_name
+        run_vision_test.NOMINAL_CACHE_DIRECTORY = cache_root / name
         run_vision_test.REBUILD_NOMINAL_CACHE = rebuild_nominal_cache
         print(f"\nRunning independent camera detector: {topic}")
         run_vision_test.main()

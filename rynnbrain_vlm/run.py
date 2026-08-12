@@ -202,9 +202,16 @@ def main() -> None:
 
     source = vlm.get("source", "generated_videos")
     raw_video_paths = {
-        topic: str(vision_output_directory / f"{_slug(topic)}_model_input.mp4")
+        topic: str(vision_output_directory / f"{_slug(topic)}_raw_original.mp4")
         for topic in topics
     }
+    # Backward compatibility for experiments created before original-resolution
+    # exports were added.
+    for topic, original_path in list(raw_video_paths.items()):
+        if not Path(original_path).is_file():
+            raw_video_paths[topic] = str(
+                vision_output_directory / f"{_slug(topic)}_model_input.mp4"
+            )
     heatmap_paths = {
         topic: str(vision_output_directory / f"{_slug(topic)}_heatmap.mp4")
         for topic in topics

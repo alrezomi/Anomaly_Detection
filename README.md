@@ -323,6 +323,34 @@ Edit `pipeline_config.json` to select the experiment:
 }
 ```
 
+### Named DINO memories and high-resolution heatmaps
+
+Set a unique memory name and a DINO input size that is divisible by patch size
+14:
+
+```json
+"vision_memory_name": "pick_place_dino728_v1",
+"dino_input_size": 728,
+"nominal_cache_dir": "/outputs/nominal_cache",
+"output_dir": "/outputs/experiments/pick_place_dino728_v1_test_01",
+"rebuild_nominal_cache": true
+```
+
+This produces a 52 x 52 patch grid and stores each camera memory under
+`/outputs/nominal_cache/pick_place_dino728_v1/<camera>/`. Choose a different
+`output_dir` for every experiment so videos and CSV results are not overwritten.
+After the first successful build, set `rebuild_nominal_cache` to `false`.
+To select an existing memory later, use its `vision_memory_name`, matching
+`dino_input_size`, and keep rebuilding disabled. The saved signature is checked
+before loading, so a memory made with incompatible bags, topics, or DINO settings
+is rejected rather than silently reused.
+
+Every rosbag vision run writes two raw videos per camera:
+
+- `<camera>_model_input.mp4`: the exact square input processed by DINO.
+- `<camera>_raw_original.mp4`: recorded resolution/aspect ratio for human review
+  and RynnBrain. RynnBrain prefers this file automatically.
+
 The bag paths above are container paths underneath the host data folder from
 `.env`. The output subfolder is created underneath the host output folder.
 

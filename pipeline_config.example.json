@@ -9,6 +9,8 @@
   ],
   "output_dir": "/outputs/experiment_01",
   "nominal_cache_dir": "/outputs/nominal_cache",
+  "vision_memory_name": "pick_place_dino728_v1",
+  "dino_input_size": 728,
   "rebuild_nominal_cache": false,
   "stage_topic": "/recording_stage",
   "stage_count": 3,
