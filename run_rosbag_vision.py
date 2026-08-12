@@ -206,6 +206,10 @@ def main() -> None:
         run_vision_test.CALIBRATION_CSV = output_directory / f"{name}_calibration.csv"
         run_vision_test.TEST_RESULT_CSV = output_directory / f"{name}_results.csv"
         run_vision_test.OUTPUT_VIDEO = output_directory / f"{name}_heatmap.mp4"
+        run_vision_test.CALIBRATION_PLOT = output_directory / f"{name}_calibration.png"
+        run_vision_test.TEST_SCORE_PLOT = output_directory / f"{name}_score_threshold.png"
+        run_vision_test.TEST_EPSILON_PLOT = output_directory / f"{name}_epsilon.png"
+        run_vision_test.SETTINGS_JSON = output_directory / f"{name}_settings.json"
         cache_root = Path(cache_value)
         if memory_name:
             cache_root = cache_root / memory_name

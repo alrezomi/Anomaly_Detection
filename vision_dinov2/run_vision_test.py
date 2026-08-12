@@ -1,6 +1,7 @@
 """Run the complete DINOv2 vision anomaly-detection pipeline."""
 
 from pathlib import Path
+import json
 from rosbag_io import RosbagImageSource
 
 from experiment_config import (
@@ -79,6 +80,10 @@ TEST_RESULT_CSV = OUTPUT_DIRECTORY / "vision_test_results.csv"
 OUTPUT_VIDEO = (
     OUTPUT_DIRECTORY / "adaptive_cls_attention_heatmap_output.mp4"
 )
+CALIBRATION_PLOT: Path | None = None
+TEST_SCORE_PLOT: Path | None = None
+TEST_EPSILON_PLOT: Path | None = None
+SETTINGS_JSON: Path | None = None
 NOMINAL_CACHE_DIRECTORY: Path | None = None
 REBUILD_NOMINAL_CACHE = False
 
@@ -182,6 +187,17 @@ def main(mode: str = "all") -> None:
     else:
         print(f"Video directory: {VIDEO_DIRECTORY}")
     print(f"Output directory: {OUTPUT_DIRECTORY}")
+    if SETTINGS_JSON is not None:
+        SETTINGS_JSON.write_text(
+            json.dumps(
+                {
+                    **nominal_cache_signature(),
+                    "mode": mode,
+                    "test_source": str(TEST_VIDEO_PATH),
+                    "nominal_cache_directory": str(NOMINAL_CACHE_DIRECTORY),
+                }, indent=2, sort_keys=True
+            ), encoding="utf-8"
+        )
 
     # --------------------------------------------------------
     # Step 1: Load DINOv2 once
@@ -252,6 +268,10 @@ def main(mode: str = "all") -> None:
     print("Nominal grid size:", grid_size)
 
     if mode == "build-memory":
+        plot_adaptive_calibration(
+            adaptive_threshold_df, calibration_df,
+            output_path=CALIBRATION_PLOT,
+        )
         print("\nDINO NOMINAL MEMORY BUILD FINISHED")
         print(f"Memory directory: {NOMINAL_CACHE_DIRECTORY}")
         return
@@ -265,6 +285,7 @@ def main(mode: str = "all") -> None:
     plot_adaptive_calibration(
         adaptive_threshold_df=adaptive_threshold_df,
         calibration_df=calibration_df,
+        output_path=CALIBRATION_PLOT,
     )
 
     # --------------------------------------------------------
@@ -286,8 +307,8 @@ def main(mode: str = "all") -> None:
 
     test_result_df.to_csv(TEST_RESULT_CSV, index=False)
 
-    plot_test_scores(test_result_df)
-    plot_test_epsilon(test_result_df)
+    plot_test_scores(test_result_df, output_path=TEST_SCORE_PLOT)
+    plot_test_epsilon(test_result_df, output_path=TEST_EPSILON_PLOT)
 
     # --------------------------------------------------------
     # Step 5: Create the annotated heatmap video

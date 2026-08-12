@@ -112,6 +112,7 @@ def plot_adaptive_calibration(
     adaptive_threshold_df: pd.DataFrame,
     calibration_df: pd.DataFrame,
     title: str = "CLS-stage adaptive visual threshold calibration",
+    output_path: str | Path | None = None,
 ) -> None:
     """Plot held-out nominal scores and their adaptive threshold."""
     plt.figure(figsize=(12, 4.5))
@@ -136,13 +137,17 @@ def plot_adaptive_calibration(
     plt.legend()
     plt.grid(True, alpha=0.35)
     plt.tight_layout()
-    plt.show(block=False)
-    plt.pause(0.1)
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=180, bbox_inches="tight")
+        print(f"Saved calibration graph: {output_path}")
+    plt.close()
 
 
 def plot_test_scores(
     result_df: pd.DataFrame,
     title: str = "CLS-assisted visual anomaly score",
+    output_path: str | Path | None = None,
 ) -> None:
     """Plot raw anomaly score and threshold over video time."""
     plt.figure(figsize=(12, 4.5))
@@ -180,13 +185,17 @@ def plot_test_scores(
     plt.legend()
     plt.grid(True, alpha=0.35)
     plt.tight_layout()
-    plt.show(block=False)
-    plt.pause(0.1)
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=180, bbox_inches="tight")
+        print(f"Saved score/threshold graph: {output_path}")
+    plt.close()
 
 
 def plot_test_epsilon(
     result_df: pd.DataFrame,
     title: str = "Normalized adaptive visual anomaly score",
+    output_path: str | Path | None = None,
 ) -> None:
     """Plot score divided by threshold; values above one are alarms."""
     if result_df["epsilon"].isna().all():
@@ -225,8 +234,11 @@ def plot_test_epsilon(
     plt.legend()
     plt.grid(True, alpha=0.35)
     plt.tight_layout()
-    plt.show(block=False)
-    plt.pause(0.1)
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=180, bbox_inches="tight")
+        print(f"Saved normalized-score graph: {output_path}")
+    plt.close()
 
 
 def _draw_text_panel(
