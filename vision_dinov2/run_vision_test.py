@@ -119,11 +119,23 @@ def nominal_cache_signature() -> dict:
     }
 
 
-def check_input_paths() -> None:
+def nominal_cache_runtime_signature() -> dict:
+    """Settings a test must match, excluding the nominal source list."""
+    signature = nominal_cache_signature()
+    signature.pop("sources", None)
+    return signature
+
+
+def check_input_paths(include_nominal: bool = True, include_test: bool = True) -> None:
     """Stop early when one of the configured vision sources is incorrect."""
+    selected_paths = []
+    if include_nominal:
+        selected_paths.extend(NOMINAL_VIDEO_PATHS)
+    if include_test:
+        selected_paths.append(TEST_VIDEO_PATH)
     missing_paths = [
         path
-        for path in [*NOMINAL_VIDEO_PATHS, TEST_VIDEO_PATH]
+        for path in selected_paths
         if not (
             path.bag_path.exists()
             if isinstance(path, RosbagImageSource)
@@ -149,15 +161,20 @@ def check_input_paths() -> None:
         )
 
 
-def main() -> None:
+def main(mode: str = "all") -> None:
+    if mode not in {"all", "build-memory", "test"}:
+        raise ValueError("mode must be 'all', 'build-memory', or 'test'")
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    check_input_paths()
+    check_input_paths(include_nominal=mode != "test", include_test=mode != "build-memory")
 
     using_rosbag = isinstance(TEST_VIDEO_PATH, RosbagImageSource)
     if not using_rosbag:
         print_experiment_summary()
     print(f"Project directory: {PROJECT_DIRECTORY}")
-    if using_rosbag:
+    if mode == "build-memory":
+        print("Vision mode: build named nominal memory only")
+        print(f"Nominal sources: {len(NOMINAL_VIDEO_PATHS)}")
+    elif using_rosbag:
         print("Vision input mode: ROS 2 bag image topic")
         print(f"Nominal sources: {len(NOMINAL_VIDEO_PATHS)}")
         print(f"Test source: {TEST_VIDEO_PATH.bag_path}")
@@ -176,7 +193,16 @@ def main() -> None:
 
     signature = nominal_cache_signature()
     cached = None
-    if NOMINAL_CACHE_DIRECTORY is not None and not REBUILD_NOMINAL_CACHE:
+    if NOMINAL_CACHE_DIRECTORY is not None and mode == "test":
+        cached = load_nominal_cache(
+            NOMINAL_CACHE_DIRECTORY, nominal_cache_runtime_signature()
+        )
+        if cached is None:
+            raise FileNotFoundError(
+                f"No compatible named nominal memory exists at {NOMINAL_CACHE_DIRECTORY}. "
+                "Run the build-memory command first. Test mode never rebuilds memory."
+            )
+    elif NOMINAL_CACHE_DIRECTORY is not None and not REBUILD_NOMINAL_CACHE:
         cached = load_nominal_cache(NOMINAL_CACHE_DIRECTORY, signature)
 
     if cached is not None:
@@ -224,6 +250,11 @@ def main() -> None:
             print(f"Saved reusable nominal cache: {NOMINAL_CACHE_DIRECTORY}")
 
     print("Nominal grid size:", grid_size)
+
+    if mode == "build-memory":
+        print("\nDINO NOMINAL MEMORY BUILD FINISHED")
+        print(f"Memory directory: {NOMINAL_CACHE_DIRECTORY}")
+        return
 
     adaptive_threshold_df.to_csv(THRESHOLD_CSV, index=False)
     calibration_df.to_csv(CALIBRATION_CSV, index=False)

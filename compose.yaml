@@ -32,6 +32,26 @@ services:
       - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
       - huggingface-cache:/cache/huggingface
 
+  vision-memory:
+    <<: *pipeline-common
+    entrypoint: ["python", "run_rosbag_vision.py"]
+    command: ["--config", "/config/pipeline_config.json", "--mode", "build-memory"]
+    volumes:
+      - ${ANOMALY_DATA_DIR:-../data}:/data:ro
+      - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
+      - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
+      - huggingface-cache:/cache/huggingface
+
+  vision-test:
+    <<: *pipeline-common
+    entrypoint: ["python", "run_rosbag_vision.py"]
+    command: ["--config", "/config/pipeline_config.json", "--mode", "test"]
+    volumes:
+      - ${ANOMALY_DATA_DIR:-../data}:/data:ro
+      - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
+      - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
+      - huggingface-cache:/cache/huggingface
+
   # Generate clean labels plus timestamp diagnostics from recorded stages.
   bag-labels:
     <<: *pipeline-common

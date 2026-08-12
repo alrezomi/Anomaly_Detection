@@ -345,6 +345,21 @@ To select an existing memory later, use its `vision_memory_name`, matching
 before loading, so a memory made with incompatible bags, topics, or DINO settings
 is rejected rather than silently reused.
 
+Memory construction and testing are deliberately separate:
+
+```bash
+# Uses nominal_bags only; test_bag is not required and no test is run.
+docker compose run --rm vision-memory
+
+# Uses test_bag plus an existing named memory; nominal_bags are not read.
+# This command never builds or rebuilds memory.
+docker compose run --rm vision-test
+```
+
+After changing Python source code pulled from Git, rebuild the shared pipeline
+image once with `docker compose build vision-memory`. Both services then use the
+same updated image. Keep only one top-level `output_dir` entry in the JSON.
+
 Every rosbag vision run writes two raw videos per camera:
 
 - `<camera>_model_input.mp4`: the exact square input processed by DINO.

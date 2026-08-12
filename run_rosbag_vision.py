@@ -24,6 +24,12 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="JSON pipeline configuration.")
     parser.add_argument(
+        "--mode",
+        choices=("all", "build-memory", "test"),
+        default="all",
+        help="Build only a named memory, or test only with an existing memory.",
+    )
+    parser.add_argument(
         "--nominal-bag",
         action="append",
         default=None,
@@ -124,18 +130,18 @@ def main() -> None:
         raise ValueError("dino_input_size must be a positive multiple of DINO's patch size 14")
     run_vision_test.DINO_INPUT_SIZE = dino_input_size
 
-    if not test_bag_value:
+    if arguments.mode != "build-memory" and not test_bag_value:
         raise ValueError("Set test_bag in the config or pass --test-bag.")
     if not camera_topics:
         raise ValueError("Set camera_topics in the config or pass --camera-topic.")
 
-    test_bag = Path(test_bag_value)
+    test_bag = Path(test_bag_value) if test_bag_value else None
     output_directory = Path(output_value).resolve()
     run_vision_test.OUTPUT_DIRECTORY = output_directory
     output_directory.mkdir(parents=True, exist_ok=True)
 
-    paths_to_validate = [test_bag]
-    if not preview_only:
+    paths_to_validate = [] if arguments.mode == "build-memory" else [test_bag]
+    if arguments.mode != "test" and not preview_only:
         paths_to_validate.extend(nominal_bags)
     invalid_paths: list[str] = []
     for path in paths_to_validate:
@@ -154,40 +160,32 @@ def main() -> None:
         stage_topic = (
             None if ignore_recorded_stages else stage_topic_value
         )
-        test_source = RosbagImageSource(
-            test_bag,
-            topic,
-            "test",
-            stage_topic=stage_topic,
-            stage_count=stage_count,
-        )
-        preview_path = output_directory / f"{name}_model_input.mp4"
-        count = export_model_input_video(
-            source=test_source,
-            output_path=preview_path,
-            sample_fps=run_vision_test.SAMPLE_FPS,
-            model_input_size=run_vision_test.DINO_INPUT_SIZE,
-            start_sec=run_vision_test.START_SEC,
-            end_sec=run_vision_test.END_SEC,
-            max_frames=max_preview_frames,
-        )
-        print(f"Exported {count} exact model-input frames: {preview_path}")
-        original_path = output_directory / f"{name}_raw_original.mp4"
-        original_count = export_original_video(
-            source=test_source,
-            output_path=original_path,
-            sample_fps=run_vision_test.SAMPLE_FPS,
-            start_sec=run_vision_test.START_SEC,
-            end_sec=run_vision_test.END_SEC,
-            max_frames=max_preview_frames,
-        )
-        print(
-            f"Exported {original_count} original-resolution frames: {original_path}"
-        )
-        if preview_only:
-            continue
+        test_source = None
+        if arguments.mode != "build-memory":
+            test_source = RosbagImageSource(
+                test_bag, topic, "test", stage_topic=stage_topic, stage_count=stage_count
+            )
+            preview_path = output_directory / f"{name}_model_input.mp4"
+            count = export_model_input_video(
+                source=test_source, output_path=preview_path,
+                sample_fps=run_vision_test.SAMPLE_FPS,
+                model_input_size=run_vision_test.DINO_INPUT_SIZE,
+                start_sec=run_vision_test.START_SEC, end_sec=run_vision_test.END_SEC,
+                max_frames=max_preview_frames,
+            )
+            print(f"Exported {count} exact model-input frames: {preview_path}")
+            original_path = output_directory / f"{name}_raw_original.mp4"
+            original_count = export_original_video(
+                source=test_source, output_path=original_path,
+                sample_fps=run_vision_test.SAMPLE_FPS,
+                start_sec=run_vision_test.START_SEC, end_sec=run_vision_test.END_SEC,
+                max_frames=max_preview_frames,
+            )
+            print(f"Exported {original_count} original-resolution frames: {original_path}")
+            if preview_only:
+                continue
 
-        if len(nominal_bags) < 2:
+        if arguments.mode != "test" and len(nominal_bags) < 2:
             raise ValueError(
                 "Adaptive calibration needs at least two nominal bags. "
                 "Repeat --nominal-bag for two or more normal recordings."
@@ -202,7 +200,7 @@ def main() -> None:
                 stage_count=stage_count,
             )
             for index, path in enumerate(nominal_bags)
-        ]
+        ] if arguments.mode != "test" else []
         run_vision_test.TEST_VIDEO_PATH = test_source
         run_vision_test.THRESHOLD_CSV = output_directory / f"{name}_threshold.csv"
         run_vision_test.CALIBRATION_CSV = output_directory / f"{name}_calibration.csv"
@@ -214,7 +212,7 @@ def main() -> None:
         run_vision_test.NOMINAL_CACHE_DIRECTORY = cache_root / name
         run_vision_test.REBUILD_NOMINAL_CACHE = rebuild_nominal_cache
         print(f"\nRunning independent camera detector: {topic}")
-        run_vision_test.main()
+        run_vision_test.main(mode=arguments.mode)
 
 
 if __name__ == "__main__":

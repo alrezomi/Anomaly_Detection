@@ -65,7 +65,7 @@ def load_nominal_cache(
         return None
 
     saved_signature = json.loads(required[3].read_text(encoding="utf-8"))
-    if saved_signature != expected_signature:
+    if any(saved_signature.get(key) != value for key, value in expected_signature.items()):
         print(f"Nominal cache settings changed; rebuilding: {directory}")
         return None
 
