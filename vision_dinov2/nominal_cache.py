@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -69,26 +70,45 @@ def load_nominal_cache(
         print(f"Nominal cache settings changed; rebuilding: {directory}")
         return None
 
+    cache_size_gib = required[0].stat().st_size / (1024**3)
+    print(
+        f"Loading nominal memory once ({cache_size_gib:.2f} GiB compressed): "
+        f"{required[0]}"
+    )
+    started = perf_counter()
     with np.load(required[0], allow_pickle=False) as arrays:
-        item_count = len(arrays["video_id"])
+        # Read every compressed member exactly once. Indexing arrays["features"]
+        # inside the item loop would decompress the multi-GiB tensor repeatedly.
+        features = arrays["features"]
+        attention = arrays["attention"]
+        cls = arrays["cls"]
+        video_id = arrays["video_id"]
+        frame_id = arrays["frame_id"]
+        timestamp_sec = arrays["timestamp_sec"]
+        progress = arrays["progress"]
+        stage = arrays["stage"]
+        video_path = arrays["video_path"]
+        grid_size = int(arrays["grid_size"])
+        item_count = len(video_id)
         memory: list[NominalItem] = []
         for index in range(item_count):
             memory.append(
                 {
-                    "video_id": int(arrays["video_id"][index]),
-                    "video_path": str(arrays["video_path"][index]),
-                    "frame_id": int(arrays["frame_id"][index]),
-                    "timestamp_sec": float(arrays["timestamp_sec"][index]),
-                    "features": arrays["features"][index].copy(),
-                    "attention": arrays["attention"][index].copy(),
-                    "cls": arrays["cls"][index].copy(),
-                    "progress": float(arrays["progress"][index]),
-                    "stage": int(arrays["stage"][index]),
+                    "video_id": int(video_id[index]),
+                    "video_path": str(video_path[index]),
+                    "frame_id": int(frame_id[index]),
+                    "timestamp_sec": float(timestamp_sec[index]),
+                    "features": features[index],
+                    "attention": attention[index],
+                    "cls": cls[index],
+                    "progress": float(progress[index]),
+                    "stage": int(stage[index]),
                     "stage_source": "nominal_cache",
                     "_progress_locked": True,
                 }
             )
-        grid_size = int(arrays["grid_size"])
+    elapsed = perf_counter() - started
+    print(f"Nominal memory loaded in {elapsed:.1f}s")
 
     threshold = pd.read_csv(required[1])
     calibration = pd.read_csv(required[2])
