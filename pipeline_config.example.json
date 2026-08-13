@@ -15,6 +15,7 @@
   "stage_topic": "/recording_stage",
   "stage_count": 3,
   "ignore_recorded_stages": false,
+  "stage_constrained_matching": true,
   "preview_only": false,
   "max_preview_frames": null,
   "rynnbrain": {

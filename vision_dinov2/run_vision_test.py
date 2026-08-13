@@ -56,6 +56,7 @@ MAX_TEST_FRAMES = None
 TOP_K_CLS = 5
 ATTENTION_POWER = 1.5
 MIN_WEIGHT = 0.15
+STAGE_CONSTRAINED_MATCHING = False
 
 
 # ============================================================
@@ -115,6 +116,7 @@ def nominal_cache_signature() -> dict:
         "top_k_cls": TOP_K_CLS,
         "attention_power": ATTENTION_POWER,
         "min_weight": MIN_WEIGHT,
+        "stage_constrained_matching": STAGE_CONSTRAINED_MATCHING,
         "threshold_quantile": THRESHOLD_QUANTILE,
         "threshold_margin": THRESHOLD_MARGIN,
         "threshold_bins": THRESHOLD_BINS,
@@ -253,6 +255,7 @@ def main(mode: str = "all") -> None:
             min_points_per_bin=MIN_POINTS_PER_BIN,
             smooth_window=THRESHOLD_SMOOTH_WINDOW,
             threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE,
+            stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
         )
         if NOMINAL_CACHE_DIRECTORY is not None:
             save_nominal_cache(
@@ -303,6 +306,7 @@ def main(mode: str = "all") -> None:
         top_k_cls=TOP_K_CLS,
         attention_power=ATTENTION_POWER,
         min_weight=MIN_WEIGHT,
+        stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
     )
 
     test_result_df.to_csv(TEST_RESULT_CSV, index=False)
@@ -328,6 +332,7 @@ def main(mode: str = "all") -> None:
         min_weight=MIN_WEIGHT,
         alpha=0.45,
         visualization_mode="original",
+        stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
     )
 
     # --------------------------------------------------------

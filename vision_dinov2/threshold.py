@@ -188,6 +188,7 @@ def calibrate_adaptive_threshold_leave_one_video_out(
     min_points_per_bin: int = 3,
     smooth_window: int | None = 3,
     threshold_floor_quantile: float | None = 0.20,
+    stage_constrained_matching: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Calibrate an adaptive threshold using leave-one-video-out validation.
@@ -241,6 +242,10 @@ def calibrate_adaptive_threshold_leave_one_video_out(
                 top_k_cls=top_k_cls,
                 attention_power=attention_power,
                 min_weight=min_weight,
+                required_stage=(
+                    int(query_item.get("stage", -1))
+                    if stage_constrained_matching else None
+                ),
             )
 
             rows.append(
@@ -256,6 +261,8 @@ def calibrate_adaptive_threshold_leave_one_video_out(
                     ),
                     "score": float(score),
                     "cls_distance": float(cls_distance),
+                    "query_stage": int(query_item.get("stage", -1)),
+                    "matched_stage": int(matched_item.get("stage", -1)),
                 }
             )
 

@@ -457,6 +457,12 @@ def read_stage_events(
     return pd.DataFrame(rows)
 
 
+def bag_duration_seconds(bag_path: str | Path) -> float:
+    """Return the complete ROS bag duration in seconds."""
+    with open_bag(bag_path) as reader:
+        return (int(reader.end_time) - int(reader.start_time)) / 1e9
+
+
 @dataclass(frozen=True)
 class StageTimeline:
     """Validated stage boundaries or an equal-duration fallback."""

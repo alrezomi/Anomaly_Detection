@@ -16,6 +16,7 @@ from .anomaly_detection import (
     compare_frame_to_nominal_memory,
     threshold_for_progress,
 )
+from rosbag_io import RosbagImageSource, bag_duration_seconds, resolve_stage_timeline
 from .dinov2_features import DINOv2FeatureExtractor, iter_source_frames
 
 
@@ -253,6 +254,8 @@ def _draw_text_panel(
     matched_video_id: int,
     matched_frame_id: int,
     threshold_mode: str,
+    execution_stage: int | None = None,
+    matched_stage: int | None = None,
 ) -> np.ndarray:
     """Draw monitoring information on one BGR frame."""
     height, width = overlay_bgr.shape[:2]
@@ -277,11 +280,13 @@ def _draw_text_panel(
         f"t={timestamp_sec:.2f}s | score={score:.5f}",
         f"{threshold_mode} threshold={threshold_text} | eps={epsilon_text}",
         (
-            f"CLS dist={cls_distance:.5f} | "
-            f"matched progress={matched_progress:.2f}"
+            f"stage={execution_stage if execution_stage is not None else 'any'} | "
+            f"matched stage={matched_stage if matched_stage is not None else 'any'} | "
+            f"CLS dist={cls_distance:.5f}"
         ),
         (
-            f"match=nominal video {matched_video_id}, "
+            f"matched progress={matched_progress:.2f}"
+            f" | nominal video {matched_video_id}, "
             f"frame {matched_frame_id}"
         ),
     ]
@@ -331,6 +336,7 @@ def create_anomaly_heatmap_video(
     min_weight: float = 0.15,
     alpha: float = 0.45,
     visualization_mode: str = "original",
+    stage_constrained_matching: bool = False,
 ) -> pd.DataFrame:
     """
     Create an MP4 containing the anomaly heatmap and detector information.
@@ -351,6 +357,14 @@ def create_anomaly_heatmap_video(
 
     writer: cv2.VideoWriter | None = None
     rows: list[dict[str, float | int | bool | str | None]] = []
+    test_timeline = None
+    if stage_constrained_matching and isinstance(test_video_path, RosbagImageSource):
+        test_timeline = resolve_stage_timeline(
+            test_video_path.bag_path,
+            end_sec=bag_duration_seconds(test_video_path.bag_path),
+            topic=test_video_path.stage_topic or "/__disabled_stage_topic",
+            stage_count=test_video_path.stage_count,
+        )
 
     try:
         for frame_id, timestamp_sec, frame in iter_source_frames(
@@ -360,6 +374,10 @@ def create_anomaly_heatmap_video(
             end_sec=end_sec,
             max_frames=max_frames,
         ):
+            execution_stage = (
+                test_timeline.locate(timestamp_sec)[0]
+                if test_timeline is not None else None
+            )
             (
                 test_features,
                 test_attention,
@@ -382,6 +400,7 @@ def create_anomaly_heatmap_video(
                 top_k_cls=top_k_cls,
                 attention_power=attention_power,
                 min_weight=min_weight,
+                required_stage=execution_stage,
             )
 
             matched_progress = float(best_match["progress"])
@@ -431,6 +450,8 @@ def create_anomaly_heatmap_video(
                 matched_video_id=int(best_match["video_id"]),
                 matched_frame_id=int(best_match["frame_id"]),
                 threshold_mode=threshold_mode,
+                execution_stage=execution_stage,
+                matched_stage=int(best_match.get("stage", -1)),
             )
 
             if writer is None:
@@ -463,6 +484,8 @@ def create_anomaly_heatmap_video(
                     "matched_video_id": int(best_match["video_id"]),
                     "matched_frame_id": int(best_match["frame_id"]),
                     "matched_progress": matched_progress,
+                    "execution_stage": execution_stage,
+                    "matched_stage": int(best_match.get("stage", -1)),
                 }
             )
 

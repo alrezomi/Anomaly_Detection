@@ -345,6 +345,19 @@ To select an existing memory later, use its `vision_memory_name`, matching
 before loading, so a memory made with incompatible bags, topics, or DINO settings
 is rejected rather than silently reused.
 
+To prevent a late test frame from matching an early nominal pose, enable strict
+same-stage matching:
+
+```json
+"ignore_recorded_stages": false,
+"stage_constrained_matching": true
+```
+
+CLS top-k selection then searches only nominal frames assigned to the test
+frame's current stage. Calibration uses the identical restriction. This changes
+the detector and threshold calibration, so build it under a new
+`vision_memory_name`; an older unconstrained memory is intentionally rejected.
+
 Memory construction and testing are deliberately separate:
 
 ```bash

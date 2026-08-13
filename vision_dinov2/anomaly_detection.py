@@ -10,6 +10,7 @@ import pandas as pd
 
 from rosbag_io import (
     RosbagImageSource,
+    bag_duration_seconds,
     read_stage_events,
     resolve_stage_timeline,
 )
@@ -286,6 +287,7 @@ def compare_frame_to_nominal_memory(
     top_k_cls: int = 5,
     attention_power: float = 1.5,
     min_weight: float = 0.15,
+    required_stage: int | None = None,
 ) -> tuple[
     float,
     np.ndarray,
@@ -300,9 +302,19 @@ def compare_frame_to_nominal_memory(
     First, CLS tokens select the globally closest nominal frames.
     Second, attention-weighted patch differences select the best local match.
     """
+    candidate_memory = nominal_memory
+    if required_stage is not None:
+        candidate_memory = [
+            item for item in nominal_memory
+            if int(item.get("stage", -1)) == int(required_stage)
+        ]
+        if not candidate_memory:
+            raise ValueError(
+                f"Nominal memory has no frames assigned to stage {required_stage}."
+            )
     selected_memory, cls_distances = select_top_k_nominal_by_cls(
         test_cls=test_cls,
-        nominal_memory=nominal_memory,
+        nominal_memory=candidate_memory,
         top_k_cls=top_k_cls,
     )
 
@@ -381,6 +393,7 @@ def run_video_test(
     top_k_cls: int = 5,
     attention_power: float = 1.5,
     min_weight: float = 0.15,
+    stage_constrained_matching: bool = False,
 ) -> pd.DataFrame:
     """
     Process a test video sequentially and return frame-level results.
@@ -391,6 +404,18 @@ def run_video_test(
     add_progress_to_nominal_memory(nominal_memory)
 
     rows: list[dict[str, Any]] = []
+    test_timeline = None
+    if stage_constrained_matching and isinstance(test_video_path, RosbagImageSource):
+        test_timeline = resolve_stage_timeline(
+            test_video_path.bag_path,
+            end_sec=bag_duration_seconds(test_video_path.bag_path),
+            topic=test_video_path.stage_topic or "/__disabled_stage_topic",
+            stage_count=test_video_path.stage_count,
+        )
+        print(
+            f"Stage-constrained matching enabled: {test_timeline.source}; "
+            f"starts={list(test_timeline.starts)}"
+        )
 
     for frame_id, timestamp_sec, frame in iter_source_frames(
         source=test_video_path,
@@ -399,6 +424,10 @@ def run_video_test(
         end_sec=end_sec,
         max_frames=max_frames,
     ):
+        execution_stage = (
+            test_timeline.locate(timestamp_sec)[0]
+            if test_timeline is not None else None
+        )
         (
             test_features,
             test_attention,
@@ -421,6 +450,7 @@ def run_video_test(
             top_k_cls=top_k_cls,
             attention_power=attention_power,
             min_weight=min_weight,
+            required_stage=execution_stage,
         )
 
         matched_progress = float(best_match["progress"])
@@ -455,6 +485,8 @@ def run_video_test(
             "matched_frame_id": int(best_match["frame_id"]),
             "matched_timestamp_sec": float(best_match["timestamp_sec"]),
             "matched_progress": matched_progress,
+            "execution_stage": execution_stage,
+            "matched_stage": int(best_match.get("stage", -1)),
         }
         rows.append(row)
 

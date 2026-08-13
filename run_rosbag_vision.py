@@ -129,6 +129,9 @@ def main() -> None:
     if dino_input_size < 14 or dino_input_size % 14 != 0:
         raise ValueError("dino_input_size must be a positive multiple of DINO's patch size 14")
     run_vision_test.DINO_INPUT_SIZE = dino_input_size
+    run_vision_test.STAGE_CONSTRAINED_MATCHING = bool(
+        configuration.get("stage_constrained_matching", False)
+    )
 
     if arguments.mode != "build-memory" and not test_bag_value:
         raise ValueError("Set test_bag in the config or pass --test-bag.")
