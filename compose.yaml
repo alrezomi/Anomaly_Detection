@@ -88,9 +88,8 @@ services:
       - ${STAGE_STARTUP_IGNORE_SEC:-0.1}
       - --recursive
 
-  # Optional RynnBrain VLM evaluator. It shares this Compose project but keeps
-  # its model dependencies isolated from the stable DINO/time-series image.
-  rynnbrain:
+  # Build a reusable nominal task description. Does not evaluate a test bag.
+  rynnbrain-memory: &rynnbrain-common
     build:
       context: .
       dockerfile: Dockerfile.rynnbrain
@@ -106,7 +105,12 @@ services:
       - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
       - huggingface-cache:/cache/huggingface
     entrypoint: ["python", "-m", "rynnbrain_vlm.run"]
-    command: ["--config", "/config/pipeline_config.json"]
+    command: ["--config", "/config/pipeline_config.json", "--mode", "memory"]
+
+  # Evaluate generated test videos using an existing task description.
+  rynnbrain-test:
+    <<: *rynnbrain-common
+    command: ["--config", "/config/pipeline_config.json", "--mode", "test"]
 
 volumes:
   huggingface-cache:

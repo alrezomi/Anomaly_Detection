@@ -23,14 +23,18 @@
     "camera_topics": [
       "/flange_camera/cam33/color/image_raw"
     ],
-    "task_description": "The robot picks up the object at location A, transports it without dropping or losing it, and places it at location B.",
+    "reference_bags": [
+      "/data/normal_run_01"
+    ],
+    "memory_camera_topics": [
+      "/flange_camera/cam33/color/image_raw"
+    ],
     "input_modes": ["raw"],
     "num_frames": 4,
     "sampling_start_sec": 0.0,
     "sampling_end_sec": null,
     "ground_truth_label": "fail",
     "task_memory_path": "/outputs/rynnbrain_memories/pick_place.json",
-    "rebuild_task_memory": false,
     "output_dir": "/outputs/experiment_01/rynnbrain",
     "model": {
       "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",

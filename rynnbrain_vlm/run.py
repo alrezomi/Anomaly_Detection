@@ -160,76 +160,101 @@ def _save_inputs(
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--mode", choices=("memory", "test"), required=True)
     return parser.parse_args()
 
 
-def main() -> None:
-    arguments = parse_arguments()
+def _print_exchange(title: str, prompt: str, response: str) -> None:
+    bar = "=" * 90
+    print(f"\n{bar}\n{title} - PROMPT\n{bar}\n{prompt}")
+    print(f"\n{bar}\n{title} - MODEL RESPONSE\n{bar}\n{response}\n{bar}")
+
+
+def _print_inputs(title: str, images: list[tuple[str, Image.Image]]) -> None:
+    print(f"\n{title} - IMAGES SENT TO MODEL ({len(images)}):")
+    for index, (label, image) in enumerate(images):
+        print(f"  [{index}] {label} size={image.size}")
+
+
+def _common_config(arguments: argparse.Namespace) -> tuple[dict, dict, int, dict]:
     config = json.loads(arguments.config.read_text(encoding="utf-8"))
     vlm = dict(config.get("rynnbrain", {}))
     if not vlm:
         raise ValueError("Add a 'rynnbrain' section to pipeline_config.json")
+    frame_count = int(vlm.get("num_frames", 4))
+    if frame_count < 1:
+        raise ValueError("rynnbrain.num_frames must be at least 1")
+    generation = dict(vlm.get("generation", {}))
+    return config, vlm, frame_count, generation
+
+
+def build_memory(arguments: argparse.Namespace) -> None:
+    config, vlm, frame_count, generation = _common_config(arguments)
+    reference_bags = list(vlm.get("reference_bags", []))
+    memory_topics = list(vlm.get("memory_camera_topics", []))
+    if not reference_bags:
+        raise ValueError("rynnbrain-memory requires rynnbrain.reference_bags")
+    if not memory_topics:
+        raise ValueError("rynnbrain-memory requires rynnbrain.memory_camera_topics")
+    model = RynnBrainModel(vlm["model"])
+    memory_path = Path(vlm["task_memory_path"])
+    audit_directory = memory_path.parent / f"{memory_path.stem}_inputs"
+    descriptions: list[str] = []
+    records: list[dict[str, Any]] = []
+    for bag_index, bag_value in enumerate(reference_bags):
+        inputs, metadata = _raw_inputs(Path(bag_value), memory_topics, frame_count)
+        mode_name = f"reference_{bag_index:02d}"
+        _save_inputs(audit_directory, mode_name, inputs)
+        _print_inputs(f"NOMINAL DESCRIPTION ({bag_value})", inputs)
+        response = model.generate(inputs, DESCRIPTION_PROMPT, generation)
+        _print_exchange(f"NOMINAL DESCRIPTION ({bag_value})", DESCRIPTION_PROMPT, response)
+        descriptions.append(response)
+        records.append({"bag": bag_value, "prompt": DESCRIPTION_PROMPT, "response": response, "selected_frames": metadata})
+    if len(descriptions) == 1:
+        nominal_description = descriptions[0]
+        consolidation_prompt = None
+    else:
+        consolidation_prompt = (
+            "Create one concise canonical nominal robot-task description from these descriptions. "
+            "Keep only behavior consistently supported across demonstrations; do not discuss success or failure.\n\n"
+            + "\n\n---\n\n".join(descriptions)
+        )
+        nominal_description = model.text(consolidation_prompt, generation)
+        _print_exchange("NOMINAL CONSOLIDATION", consolidation_prompt, nominal_description)
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(json.dumps({
+        "nominal_description": nominal_description,
+        "description_prompt": DESCRIPTION_PROMPT,
+        "reference_calls": records,
+        "consolidation_prompt": consolidation_prompt,
+        "reference_bags": reference_bags,
+        "camera_topics": memory_topics,
+        "num_frames": frame_count,
+    }, indent=2), encoding="utf-8")
+    print(f"\nSaved RynnBrain task memory: {memory_path}")
+    print("Memory build finished. No test bag was evaluated.")
+
+
+def run_test(arguments: argparse.Namespace) -> None:
+    config, vlm, frame_count, generation = _common_config(arguments)
+    memory_path = Path(vlm["task_memory_path"])
+    if not memory_path.is_file():
+        raise FileNotFoundError(f"Task memory not found: {memory_path}. Run rynnbrain-memory first.")
+    memory = json.loads(memory_path.read_text(encoding="utf-8"))
+    model = RynnBrainModel(vlm["model"])
+    nominal_description = memory["nominal_description"]
+    print(f"Loaded RynnBrain task memory: {memory_path}")
+    print(f"\nNOMINAL DESCRIPTION USED FOR TESTING:\n{nominal_description}")
+
     vision_output_directory = Path(config["output_dir"])
-    output_directory = Path(
-        vlm.get("output_dir", vision_output_directory / "rynnbrain")
-    )
+    output_directory = Path(vlm.get("output_dir", vision_output_directory / "rynnbrain"))
     output_directory.mkdir(parents=True, exist_ok=True)
     topics = list(vlm.get("camera_topics", config["camera_topics"]))
-    memory_topics = list(vlm.get("memory_camera_topics", config["camera_topics"]))
-    frame_count = int(vlm.get("num_frames", 4))
-    sampling_start_sec = float(vlm.get("sampling_start_sec", 0.0))
-    sampling_end_sec = vlm.get("sampling_end_sec")
-    sampling_end_sec = float(sampling_end_sec) if sampling_end_sec is not None else None
     if not topics:
-        raise ValueError("camera_topics must contain at least one rosbag image topic")
-    if frame_count < 1:
-        raise ValueError("num_frames must be at least 1")
-    generation = dict(vlm.get("generation", {}))
-    model = RynnBrainModel(vlm["model"])
-
-    configured_description = str(vlm.get("task_description", "")).strip()
-    memory_path = Path(vlm.get("task_memory_path", "/outputs/rynnbrain_memories/task.json"))
-    rebuild_memory = bool(vlm.get("rebuild_task_memory", False))
-    if configured_description:
-        nominal_description = configured_description
-        print("Using task_description from pipeline_config.json")
-    elif memory_path.is_file() and not rebuild_memory:
-        memory = json.loads(memory_path.read_text(encoding="utf-8"))
-        nominal_description = memory["nominal_description"]
-        print(f"Loaded nominal task description: {memory_path}")
-    else:
-        descriptions = []
-        reference_bags = list(vlm.get("reference_bags", config["nominal_bags"][:1]))
-        if not reference_bags:
-            raise ValueError(
-                "Set rynnbrain.task_description or provide at least one reference bag"
-            )
-        for bag_value in reference_bags:
-            inputs, _ = _raw_inputs(Path(bag_value), memory_topics, frame_count)
-            descriptions.append(model.generate(inputs, DESCRIPTION_PROMPT, generation))
-        if len(descriptions) == 1:
-            nominal_description = descriptions[0]
-        else:
-            nominal_description = model.text(
-                "Create one concise canonical nominal robot-task description from these descriptions. Keep only behavior consistently supported across demonstrations; do not discuss success or failure.\n\n"
-                + "\n\n---\n\n".join(descriptions),
-                generation,
-            )
-        memory_path.parent.mkdir(parents=True, exist_ok=True)
-        memory_path.write_text(
-            json.dumps(
-                {
-                    "nominal_description": nominal_description,
-                    "source_descriptions": descriptions,
-                    "reference_bags": reference_bags,
-                    "camera_topics": memory_topics,
-                    "num_frames": frame_count,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        print(f"Saved nominal task description: {memory_path}")
+        raise ValueError("rynnbrain.camera_topics must contain at least one topic")
+    sampling_start_sec = float(vlm.get("sampling_start_sec", 0.0))
+    end_value = vlm.get("sampling_end_sec")
+    sampling_end_sec = float(end_value) if end_value is not None else None
 
     source = vlm.get("source", "generated_videos")
     raw_video_paths = {
@@ -280,9 +305,10 @@ def main() -> None:
         else:
             raise ValueError(f"Unsupported input mode: {mode}")
         _save_inputs(output_directory, mode, inputs)
-        response = model.generate(
-            inputs, evaluation_prompt(nominal_description, mode), generation
-        )
+        prompt = evaluation_prompt(nominal_description, mode)
+        _print_inputs(f"TEST EVALUATION ({mode})", inputs)
+        response = model.generate(inputs, prompt, generation)
+        _print_exchange(f"TEST EVALUATION ({mode})", prompt, response)
         decision, confidence = _parse_response(response)
         rows.append(
             {
@@ -294,7 +320,7 @@ def main() -> None:
                 "response": response,
             }
         )
-        raw_records.append({"input_mode": mode, "response": response})
+        raw_records.append({"input_mode": mode, "prompt": prompt, "response": response})
         print(f"{mode}: decision={decision}, confidence={confidence}")
 
     pd.DataFrame(rows).to_csv(output_directory / "rynnbrain_results.csv", index=False)
@@ -313,6 +339,14 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"Results saved to: {output_directory}")
+
+
+def main() -> None:
+    arguments = parse_arguments()
+    if arguments.mode == "memory":
+        build_memory(arguments)
+    else:
+        run_test(arguments)
 
 
 if __name__ == "__main__":

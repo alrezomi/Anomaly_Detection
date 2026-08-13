@@ -452,24 +452,32 @@ vision `output_dir`. It does not rerun DINO or decode the test rosbag. Set
 The configuration selects the checkpoint, number of uniformly sampled time
 steps, and input modes.
 Supported modes are `raw`, `heatmap`, and paired `raw_heatmap`.
-`rynnbrain.camera_topics` selects the test viewpoints sent to the VLM and does
-not change the top-level DINO camera topics. Set `rynnbrain.task_description`
-to the expected behavior in plain language; this avoids processing nominal
-videos with the VLM.
+`rynnbrain.memory_camera_topics` selects nominal-description viewpoints, while
+`rynnbrain.camera_topics` independently selects test viewpoints.
 The total visual load is approximately `num_frames x number_of_cameras`, or
 twice that for paired raw/heatmap input.
 
-Build and run the initial x86 CUDA test service with:
+Build the shared GPU image once:
 
 ```bash
-docker compose build rynnbrain
-docker compose run --rm rynnbrain
+docker compose build rynnbrain-memory
 ```
 
-If `task_description` is omitted, RynnBrain can optionally generate one from
-`reference_bags` (one bag by default) and save it at `task_memory_path`. This
-does not run DINO. A saved description is reused unless
-`rebuild_task_memory` is set to `true`.
+Run the two explicit operations with the same configuration:
+
+```bash
+# Nominal reference bag(s) -> saved task description; no test is evaluated.
+docker compose run --rm rynnbrain-memory
+
+# Saved task description + generated test videos -> evaluation results.
+docker compose run --rm rynnbrain-test
+```
+
+Both commands print the complete prompt and unmodified response in the
+terminal. Memory JSON stores its prompt, response, bags, cameras, and selected
+frames. Test JSON stores the nominal description plus every evaluation prompt
+and response. Test mode never reads reference bags and stops if the named task
+memory does not exist.
 Selected model inputs, parsed decisions, confidence, full responses, and frame
 timestamps are saved under `output_dir`. Each input mode also contains
 `vlm_input_storyboard.jpg`, showing the exact images and order sent to the VLM.
