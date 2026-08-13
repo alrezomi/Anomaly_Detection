@@ -14,7 +14,8 @@ Uncertain points: ..."""
 
 def evaluation_prompt(nominal_description: str, input_mode: str) -> str:
     heatmap_note = (
-        "Colored heatmap regions indicate locations highlighted by a separate visual anomaly detector; use them as supporting evidence, not as proof of failure."
+        "Colored heatmap regions indicate locations highlighted by a separate visual anomaly detector. "
+        "They are not thermal measurements and do not prove contact, grasping, or failure; use them only as supporting evidence."
         if "heatmap" in input_mode else ""
     )
     return f"""You are evaluating a robot manipulation attempt against a nominal reference.
@@ -23,7 +24,7 @@ Nominal reference:
 {nominal_description}
 
 {heatmap_note}
-Compare object identity and appearance, robot action, object motion/state change, and final state. Base the decision only on visible evidence. If evidence is insufficient, choose uncertain.
+Compare object identity and appearance, robot action, object motion/state change, and final state. Gripper proximity alone is not proof of grasping: claim a pickup only when object displacement or lifting is visibly supported across frames. Base the decision only on visible evidence. If evidence is insufficient, choose uncertain.
 
 Return exactly:
 Decision: success / failure / uncertain
