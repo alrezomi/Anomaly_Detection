@@ -126,6 +126,25 @@ def _parse_response(response: str) -> tuple[str, str]:
     )
 
 
+def _is_meaningful_description(response: str) -> bool:
+    """Reject headings/empty generations before they can become task memory."""
+    visible = re.sub(r"<think>.*?</think>", " ", response, flags=re.DOTALL | re.IGNORECASE)
+    visible = re.sub(r"</?answer>|####", " ", visible, flags=re.IGNORECASE)
+    visible = re.sub(r"^\s*answer\s*:\s*", "", visible, flags=re.IGNORECASE)
+    words = re.findall(r"[A-Za-z]{2,}", visible)
+    return len(visible.strip()) >= 40 and len(words) >= 8
+
+
+def _description_generation(generation: dict[str, Any]) -> dict[str, Any]:
+    """Use conservative decoding for structured descriptions."""
+    output = dict(generation)
+    output["max_new_tokens"] = max(400, int(output.get("max_new_tokens", 300)))
+    output["do_sample"] = False
+    output["repetition_penalty"] = 1.0
+    output["no_repeat_ngram_size"] = 0
+    return output
+
+
 def _save_inputs(
     output_directory: Path,
     mode: str,
@@ -206,8 +225,22 @@ def build_memory(arguments: argparse.Namespace) -> None:
         mode_name = f"reference_{bag_index:02d}"
         _save_inputs(audit_directory, mode_name, inputs)
         _print_inputs(f"NOMINAL DESCRIPTION ({bag_value})", inputs)
-        response = model.generate(inputs, DESCRIPTION_PROMPT, generation)
+        description_generation = _description_generation(generation)
+        response = model.generate(inputs, DESCRIPTION_PROMPT, description_generation)
         _print_exchange(f"NOMINAL DESCRIPTION ({bag_value})", DESCRIPTION_PROMPT, response)
+        if not _is_meaningful_description(response):
+            retry_prompt = (
+                DESCRIPTION_PROMPT
+                + "\n\nYour previous answer was empty. Inspect the images again and provide every requested field with concrete visible details."
+            )
+            print("\nNominal description was empty or incomplete; retrying once with a stronger prompt.")
+            response = model.generate(inputs, retry_prompt, description_generation)
+            _print_exchange(f"NOMINAL DESCRIPTION RETRY ({bag_value})", retry_prompt, response)
+        if not _is_meaningful_description(response):
+            raise RuntimeError(
+                "RynnBrain returned an empty/incomplete nominal description twice. "
+                "Task memory was not written, so an invalid reference cannot be used for testing."
+            )
         descriptions.append(response)
         records.append({"bag": bag_value, "prompt": DESCRIPTION_PROMPT, "response": response, "selected_frames": metadata})
     if len(descriptions) == 1:
@@ -219,8 +252,10 @@ def build_memory(arguments: argparse.Namespace) -> None:
             "Keep only behavior consistently supported across demonstrations; do not discuss success or failure.\n\n"
             + "\n\n---\n\n".join(descriptions)
         )
-        nominal_description = model.text(consolidation_prompt, generation)
+        nominal_description = model.text(consolidation_prompt, _description_generation(generation))
         _print_exchange("NOMINAL CONSOLIDATION", consolidation_prompt, nominal_description)
+        if not _is_meaningful_description(nominal_description):
+            raise RuntimeError("RynnBrain returned an invalid consolidated description; task memory was not written.")
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text(json.dumps({
         "nominal_description": nominal_description,
@@ -241,8 +276,12 @@ def run_test(arguments: argparse.Namespace) -> None:
     if not memory_path.is_file():
         raise FileNotFoundError(f"Task memory not found: {memory_path}. Run rynnbrain-memory first.")
     memory = json.loads(memory_path.read_text(encoding="utf-8"))
-    model = RynnBrainModel(vlm["model"])
-    nominal_description = memory["nominal_description"]
+    nominal_description = str(memory.get("nominal_description", ""))
+    if not _is_meaningful_description(nominal_description):
+        raise ValueError(
+            f"Task memory contains an empty/incomplete nominal description: {memory_path}. "
+            "Run rynnbrain-memory again before testing."
+        )
     print(f"Loaded RynnBrain task memory: {memory_path}")
     print(f"\nNOMINAL DESCRIPTION USED FOR TESTING:\n{nominal_description}")
 
@@ -257,17 +296,11 @@ def run_test(arguments: argparse.Namespace) -> None:
     sampling_end_sec = float(end_value) if end_value is not None else None
 
     source = vlm.get("source", "generated_videos")
+    input_modes = list(vlm.get("input_modes", ["raw"]))
     raw_video_paths = {
         topic: str(vision_output_directory / f"{_slug(topic)}_raw_original.mp4")
         for topic in topics
     }
-    # Backward compatibility for experiments created before original-resolution
-    # exports were added.
-    for topic, original_path in list(raw_video_paths.items()):
-        if not Path(original_path).is_file():
-            raw_video_paths[topic] = str(
-                vision_output_directory / f"{_slug(topic)}_model_input.mp4"
-            )
     heatmap_paths = {
         topic: str(vision_output_directory / f"{_slug(topic)}_heatmap.mp4")
         for topic in topics
@@ -275,22 +308,35 @@ def run_test(arguments: argparse.Namespace) -> None:
     raw_video_paths.update(vlm.get("raw_video_paths", {}))
     heatmap_paths.update(vlm.get("heatmap_video_paths", {}))
     if source == "generated_videos":
-        raw_inputs, frame_metadata = _heatmap_inputs(
-            raw_video_paths, topics, frame_count, sampling_start_sec, sampling_end_sec
-        )
-        raw_inputs = [
-            (label.replace("heatmap", "raw frame"), image)
-            for label, image in raw_inputs
-        ]
+        raw_inputs = []
+        frame_metadata = []
+        if any(mode in {"raw", "raw_heatmap"} for mode in input_modes):
+            missing_raw = [topic for topic in topics if not Path(raw_video_paths[topic]).is_file()]
+            if missing_raw:
+                expected = "\n  - ".join(raw_video_paths[topic] for topic in missing_raw)
+                raise FileNotFoundError(
+                    "Original-resolution raw video(s) are missing; refusing to mix them with "
+                    f"square DINO model-input videos. Expected:\n  - {expected}\n"
+                    "Run vision-test again with original-video export enabled, or explicitly set "
+                    "rynnbrain.raw_video_paths."
+                )
+            raw_inputs, frame_metadata = _heatmap_inputs(
+                raw_video_paths, topics, frame_count, sampling_start_sec, sampling_end_sec
+            )
+            raw_inputs = [
+                (label.replace("heatmap", "raw frame"), image)
+                for label, image in raw_inputs
+            ]
     elif source == "rosbag":
         raw_inputs, frame_metadata = _raw_inputs(
             Path(config["test_bag"]), topics, frame_count
         )
     else:
         raise ValueError("rynnbrain.source must be 'generated_videos' or 'rosbag'")
+    model = RynnBrainModel(vlm["model"])
     rows = []
     raw_records = []
-    for mode in vlm.get("input_modes", ["raw"]):
+    for mode in input_modes:
         if mode == "raw":
             inputs = raw_inputs
         elif mode == "heatmap":
