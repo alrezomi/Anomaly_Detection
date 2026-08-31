@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw
 
 from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
 from .model import RynnBrainModel
-from .prompts import DESCRIPTION_PROMPT, evaluation_prompt
+from .prompts import task_context_prompt, evaluation_prompt_multiturn
 
 
 def _slug(value: str) -> str:
@@ -126,25 +126,6 @@ def _parse_response(response: str) -> tuple[str, str]:
     )
 
 
-def _is_meaningful_description(response: str) -> bool:
-    """Reject headings/empty generations before they can become task memory."""
-    visible = re.sub(r"<think>.*?</think>", " ", response, flags=re.DOTALL | re.IGNORECASE)
-    visible = re.sub(r"</?answer>|####", " ", visible, flags=re.IGNORECASE)
-    visible = re.sub(r"^\s*answer\s*:\s*", "", visible, flags=re.IGNORECASE)
-    words = re.findall(r"[A-Za-z]{2,}", visible)
-    return len(visible.strip()) >= 40 and len(words) >= 8
-
-
-def _description_generation(generation: dict[str, Any]) -> dict[str, Any]:
-    """Use conservative decoding for structured descriptions."""
-    output = dict(generation)
-    output["max_new_tokens"] = max(400, int(output.get("max_new_tokens", 300)))
-    output["do_sample"] = False
-    output["repetition_penalty"] = 1.0
-    output["no_repeat_ngram_size"] = 0
-    return output
-
-
 def _save_inputs(
     output_directory: Path,
     mode: str,
@@ -179,7 +160,6 @@ def _save_inputs(
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--mode", choices=("memory", "test"), required=True)
     return parser.parse_args()
 
 
@@ -192,7 +172,10 @@ def _print_exchange(title: str, prompt: str, response: str) -> None:
 def _print_inputs(title: str, images: list[tuple[str, Image.Image]]) -> None:
     print(f"\n{title} - IMAGES SENT TO MODEL ({len(images)}):")
     for index, (label, image) in enumerate(images):
-        print(f"  [{index}] {label} size={image.size}")
+        if image is None:
+            print(f"  [{index}] {label} (no image for this mode)")
+        else:
+            print(f"  [{index}] {label} size={image.size}")
 
 
 def _common_config(arguments: argparse.Namespace) -> tuple[dict, dict, int, dict]:
@@ -207,87 +190,27 @@ def _common_config(arguments: argparse.Namespace) -> tuple[dict, dict, int, dict
     return config, vlm, frame_count, generation
 
 
-def build_memory(arguments: argparse.Namespace) -> None:
-    config, vlm, frame_count, generation = _common_config(arguments)
-    reference_bags = list(vlm.get("reference_bags", []))
-    memory_topics = list(vlm.get("memory_camera_topics", []))
-    if not reference_bags:
-        raise ValueError("rynnbrain-memory requires rynnbrain.reference_bags")
-    if not memory_topics:
-        raise ValueError("rynnbrain-memory requires rynnbrain.memory_camera_topics")
-    model = RynnBrainModel(vlm["model"])
-    memory_path = Path(vlm["task_memory_path"])
-    audit_directory = memory_path.parent / f"{memory_path.stem}_inputs"
-    descriptions: list[str] = []
-    records: list[dict[str, Any]] = []
-    for bag_index, bag_value in enumerate(reference_bags):
-        inputs, metadata = _raw_inputs(Path(bag_value), memory_topics, frame_count)
-        mode_name = f"reference_{bag_index:02d}"
-        _save_inputs(audit_directory, mode_name, inputs)
-        _print_inputs(f"NOMINAL DESCRIPTION ({bag_value})", inputs)
-        description_generation = _description_generation(generation)
-        response = model.generate(inputs, DESCRIPTION_PROMPT, description_generation)
-        _print_exchange(f"NOMINAL DESCRIPTION ({bag_value})", DESCRIPTION_PROMPT, response)
-        if not _is_meaningful_description(response):
-            retry_prompt = (
-                DESCRIPTION_PROMPT
-                + "\n\nYour previous answer was empty. Inspect the images again and provide every requested field with concrete visible details."
-            )
-            print("\nNominal description was empty or incomplete; retrying once with a stronger prompt.")
-            response = model.generate(inputs, retry_prompt, description_generation)
-            _print_exchange(f"NOMINAL DESCRIPTION RETRY ({bag_value})", retry_prompt, response)
-        if not _is_meaningful_description(response):
-            raise RuntimeError(
-                "RynnBrain returned an empty/incomplete nominal description twice. "
-                "Task memory was not written, so an invalid reference cannot be used for testing."
-            )
-        descriptions.append(response)
-        records.append({"bag": bag_value, "prompt": DESCRIPTION_PROMPT, "response": response, "selected_frames": metadata})
-    if len(descriptions) == 1:
-        nominal_description = descriptions[0]
-        consolidation_prompt = None
-    else:
-        consolidation_prompt = (
-            "Create one concise canonical nominal robot-task description from these descriptions. "
-            "Keep only behavior consistently supported across demonstrations; do not discuss success or failure.\n\n"
-            + "\n\n---\n\n".join(descriptions)
-        )
-        nominal_description = model.text(consolidation_prompt, _description_generation(generation))
-        _print_exchange("NOMINAL CONSOLIDATION", consolidation_prompt, nominal_description)
-        if not _is_meaningful_description(nominal_description):
-            raise RuntimeError("RynnBrain returned an invalid consolidated description; task memory was not written.")
-    memory_path.parent.mkdir(parents=True, exist_ok=True)
-    memory_path.write_text(json.dumps({
-        "nominal_description": nominal_description,
-        "description_prompt": DESCRIPTION_PROMPT,
-        "reference_calls": records,
-        "consolidation_prompt": consolidation_prompt,
-        "reference_bags": reference_bags,
-        "camera_topics": memory_topics,
-        "num_frames": frame_count,
-    }, indent=2), encoding="utf-8")
-    print(f"\nSaved RynnBrain task memory: {memory_path}")
-    print("Memory build finished. No test bag was evaluated.")
+def evaluate_multiturn(
+    model: RynnBrainModel,
+    config: dict[str, Any],
+    vlm: dict[str, Any],
+    frame_count: int,
+    generation: dict[str, Any],
+    output_directory: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Evaluate one test bag/video set with an already-loaded RynnBrain model.
 
+    Split out from run_test_multiturn so a benchmark driver can load the model
+    once and call this per test bag instead of reloading it every time.
+    Returns (rows, frame_metadata, raw_records, task_description).
+    """
+    task_description = vlm.get("task_description", "Robot manipulation task")
 
-def run_test(arguments: argparse.Namespace) -> None:
-    config, vlm, frame_count, generation = _common_config(arguments)
-    memory_path = Path(vlm["task_memory_path"])
-    if not memory_path.is_file():
-        raise FileNotFoundError(f"Task memory not found: {memory_path}. Run rynnbrain-memory first.")
-    memory = json.loads(memory_path.read_text(encoding="utf-8"))
-    nominal_description = str(memory.get("nominal_description", ""))
-    if not _is_meaningful_description(nominal_description):
-        raise ValueError(
-            f"Task memory contains an empty/incomplete nominal description: {memory_path}. "
-            "Run rynnbrain-memory again before testing."
-        )
-    print(f"Loaded RynnBrain task memory: {memory_path}")
-    print(f"\nNOMINAL DESCRIPTION USED FOR TESTING:\n{nominal_description}")
+    print(f"[MULTI-TURN MODE] Single model call with visual memory")
+    print(f"Task: {task_description}\n")
 
-    vision_output_directory = Path(config["output_dir"])
-    output_directory = Path(vlm.get("output_dir", vision_output_directory / "rynnbrain"))
     output_directory.mkdir(parents=True, exist_ok=True)
+    vision_output_directory = Path(config["output_dir"])
     topics = list(vlm.get("camera_topics", config["camera_topics"]))
     if not topics:
         raise ValueError("rynnbrain.camera_topics must contain at least one topic")
@@ -333,9 +256,23 @@ def run_test(arguments: argparse.Namespace) -> None:
         )
     else:
         raise ValueError("rynnbrain.source must be 'generated_videos' or 'rosbag'")
-    model = RynnBrainModel(vlm["model"])
+
+    reference_bags = list(vlm.get("reference_bags", []))
+    if not reference_bags:
+        raise ValueError(
+            "rynnbrain.reference_bags must list at least one nominal demonstration bag "
+            "for multi-turn evaluation (it supplies the turn-1 'nominal demonstration' images)."
+        )
+    memory_topics = list(vlm.get("memory_camera_topics", topics))
+    nominal_images: list[tuple[str, Image.Image]] = []
+    for bag_value in reference_bags:
+        bag_images, _ = _raw_inputs(Path(bag_value), memory_topics, frame_count)
+        nominal_images.extend(bag_images)
+    _save_inputs(output_directory, "nominal", nominal_images)
+
     rows = []
     raw_records = []
+
     for mode in input_modes:
         if mode == "raw":
             inputs = raw_inputs
@@ -350,11 +287,39 @@ def run_test(arguments: argparse.Namespace) -> None:
             inputs = [item for pair in zip(raw_inputs, heatmaps) for item in pair]
         else:
             raise ValueError(f"Unsupported input mode: {mode}")
+
         _save_inputs(output_directory, mode, inputs)
-        prompt = evaluation_prompt(nominal_description, mode)
-        _print_inputs(f"TEST EVALUATION ({mode})", inputs)
-        response = model.generate(inputs, prompt, generation)
-        _print_exchange(f"TEST EVALUATION ({mode})", prompt, response)
+
+        # Turn 1: Model sees nominal demonstration and learns the task
+        turn1_text = task_context_prompt(task_description)
+        
+        # Turn 2: Model evaluates test case against observed nominal
+        turn2_text = evaluation_prompt_multiturn(task_description, mode)
+        
+        # Create multi-turn conversation
+        turns = [
+            {
+                "role": "user",
+                "images": nominal_images,
+                "text": turn1_text
+            },
+            {
+                "role": "user",
+                "images": inputs,
+                "text": turn2_text
+            }
+        ]
+        
+        _print_inputs(f"MULTITURN NOMINAL ({mode})", nominal_images)
+        _print_inputs(f"MULTITURN TEST ({mode})", inputs)
+        
+        # Use multi-turn generation
+        response = model.generate_multiturn(turns, generation)
+        
+        # Display prompts and response
+        prompt_display = f"[Turn 1] Nominal demonstration:\n{turn1_text}\n\n[Turn 2] Test evaluation:\n{turn2_text}"
+        _print_exchange(f"MULTITURN EVALUATION ({mode})", prompt_display, response)
+        
         decision, confidence = _parse_response(response)
         rows.append(
             {
@@ -364,21 +329,39 @@ def run_test(arguments: argparse.Namespace) -> None:
                 "confidence": confidence,
                 "ground_truth_label": vlm.get("ground_truth_label", ""),
                 "response": response,
+                "evaluation_method": "multiturn"
             }
         )
-        raw_records.append({"input_mode": mode, "prompt": prompt, "response": response})
-        print(f"{mode}: decision={decision}, confidence={confidence}")
+        raw_records.append({
+            "input_mode": mode,
+            "evaluation_method": "multiturn",
+            "prompt": prompt_display,
+            "response": response
+        })
+        print(f"{mode} (multiturn): decision={decision}, confidence={confidence}")
 
-    pd.DataFrame(rows).to_csv(output_directory / "rynnbrain_results.csv", index=False)
+    return rows, frame_metadata, raw_records, task_description
+
+
+def write_multiturn_outputs(
+    output_directory: Path,
+    rows: list[dict[str, Any]],
+    frame_metadata: list[dict[str, Any]],
+    raw_records: list[dict[str, Any]],
+    task_description: str,
+) -> None:
+    """Persist the same CSV/JSON files run_test_multiturn has always written."""
+    pd.DataFrame(rows).to_csv(output_directory / "rynnbrain_results_multiturn.csv", index=False)
     pd.DataFrame(frame_metadata).to_csv(
         output_directory / "selected_vlm_frames.csv", index=False
     )
-    (output_directory / "rynnbrain_responses.json").write_text(
+    (output_directory / "rynnbrain_responses_multiturn.json").write_text(
         json.dumps(
             {
-                "nominal_description": nominal_description,
+                "task_description": task_description,
+                "evaluation_method": "multiturn (visual memory - no saved description)",
                 "selected_raw_frames": frame_metadata,
-                "results": raw_records,
+                "results": raw_records
             },
             indent=2,
         ),
@@ -387,12 +370,25 @@ def run_test(arguments: argparse.Namespace) -> None:
     print(f"Results saved to: {output_directory}")
 
 
+def run_test_multiturn(arguments: argparse.Namespace) -> None:
+    """
+    Run test evaluation using multi-turn conversation with visual memory.
+    The model sees nominal frames first, then evaluates test frames against them.
+    No need for saved nominal description - model uses visual understanding.
+    """
+    config, vlm, frame_count, generation = _common_config(arguments)
+    vision_output_directory = Path(config["output_dir"])
+    output_directory = Path(vlm.get("output_dir", vision_output_directory / "rynnbrain_multiturn"))
+    model = RynnBrainModel(vlm["model"])
+    rows, frame_metadata, raw_records, task_description = evaluate_multiturn(
+        model, config, vlm, frame_count, generation, output_directory
+    )
+    write_multiturn_outputs(output_directory, rows, frame_metadata, raw_records, task_description)
+
+
 def main() -> None:
     arguments = parse_arguments()
-    if arguments.mode == "memory":
-        build_memory(arguments)
-    else:
-        run_test(arguments)
+    run_test_multiturn(arguments)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,27 @@ x-pipeline-common: &pipeline-common
     - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
     - huggingface-cache:/cache/huggingface
 
+# Shared GPU image for DINO test mode and RynnBrain (same Dockerfile/image;
+# only the entrypoint differs per service).
+x-rynnbrain-common: &rynnbrain-common
+  build:
+    context: .
+    dockerfile: Dockerfile.rynnbrain
+    args:
+      RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.08-py3}
+  image: anomaly-detection-rynnbrain:local
+  init: true
+  shm_size: "4gb"
+  runtime: nvidia
+  environment:
+    ANOMALY_DATA_ROOT: /data
+    ANOMALY_OUTPUT_ROOT: /outputs
+  volumes:
+    - ${ANOMALY_DATA_DIR:-../data}:/data:ro
+    - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
+    - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
+    - huggingface-cache:/cache/huggingface
+
 services:
   # Legacy MP4/MCAP launcher.
   pipeline:
@@ -33,46 +54,14 @@ services:
       - huggingface-cache:/cache/huggingface
 
   vision-memory:
-    build:
-      context: .
-      dockerfile: Dockerfile.rynnbrain
-      args:
-        RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.08-py3}
-    image: anomaly-detection-rynnbrain:local
-    init: true
-    shm_size: "4gb"
-    runtime: nvidia
-    environment:
-      ANOMALY_DATA_ROOT: /data
-      ANOMALY_OUTPUT_ROOT: /outputs
+    <<: *rynnbrain-common
     entrypoint: ["python", "run_rosbag_vision.py"]
     command: ["--config", "/config/pipeline_config.json", "--mode", "build-memory"]
-    volumes:
-      - ${ANOMALY_DATA_DIR:-../data}:/data:ro
-      - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
-      - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
-      - huggingface-cache:/cache/huggingface
 
   vision-test:
-    build:
-      context: .
-      dockerfile: Dockerfile.rynnbrain
-      args:
-        RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.08-py3}
-    image: anomaly-detection-rynnbrain:local
-    init: true
-    shm_size: "4gb"
-    runtime: nvidia
-    environment:
-      ANOMALY_DATA_ROOT: /data
-      ANOMALY_OUTPUT_ROOT: /outputs
+    <<: *rynnbrain-common
     entrypoint: ["python", "run_rosbag_vision.py"]
     command: ["--config", "/config/pipeline_config.json", "--mode", "test"]
-    volumes:
-      - ${ANOMALY_DATA_DIR:-../data}:/data:ro
-      - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
-      - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
-      - huggingface-cache:/cache/huggingface
 
   # Generate clean labels plus timestamp diagnostics from recorded stages.
   bag-labels:
@@ -88,29 +77,19 @@ services:
       - ${STAGE_STARTUP_IGNORE_SEC:-0.1}
       - --recursive
 
-  # Build a reusable nominal task description. Does not evaluate a test bag.
-  rynnbrain-memory: &rynnbrain-common
-    build:
-      context: .
-      dockerfile: Dockerfile.rynnbrain
-      args:
-        RYNNBRAIN_BASE_IMAGE: ${RYNNBRAIN_BASE_IMAGE:-nvcr.io/nvidia/pytorch:25.08-py3}
-    image: anomaly-detection-rynnbrain:local
-    init: true
-    shm_size: "4gb"
-    runtime: nvidia
-    volumes:
-      - ${ANOMALY_DATA_DIR:-../data}:/data:ro
-      - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
-      - ${PIPELINE_CONFIG_FILE:-./pipeline_config.json}:/config/pipeline_config.json:ro
-      - huggingface-cache:/cache/huggingface
-    entrypoint: ["python", "-m", "rynnbrain_vlm.run"]
-    command: ["--config", "/config/pipeline_config.json", "--mode", "memory"]
-
-  # Evaluate generated test videos using an existing task description.
-  rynnbrain-test:
+  # Evaluate using multi-turn mode: the model sees the nominal reference-bag
+  # frames first, then evaluates the configured test bag against them.
+  rynnbrain-test-multiturn:
     <<: *rynnbrain-common
-    command: ["--config", "/config/pipeline_config.json", "--mode", "test"]
+    entrypoint: ["python", "-m", "rynnbrain_vlm.run"]
+    command: ["--config", "/config/pipeline_config.json"]
+
+  # Run DINO + RynnBrain multi-turn against every non-nominal demonstration,
+  # one folder per bag plus one combined benchmark_summary.csv.
+  benchmark:
+    <<: *rynnbrain-common
+    entrypoint: ["python", "run_benchmark.py"]
+    command: ["--config", "/config/pipeline_config.json"]
 
 volumes:
   huggingface-cache:

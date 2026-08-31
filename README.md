@@ -444,15 +444,21 @@ it does not modify the DINO/time-series container. It reuses the existing
 `pipeline_config.json`; copy the `rynnbrain` section from
 `pipeline_config.example.json` into your local configuration.
 
-By default, `source` is `generated_videos`, so RynnBrain reads the existing
-`<camera>_model_input.mp4` and `<camera>_heatmap.mp4` files in the configured
-vision `output_dir`. It does not rerun DINO or decode the test rosbag. Set
-`source` to `rosbag` only when direct bag sampling is specifically wanted.
+Evaluation is multi-turn and always uses visual memory, not a saved text
+description: turn 1 shows the model the nominal demonstration frames sampled
+directly from `rynnbrain.reference_bags` (via `rynnbrain.memory_camera_topics`),
+and turn 2 shows the test bag's frames and asks for a decision against what it
+just saw. There is no separate "build memory" step to run first.
+
+By default, `source` is `generated_videos`, so the turn-2 test frames come from
+the existing `<camera>_raw_original.mp4` / `<camera>_heatmap.mp4` files in the
+configured vision `output_dir`. It does not rerun DINO. Set `source` to
+`rosbag` only when direct bag sampling is specifically wanted for the test side.
 
 The configuration selects the checkpoint, number of uniformly sampled time
 steps, and input modes.
 Supported modes are `raw`, `heatmap`, and paired `raw_heatmap`.
-`rynnbrain.memory_camera_topics` selects nominal-description viewpoints, while
+`rynnbrain.memory_camera_topics` selects nominal-demonstration viewpoints, while
 `rynnbrain.camera_topics` independently selects test viewpoints.
 The total visual load is approximately `num_frames x number_of_cameras`, or
 twice that for paired raw/heatmap input.
@@ -460,27 +466,22 @@ twice that for paired raw/heatmap input.
 Build the shared GPU image once:
 
 ```bash
-docker compose build rynnbrain-memory
+docker compose build rynnbrain-test-multiturn
 ```
 
-Run the two explicit operations with the same configuration:
+Run it against the configured `test_bag`:
 
 ```bash
-# Nominal reference bag(s) -> saved task description; no test is evaluated.
-docker compose run --rm rynnbrain-memory
-
-# Saved task description + generated test videos -> evaluation results.
-docker compose run --rm rynnbrain-test
+docker compose run --rm rynnbrain-test-multiturn
 ```
 
-Both commands print the complete prompt and unmodified response in the
-terminal. Memory JSON stores its prompt, response, bags, cameras, and selected
-frames. Test JSON stores the nominal description plus every evaluation prompt
-and response. Test mode never reads reference bags and stops if the named task
-memory does not exist.
+It prints the complete prompt (both turns) and unmodified response in the
+terminal. `rynnbrain_responses_multiturn.json` stores the task description
+plus every evaluation prompt and response.
 Selected model inputs, parsed decisions, confidence, full responses, and frame
 timestamps are saved under `output_dir`. Each input mode also contains
-`vlm_input_storyboard.jpg`, showing the exact images and order sent to the VLM.
+`vlm_input_storyboard.jpg`, showing the exact images and order sent to the VLM,
+plus a `nominal/` folder with the reference-bag frames shown in turn 1.
 `selected_vlm_frames.csv` records the source video, exact frame index, timestamp,
 FPS, and camera topic. Use `rynnbrain.sampling_start_sec` and
 `rynnbrain.sampling_end_sec` to exclude stale frames before or after the actual
@@ -489,3 +490,33 @@ task while keeping raw and heatmap selection aligned.
 The default RynnBrain base is NVIDIA's PyTorch 25.08 container for Jetson AGX
 Thor. It can be overridden with `RYNNBRAIN_BASE_IMAGE` when running on a
 different NVIDIA platform.
+
+## Benchmark across every demonstration
+
+`run_benchmark.py` scores the full DINO + RynnBrain (multi-turn) setup against
+every bag under the data root that was **not** used as a DINO nominal bag
+(`nominal_bags`) or a RynnBrain nominal-demonstration bag
+(`rynnbrain.reference_bags`) — both are read straight from `pipeline_config.json`
+and automatically excluded. It reuses the existing DINO nominal cache, so build
+that once first:
+
+```bash
+docker compose run --rm vision-memory
+```
+
+Then run the benchmark itself:
+
+```bash
+docker compose run --rm benchmark
+```
+
+For each remaining bag it writes a self-contained folder (videos, DINO CSVs,
+selected VLM frames, prompts/responses) under
+`<rynnbrain.output_dir>_benchmark/<bag_name>/`, and appends one row per
+`(bag, input_mode)` to a single `benchmark_summary.csv` in that same directory.
+Ground truth per bag comes from the same recorded-stage-marker heuristic as
+`build_dataset_manifest.py`; bags without a clear `normal`/`fail` marker still
+run but are excluded from the printed accuracy numbers. The RynnBrain model is
+loaded once for the whole run rather than once per bag. Pass `--limit N` to
+smoke-test on a handful of bags, or `--skip-dino`/`--skip-vlm` to rerun only
+one stage.

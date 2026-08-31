@@ -43,21 +43,45 @@ class RynnBrainModel:
         output.thumbnail((self.max_image_size, self.max_image_size))
         return output
 
-    def generate(
+    def generate_multiturn(
         self,
-        images: list[tuple[str, Image.Image]],
-        prompt: str,
+        turns: list[dict[str, Any]],
         generation: dict[str, Any],
     ) -> str:
+        """
+        Generate response using multi-turn conversation.
+        
+        Args:
+            turns: List of conversation turns, each with:
+                - "role": "user" or "assistant"
+                - "images": list of (label, Image) tuples (optional, for user turns)
+                - "text": text response (for assistant turns) or prompt (for user turns)
+            generation: Generation config dictionary
+            
+        Returns:
+            Model's response to the last user turn
+        """
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        content: list[dict[str, Any]] = []
-        for label, image in images:
-            content.append({"type": "text", "text": label})
-            content.append({"type": "image", "image": self._resize(image)})
-        content.append({"type": "text", "text": prompt})
-        conversation = [{"role": "user", "content": content}]
+        
+        conversation: list[dict[str, Any]] = []
+        
+        for turn in turns:
+            role = turn["role"]
+            content: list[dict[str, Any]] = []
+            
+            # Add images if provided (typically for user turns)
+            if "images" in turn and turn["images"]:
+                for label, image in turn["images"]:
+                    content.append({"type": "text", "text": label})
+                    content.append({"type": "image", "image": self._resize(image)})
+            
+            # Add text (prompt or assistant response)
+            content.append({"type": "text", "text": turn["text"]})
+            
+            conversation.append({"role": role, "content": content})
+        
         template_kwargs = {
             "add_generation_prompt": True,
             "tokenize": True,
@@ -88,6 +112,3 @@ class RynnBrainModel:
         return self.processor.decode(
             new_tokens[0], skip_special_tokens=True
         ).strip()
-
-    def text(self, prompt: str, generation: dict[str, Any]) -> str:
-        return self.generate([], prompt, generation)

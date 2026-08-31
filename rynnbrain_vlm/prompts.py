@@ -1,33 +1,49 @@
-DESCRIPTION_PROMPT = """You are observing ordered multi-camera frames from a nominal robot manipulation attempt.
-Describe only visible evidence. Identify the manipulated object carefully and compare the first, middle, and last frames. Focus on the initial state, robot action, object motion or state change, and final state. Do not decide success or failure.
+# MULTI-TURN MODE PROMPTS
+# The model sees nominal reference-bag frames first, then evaluates test frames
+# against them in a second turn (visual memory - no saved description text).
 
-Write a complete answer. Never return only a heading such as "Answer:".
-Return these fields on separate lines:
-Scene description: ...
-Manipulated object: ...
-Initial state: ...
-Robot action: ...
-Object motion or state change: ...
-Final state: ...
-Uncertain points: ..."""
+def task_context_prompt(task_description: str) -> str:
+    """First turn: Establish task context and show nominal demonstration."""
+    return f"""You are evaluating whether there is any anomaly in a robot manipulation attempt.
+
+        Nominal reference task that robot is trying to perform: {task_description}
+
+        You will see a nominal (correct/successful) demonstration first.
+        Study the object state, gripper motion, and action sequence carefully.
+        You will then evaluate if a test case matches this demonstration.
+
+        Observe this nominal demonstration closely:"""
 
 
-def evaluation_prompt(nominal_description: str, input_mode: str) -> str:
-    heatmap_note = (
-        "Colored heatmap regions indicate locations highlighted by a separate visual anomaly detector. "
-        "They are not thermal measurements and do not prove contact, grasping, or failure; use them only as supporting evidence."
-        if "heatmap" in input_mode else ""
-    )
-    return f"""You are evaluating a robot manipulation attempt against a nominal reference.
+def evaluation_prompt_multiturn(task_description: str, input_mode: str) -> str:
+    """Second turn: Evaluate test case against observed nominal demonstration.
 
-Nominal reference:
-{nominal_description}
+    The model has already seen the nominal frames, so we just ask it to compare.
+    """
+    if input_mode == "raw":
+        heatmap_info = ""
+        visual_focus = "raw camera frames"
+    elif input_mode == "heatmap":
+        heatmap_info = "\nNote: You will see anomaly detection heatmaps (based on approximate visual differences between the nominal demonstration and the current observation, which is our test case)."
+        visual_focus = "anomaly heatmap patterns"
+    else:  # raw_heatmap
+        heatmap_info = "\nNote: You will see both raw frames and anomaly heatmaps for cross-reference."
+        visual_focus = "raw frames and anomaly patterns"
 
-{heatmap_note}
-Compare object identity and appearance, robot action, object motion/state change, and final state. Gripper proximity alone is not proof of grasping: claim a pickup only when object displacement or lifting is visibly supported across frames. Base the decision only on visible evidence. If evidence is insufficient, choose uncertain.
+    return f"""You observed the nominal demonstration for: {task_description}
 
-Return exactly:
-Decision: success / failure / uncertain
-Failure reason: ...
-Visual evidence: ...
-Confidence: high / medium / low"""
+        Now evaluate this test case against the nominal demonstration.{heatmap_info}
+
+        Compare:
+        - Object identity and state (same object? same position/orientation?)
+        - Gripper action (same motion and trajectory?)
+        - Object motion and displacement (same movement?)
+        - Final state (same end result?)
+
+        According to the nominal demonstration, evaluate if the attempt is successful or if there is an anomaly. Focus on {visual_focus} for your decision.
+
+        Return exactly:
+        Decision: success / failure / uncertain
+        Failure reason: [explain what is different, if anything]
+        Visual evidence: [describe what you observed in {visual_focus}]
+        Confidence: high / medium / low"""
