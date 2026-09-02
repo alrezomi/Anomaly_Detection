@@ -8,14 +8,15 @@ x-pipeline-common: &pipeline-common
   environment:
     ANOMALY_DATA_ROOT: /data
     ANOMALY_OUTPUT_ROOT: /outputs
+    HF_TOKEN: ${HF_TOKEN:-}
   volumes:
     # Host paths are configured in the local .env file.
     - ${ANOMALY_DATA_DIR:-../data}:/data:ro
     - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
     - huggingface-cache:/cache/huggingface
 
-# Shared GPU image for DINO test mode and RynnBrain (same Dockerfile/image;
-# only the entrypoint differs per service).
+# Shared GPU image for DINO test mode, RynnBrain, and RynnValue (same
+# Dockerfile/image; only the entrypoint differs per service).
 x-rynnbrain-common: &rynnbrain-common
   build:
     context: .
@@ -29,6 +30,7 @@ x-rynnbrain-common: &rynnbrain-common
   environment:
     ANOMALY_DATA_ROOT: /data
     ANOMALY_OUTPUT_ROOT: /outputs
+    HF_TOKEN: ${HF_TOKEN:-}
   volumes:
     - ${ANOMALY_DATA_DIR:-../data}:/data:ro
     - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
@@ -84,11 +86,25 @@ services:
     entrypoint: ["python", "-m", "rynnbrain_vlm.run"]
     command: ["--config", "/config/pipeline_config.json"]
 
+  # RynnValue evaluates raw trajectories directly with task-conditioned
+  # temporal values and native Match/Success verification. No nominal visual
+  # memory is required.
+  rynnvalue-test:
+    <<: *rynnbrain-common
+    entrypoint: ["python", "-m", "rynnvalue_vlm.run"]
+    command: ["--config", "/config/pipeline_config.json"]
+
   # Run DINO + RynnBrain multi-turn against every non-nominal demonstration,
   # one folder per bag plus one combined benchmark_summary.csv.
   benchmark:
     <<: *rynnbrain-common
     entrypoint: ["python", "run_benchmark.py"]
+    command: ["--config", "/config/pipeline_config.json"]
+
+  # Run DINO + RynnValue on the same held-out bag set used by benchmark.
+  rynnvalue-benchmark:
+    <<: *rynnbrain-common
+    entrypoint: ["python", "run_rynnvalue_benchmark.py"]
     command: ["--config", "/config/pipeline_config.json"]
 
 volumes:

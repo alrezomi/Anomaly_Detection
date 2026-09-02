@@ -1,10 +1,13 @@
 # Multimodal anomaly detection
 
-This project contains two anomaly-detection sections that use one shared
-experiment selection:
+This project contains four complementary anomaly-detection paths. The first two
+use the legacy shared experiment selection; the VLM paths use
+`pipeline_config.json`:
 
 - DINOv2 vision anomaly detection
 - GMR force/torque time-series anomaly detection
+- RynnBrain two-turn semantic anomaly detection with nominal visual context
+- RynnValue task-conditioned temporal-value and failure detection
 
 ## Select the inputs once
 
@@ -64,6 +67,8 @@ AD/
 `-- Script_VS/
     |-- experiment_config.py
     |-- launch_pipeline.py
+    |-- rynnbrain_vlm/
+    |-- rynnvalue_vlm/
     |-- time_series_gmr_scripts/
     `-- vision_dinov2/
 ```
@@ -444,11 +449,11 @@ it does not modify the DINO/time-series container. It reuses the existing
 `pipeline_config.json`; copy the `rynnbrain` section from
 `pipeline_config.example.json` into your local configuration.
 
-Evaluation is multi-turn and always uses visual memory, not a saved text
-description: turn 1 shows the model the nominal demonstration frames sampled
-directly from `rynnbrain.reference_bags` (via `rynnbrain.memory_camera_topics`),
-and turn 2 shows the test bag's frames and asks for a decision against what it
-just saw. There is no separate "build memory" step to run first.
+Evaluation uses only the final two-turn approach. There is no saved nominal
+description and no older text-memory test path: turn 1 shows the model nominal
+demonstration frames sampled directly from `rynnbrain.reference_bags` (via
+`rynnbrain.reference_camera_topics`), and turn 2 shows the test frames in the
+same conversation. There is no separate RynnBrain memory-building step.
 
 By default, `source` is `generated_videos`, so the turn-2 test frames come from
 the existing `<camera>_raw_original.mp4` / `<camera>_heatmap.mp4` files in the
@@ -458,7 +463,7 @@ configured vision `output_dir`. It does not rerun DINO. Set `source` to
 The configuration selects the checkpoint, number of uniformly sampled time
 steps, and input modes.
 Supported modes are `raw`, `heatmap`, and paired `raw_heatmap`.
-`rynnbrain.memory_camera_topics` selects nominal-demonstration viewpoints, while
+`rynnbrain.reference_camera_topics` selects nominal-demonstration viewpoints, while
 `rynnbrain.camera_topics` independently selects test viewpoints.
 The total visual load is approximately `num_frames x number_of_cameras`, or
 twice that for paired raw/heatmap input.
@@ -492,7 +497,67 @@ The default RynnBrain base is NVIDIA's PyTorch 25.08 container for Jetson AGX
 Thor. It can be overridden with `RYNNBRAIN_BASE_IMAGE` when running on a
 different NVIDIA platform.
 
-## Benchmark across every demonstration
+## RynnValue VLM experiments
+
+RynnValue is an independent fourth detector. Unlike RynnBrain multi-turn mode,
+it does not need `reference_bags` or a nominal visual conversation. It consumes
+raw trajectory frames plus `rynnvalue.task_instruction` and uses the released
+RynnValue heads to produce:
+
+- remaining time to task completion for every sampled frame;
+- signed relative time between adjacent observations and value-head entropy;
+- the native `Video Description`, `Match`, and `Success` verification block.
+
+The anomaly decision uses only the model's native verification: `Match: No` or
+`Success: No` is `failure`, both `Yes` is `success`, and incomplete/unparseable
+verification is `uncertain`. Increases in predicted remaining time larger than
+`regression_tolerance_sec` are saved as temporal-regression diagnostics, but do
+not silently override the native decision.
+
+Copy the `rynnvalue` section from `pipeline_config.example.json`. The example
+uses `Alibaba-DAMO-Academy/RynnValue-8B`, eight sampled frames, the required
+`pred_slot_isolated_eager` attention, and BF16 on one CUDA device. The released
+8B inference setup is intended for a GPU with roughly 24 GB or more. Select
+`Alibaba-DAMO-Academy/RynnValue-4B` in `rynnvalue.model.model_id` when the 8B
+checkpoint does not fit. `device_map` and `max_memory` remain available as
+advanced overrides, although a single device follows the official inference
+path most closely.
+
+`source: generated_videos` reads each camera's existing
+`<camera>_raw_original.mp4` from the vision `output_dir`; RynnValue never uses
+the DINO heatmap as model input. Set `source: rosbag` to sample the configured
+`test_bag` directly. Multiple `camera_topics` are evaluated independently so
+each camera retains a valid chronological trajectory and camera description.
+
+On a new machine, install Docker with the Compose plugin, an NVIDIA driver, and
+the NVIDIA Container Toolkit. Then create the two ignored machine-local files
+and edit their host/container paths and task settings:
+
+```bash
+cp .env.example .env
+cp pipeline_config.example.json pipeline_config.json
+```
+
+Build and run in one command:
+
+```bash
+docker compose run --build --rm rynnvalue-test
+```
+
+No separate VLM installation command is required. `--build` installs the
+Python dependencies into the image. On the first run, Hugging Face
+`from_pretrained` downloads the configured public RynnValue checkpoint and its
+trusted model code into the persistent `huggingface-cache` Docker volume. Later
+`--rm` runs remove only the temporary container, not the cached model. Internet
+access is therefore required for the image and first model download; later runs
+reuse both. An optional `HF_TOKEN` can be placed in the ignored `.env` file.
+
+The configured RynnValue `output_dir` receives `rynnvalue_results.csv` (one
+native decision per camera), `rynnvalue_values.csv` (per-frame temporal values),
+`rynnvalue_analysis.json`, a remaining-time graph per camera, and the exact
+selected input frames/storyboard.
+
+## RynnBrain benchmark across every demonstration
 
 `run_benchmark.py` scores the full DINO + RynnBrain (multi-turn) setup against
 every bag under the data root that was **not** used as a DINO nominal bag
@@ -521,3 +586,19 @@ run but are excluded from the printed accuracy numbers. The RynnBrain model is
 loaded once for the whole run rather than once per bag. Pass `--limit N` to
 smoke-test on a handful of bags, or `--skip-dino`/`--skip-vlm` to rerun only
 one stage.
+
+## RynnValue benchmark across every demonstration
+
+`run_rynnvalue_benchmark.py` uses the same held-out bag selection as the
+RynnBrain benchmark and loads RynnValue only once. After the named DINO memory
+has been built, run:
+
+```bash
+docker compose run --rm rynnvalue-benchmark
+```
+
+Results are written below `<rynnvalue.output_dir>_benchmark/<bag_name>/`, with a
+combined `benchmark_summary.csv` containing the native RynnValue decision,
+ground-truth correctness, temporal diagnostics, and DINO summary columns for
+each camera. Use `--limit N` for a smoke test or `--skip-dino` when each bag's
+raw video and DINO outputs already exist.
