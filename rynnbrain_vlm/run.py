@@ -314,11 +314,14 @@ def evaluate_multiturn(
         _print_inputs(f"MULTITURN TEST ({mode})", inputs)
         
         # Use multi-turn generation
-        response = model.generate_multiturn(turns, generation)
+        nominal_response, response = model.generate_multiturn(turns, generation)
         
         # Display prompts and response
         prompt_display = f"[Turn 1] Nominal demonstration:\n{turn1_text}\n\n[Turn 2] Test evaluation:\n{turn2_text}"
-        _print_exchange(f"MULTITURN EVALUATION ({mode})", prompt_display, response)
+        _print_exchange(
+            f"MULTITURN TURN 1 ({mode})", turn1_text, nominal_response
+        )
+        _print_exchange(f"MULTITURN TURN 2 ({mode})", turn2_text, response)
         
         decision, confidence = _parse_response(response)
         rows.append(
@@ -328,6 +331,7 @@ def evaluate_multiturn(
                 "decision": decision,
                 "confidence": confidence,
                 "ground_truth_label": vlm.get("ground_truth_label", ""),
+                "nominal_response": nominal_response,
                 "response": response,
                 "evaluation_method": "multiturn"
             }
@@ -335,7 +339,27 @@ def evaluate_multiturn(
         raw_records.append({
             "input_mode": mode,
             "evaluation_method": "multiturn",
+            "turns": [
+                {
+                    "role": "user",
+                    "prompt": turn1_text,
+                    "images": [
+                        {"label": label, "size": list(image.size)}
+                        for label, image in nominal_images
+                    ],
+                    "response": nominal_response,
+                },
+                {
+                    "role": "user",
+                    "prompt": turn2_text,
+                    "images": [
+                        {"label": label, "size": list(image.size)}
+                        for label, image in inputs
+                    ],
+                },
+            ],
             "prompt": prompt_display,
+            "nominal_response": nominal_response,
             "response": response
         })
         print(f"{mode} (multiturn): decision={decision}, confidence={confidence}")

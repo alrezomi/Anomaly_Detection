@@ -475,9 +475,10 @@ Run it against the configured `test_bag`:
 docker compose run --rm rynnbrain-test-multiturn
 ```
 
-It prints the complete prompt (both turns) and unmodified response in the
-terminal. `rynnbrain_responses_multiturn.json` stores the task description
-plus every evaluation prompt and response.
+It prints each prompt and unmodified response in the terminal, including the
+intermediate response after the nominal turn. `rynnbrain_responses_multiturn.json`
+stores the task description, both responses, and an exact per-turn manifest of
+the image labels and sizes sent to the model.
 Selected model inputs, parsed decisions, confidence, full responses, and frame
 timestamps are saved under `output_dir`. Each input mode also contains
 `vlm_input_storyboard.jpg`, showing the exact images and order sent to the VLM,

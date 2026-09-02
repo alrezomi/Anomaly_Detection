@@ -47,7 +47,7 @@ class RynnBrainModel:
         self,
         turns: list[dict[str, Any]],
         generation: dict[str, Any],
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         Generate response using multi-turn conversation.
         
@@ -59,14 +59,15 @@ class RynnBrainModel:
             generation: Generation config dictionary
             
         Returns:
-            Model's response to the last user turn
+            A tuple containing the first and final model responses.
         """
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
         conversation: list[dict[str, Any]] = []
-        
+        responses: list[str] = []
+
         for turn in turns:
             role = turn["role"]
             content: list[dict[str, Any]] = []
@@ -79,36 +80,44 @@ class RynnBrainModel:
             
             # Add text (prompt or assistant response)
             content.append({"type": "text", "text": turn["text"]})
-            
             conversation.append({"role": role, "content": content})
-        
-        template_kwargs = {
-            "add_generation_prompt": True,
-            "tokenize": True,
-            "return_dict": True,
-            "return_tensors": "pt",
-        }
-        try:
-            inputs = self.processor.apply_chat_template(
-                conversation,
-                enable_thinking=bool(generation.get("enable_thinking", False)),
-                **template_kwargs,
+
+            template_kwargs = {
+                "add_generation_prompt": True,
+                "tokenize": True,
+                "return_dict": True,
+                "return_tensors": "pt",
+            }
+            try:
+                inputs = self.processor.apply_chat_template(
+                    conversation,
+                    enable_thinking=bool(generation.get("enable_thinking", False)),
+                    **template_kwargs,
+                )
+            except TypeError:
+                inputs = self.processor.apply_chat_template(
+                    conversation, **template_kwargs
+                )
+            inputs = inputs.to(self.input_device)
+            with torch.inference_mode():
+                output_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=int(generation.get("max_new_tokens", 300)),
+                    do_sample=bool(generation.get("do_sample", False)),
+                    repetition_penalty=float(generation.get("repetition_penalty", 1.1)),
+                    no_repeat_ngram_size=int(generation.get("no_repeat_ngram_size", 6)),
+                    use_cache=True,
+                )
+            new_tokens = output_ids[:, inputs["input_ids"].shape[1]:]
+            response = self.processor.decode(
+                new_tokens[0], skip_special_tokens=True
+            ).strip()
+            responses.append(response)
+
+            conversation.append(
+                {"role": "assistant", "content": [{"type": "text", "text": response}]}
             )
-        except TypeError:
-            inputs = self.processor.apply_chat_template(
-                conversation, **template_kwargs
-            )
-        inputs = inputs.to(self.input_device)
-        with torch.inference_mode():
-            output_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=int(generation.get("max_new_tokens", 300)),
-                do_sample=bool(generation.get("do_sample", False)),
-                repetition_penalty=float(generation.get("repetition_penalty", 1.1)),
-                no_repeat_ngram_size=int(generation.get("no_repeat_ngram_size", 6)),
-                use_cache=True,
-            )
-        new_tokens = output_ids[:, inputs["input_ids"].shape[1]:]
-        return self.processor.decode(
-            new_tokens[0], skip_special_tokens=True
-        ).strip()
+
+        if len(responses) != 2:
+            raise ValueError("generate_multiturn requires exactly two user turns")
+        return responses[0], responses[1]
