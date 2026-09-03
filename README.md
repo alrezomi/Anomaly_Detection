@@ -499,6 +499,11 @@ RynnValue uses the compact `rynnvalue` section in
 `pipeline_config.json`; do not replace the other settings or the `rynnbrain`
 section.
 
+Its necessary code is kept separately in `rynnvalue_vlm/model.py` and
+`rynnvalue_vlm/run.py`. The `rynnvalue-test` service is separate from the
+RynnBrain service, while both reuse the same GPU Docker image and dependency
+set.
+
 Set `rynnvalue.task_description` to a short, literal description of the
 intended task. Also describe the actual setup in `robot_description` and
 `camera_description`; the released checkpoint requires at least one of these

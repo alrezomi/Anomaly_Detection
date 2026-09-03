@@ -89,7 +89,7 @@ services:
   # memory is required.
   rynnvalue-test:
     <<: *rynnbrain-common
-    entrypoint: ["python", "run_rynnvalue.py"]
+    entrypoint: ["python", "-m", "rynnvalue_vlm.run"]
     command: ["--config", "/config/pipeline_config.json"]
 
   # Run DINO + RynnBrain multi-turn against every non-nominal demonstration,
