@@ -535,9 +535,28 @@ docker compose run --build --rm rynnvalue-test
 
 The first run automatically downloads `Alibaba-DAMO-Academy/RynnValue-8B` into
 the existing Hugging Face Docker cache. No separate model installation command
-is required. Results are limited to two files under
-`<output_dir>/rynnvalue/`: `rynnvalue_results.csv` and
-`rynnvalue_values.csv`.
+is required.
+
+The terminal prints the task/setup descriptions, source videos, ordered source
+frame indices and timestamps, and the model result. The output folder contains:
+
+- `rynnvalue_results.csv`: one whole-sequence result for each camera topic and
+  input mode. `Match` says whether the sequence corresponds to the task;
+  `Success` says whether successful completion is observed. The repository's
+  wrapper reports `failure` if either answer is `No`.
+- `rynnvalue_values.csv`: one row per sampled observation, including the exact
+  source video/frame/timestamp, model input dimensions, predicted remaining
+  time, relative time from the previous observation, and entropy.
+- `storyboards/<camera>_<mode>_vlm_input.jpg`: a thumbnail view of the exact
+  ordered visual inputs given together to the model, labeled with their source
+  frames and the task metadata used for that evaluation. The CSV records their
+  actual model-input dimensions.
+
+RynnValue does not emit `Match` or `Success` independently for every frame.
+All sampled observations for one camera/mode are passed in one episode. Its
+remaining-time and entropy values are per observation, its relative values are
+per adjacent pair, and its natural-language `Video Description`, `Match`, and
+`Success` describe the complete sampled sequence.
 
 ## Benchmark across every demonstration
 

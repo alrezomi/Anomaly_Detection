@@ -91,6 +91,15 @@ class RynnValueModel:
         self.max_image_size = int(model_config.get("max_image_size", 640))
         self.model.eval()
 
+    def prepare_images(self, images: list[Image.Image]) -> list[Image.Image]:
+        """Return the RGB, size-limited images that are passed to the processor."""
+        prepared: list[Image.Image] = []
+        for image in images:
+            output = image.convert("RGB").copy()
+            output.thumbnail((self.max_image_size, self.max_image_size))
+            prepared.append(output)
+        return prepared
+
     @staticmethod
     def _values(tensor: torch.Tensor | None, count: int) -> list[float]:
         if tensor is None or count < 1:
@@ -110,14 +119,10 @@ class RynnValueModel:
         robot_description: str | None,
         camera_description: str | None,
     ) -> dict[str, Any]:
-        resized: list[Image.Image] = []
-        for image in images:
-            output = image.convert("RGB").copy()
-            output.thumbnail((self.max_image_size, self.max_image_size))
-            resized.append(output)
+        prepared = self.prepare_images(images)
         processed = self.processor.process_episode(
             instruction=instruction,
-            images=resized,
+            images=prepared,
             robot_description=robot_description,
             camera_description=camera_description,
         )
