@@ -494,10 +494,33 @@ different NVIDIA platform.
 
 ## RynnValue VLM experiments
 
-RynnValue is one additional runner and does not add another configuration
-section. It reuses the existing RynnBrain task description, camera selection,
-frame count, sampling window, and GPU settings. It reads the original raw videos
-already written under the existing `output_dir`, so run `vision-test` first.
+RynnValue uses the compact `rynnvalue` section in
+`pipeline_config.example.json`. Add that section to the existing local
+`pipeline_config.json`; do not replace the other settings or the `rynnbrain`
+section.
+
+Set `rynnvalue.task_description` to a short, literal description of the
+intended task. Also describe the actual setup in `robot_description` and
+`camera_description`; the released checkpoint requires at least one of these
+metadata fields. `rynnvalue.input_modes` accepts `raw`, `heatmap`, and
+`raw_heatmap`, and can contain one or several of them. For example:
+
+```json
+"input_modes": ["raw", "heatmap", "raw_heatmap"]
+```
+
+`raw_heatmap` places the matching raw frame and heatmap side by side at each
+sampled time step. Start experiments with `raw`, because the checkpoint was
+trained on ordinary robot video; treat heatmap modes as experimental
+comparisons.
+
+No separate prompt file is needed. RynnValue's processor creates the model's
+native temporal-value and Match/Success prompts internally. The intended task
+and setup are the parts you control through the three description fields.
+
+The runner reads the raw and heatmap videos already written under the top-level
+`output_dir` for the top-level `camera_topics`, so those paths are not repeated
+inside the RynnValue block. Run `vision-test` first.
 
 Build and run it with:
 
@@ -506,7 +529,8 @@ docker compose run --build --rm rynnvalue-test
 ```
 
 The first run automatically downloads `Alibaba-DAMO-Academy/RynnValue-8B` into
-the existing Hugging Face Docker cache. Results are limited to two files under
+the existing Hugging Face Docker cache. No separate model installation command
+is required. Results are limited to two files under
 `<output_dir>/rynnvalue/`: `rynnvalue_results.csv` and
 `rynnvalue_values.csv`.
 

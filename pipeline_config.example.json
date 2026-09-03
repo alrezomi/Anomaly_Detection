@@ -55,5 +55,25 @@
       "no_repeat_ngram_size": 6,
       "enable_thinking": false
     }
+  },
+  "rynnvalue": {
+    "task_description": "Pick and place the object from location A to location B",
+    "robot_description": "a robot arm",
+    "camera_description": "a flange-mounted RGB camera",
+    "input_modes": ["raw"],
+    "num_frames": 8,
+    "sampling_start_sec": 0.0,
+    "sampling_end_sec": null,
+    "model": {
+      "model_id": "Alibaba-DAMO-Academy/RynnValue-8B",
+      "dtype": "float16",
+      "device_map": "auto",
+      "input_device": "cuda",
+      "max_image_size": 640,
+      "max_memory": {
+        "0": "9GiB",
+        "cpu": "48GiB"
+      }
+    }
   }
 }

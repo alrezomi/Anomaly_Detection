@@ -1,4 +1,4 @@
-"""Run RynnValue on the raw videos already produced by the vision pipeline."""
+"""Run RynnValue on videos already produced by the vision pipeline."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import torch
 from transformers import AutoConfig, AutoModel, AutoProcessor
 
 
-MODEL_ID = "Alibaba-DAMO-Academy/RynnValue-8B"
+DEFAULT_MODEL_ID = "Alibaba-DAMO-Academy/RynnValue-8B"
 
 
 def _slug(value: str) -> str:
@@ -60,6 +60,24 @@ def _sample_video(
     return images, timestamps
 
 
+def _pair_images(
+    raw_images: list[Image.Image], heatmaps: list[Image.Image]
+) -> list[Image.Image]:
+    if len(raw_images) != len(heatmaps):
+        raise ValueError("Raw and heatmap frame counts do not match.")
+    paired: list[Image.Image] = []
+    for raw_image, heatmap in zip(raw_images, heatmaps):
+        raw = raw_image.convert("RGB")
+        heatmap = heatmap.convert("RGB")
+        heatmap_width = max(1, round(heatmap.width * raw.height / heatmap.height))
+        heatmap = heatmap.resize((heatmap_width, raw.height), Image.Resampling.BICUBIC)
+        combined = Image.new("RGB", (raw.width + heatmap.width, raw.height))
+        combined.paste(raw, (0, 0))
+        combined.paste(heatmap, (raw.width, 0))
+        paired.append(combined)
+    return paired
+
+
 def _parse_analysis(text: str) -> dict[str, str | None]:
     patterns = {
         "description": r"(?:^|\n)\s*-?\s*Video Description\s*:\s*(.+)",
@@ -84,10 +102,11 @@ def _decision(match: str | None, success: str | None) -> str:
 
 
 class RynnValue:
-    def __init__(self, existing_model_config: dict[str, Any]) -> None:
-        dtype_name = existing_model_config.get("dtype", "bfloat16")
+    def __init__(self, model_config: dict[str, Any]) -> None:
+        self.model_id = model_config.get("model_id", DEFAULT_MODEL_ID)
+        dtype_name = model_config.get("dtype", "bfloat16")
         dtype = getattr(torch, dtype_name)
-        config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(self.model_id, trust_remote_code=True)
         config._attn_implementation = "pred_slot_isolated_eager"
 
         load_options: dict[str, Any] = {
@@ -96,28 +115,28 @@ class RynnValue:
             "torch_dtype": dtype,
             "low_cpu_mem_usage": True,
         }
-        device_map = existing_model_config.get("device_map")
+        device_map = model_config.get("device_map")
         if device_map is not None:
             load_options["device_map"] = device_map
-        if existing_model_config.get("max_memory"):
+        if model_config.get("max_memory"):
             load_options["max_memory"] = {
                 (int(key) if str(key).isdigit() else key): value
-                for key, value in existing_model_config["max_memory"].items()
+                for key, value in model_config["max_memory"].items()
             }
 
         self.processor = AutoProcessor.from_pretrained(
-            MODEL_ID, trust_remote_code=True
+            self.model_id, trust_remote_code=True
         )
-        self.model = AutoModel.from_pretrained(MODEL_ID, **load_options)
+        self.model = AutoModel.from_pretrained(self.model_id, **load_options)
         if device_map is None:
-            device = existing_model_config.get(
+            device = model_config.get(
                 "input_device", "cuda" if torch.cuda.is_available() else "cpu"
             )
             self.model = self.model.to(device=device, dtype=dtype)
         self.device = torch.device(
-            existing_model_config.get("input_device", self.model.device)
+            model_config.get("input_device", self.model.device)
         )
-        self.max_image_size = int(existing_model_config.get("max_image_size", 640))
+        self.max_image_size = int(model_config.get("max_image_size", 640))
         self.model.eval()
 
     @staticmethod
@@ -131,14 +150,23 @@ class RynnValue:
             )
         return values.reshape(-1, count).mean(dim=0).cpu().tolist()
 
-    def predict(self, instruction: str, images: list[Image.Image]) -> dict[str, Any]:
+    def predict(
+        self,
+        instruction: str,
+        images: list[Image.Image],
+        robot_description: str | None,
+        camera_description: str | None,
+    ) -> dict[str, Any]:
         resized: list[Image.Image] = []
         for image in images:
             output = image.convert("RGB").copy()
             output.thumbnail((self.max_image_size, self.max_image_size))
             resized.append(output)
         processed = self.processor.process_episode(
-            instruction=instruction, images=resized
+            instruction=instruction,
+            images=resized,
+            robot_description=robot_description,
+            camera_description=camera_description,
         )
 
         inputs: dict[str, torch.Tensor] = {}
@@ -192,67 +220,104 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     arguments = parser.parse_args()
     config = json.loads(arguments.config.read_text(encoding="utf-8"))
-    rynnbrain = config.get("rynnbrain", {})
-    instruction = rynnbrain.get("task_description")
+    settings = config.get("rynnvalue", {})
+    instruction = settings.get("task_description")
     if not instruction:
+        raise ValueError("rynnvalue.task_description is missing from the config.")
+    robot_description = settings.get("robot_description")
+    camera_description = settings.get("camera_description")
+    if not robot_description and not camera_description:
         raise ValueError(
-            "RynnValue reuses rynnbrain.task_description; it is missing from the config."
+            "RynnValue-8B requires rynnvalue.robot_description and/or "
+            "rynnvalue.camera_description."
         )
 
-    topics = list(rynnbrain.get("camera_topics", config["camera_topics"]))
-    frame_count = int(rynnbrain.get("num_frames", 8))
-    start_sec = float(rynnbrain.get("sampling_start_sec", 0.0))
-    end_value = rynnbrain.get("sampling_end_sec")
+    topics = list(config["camera_topics"])
+    if not topics:
+        raise ValueError("camera_topics must contain at least one topic.")
+    input_modes = list(settings.get("input_modes", ["raw"]))
+    if not input_modes:
+        raise ValueError("rynnvalue.input_modes must contain at least one mode.")
+    unsupported = set(input_modes) - {"raw", "heatmap", "raw_heatmap"}
+    if unsupported:
+        raise ValueError(f"Unsupported RynnValue input modes: {sorted(unsupported)}")
+    frame_count = int(settings.get("num_frames", 8))
+    if frame_count < 1:
+        raise ValueError("rynnvalue.num_frames must be at least 1.")
+    start_sec = float(settings.get("sampling_start_sec", 0.0))
+    end_value = settings.get("sampling_end_sec")
     end_sec = float(end_value) if end_value is not None else None
     output_root = Path(config["output_dir"])
     result_directory = output_root / "rynnvalue"
     result_directory.mkdir(parents=True, exist_ok=True)
 
-    model = RynnValue(dict(rynnbrain.get("model", {})))
+    model = RynnValue(dict(settings.get("model", {})))
     summaries: list[dict[str, Any]] = []
     values: list[dict[str, Any]] = []
     for topic in topics:
-        default_video = output_root / f"{_slug(topic)}_raw_original.mp4"
-        video_path = Path(
-            rynnbrain.get("raw_video_paths", {}).get(topic, default_video)
-        )
-        images, timestamps = _sample_video(
-            video_path, frame_count, start_sec, end_sec
-        )
-        prediction = model.predict(instruction, images)
-        decision = _decision(prediction["match"], prediction["success"])
-        summaries.append(
-            {
-                "test_bag": config["test_bag"],
-                "topic": topic,
-                "decision": decision,
-                "match": prediction["match"],
-                "success": prediction["success"],
-                "video_description": prediction["description"],
-                "analysis_text": prediction["analysis_text"],
-                "initial_remaining_time_seconds": prediction["remaining"][0],
-                "final_remaining_time_seconds": prediction["remaining"][-1],
-            }
-        )
-        for index, (timestamp, remaining) in enumerate(
-            zip(timestamps, prediction["remaining"])
-        ):
-            values.append(
+        raw_path = output_root / f"{_slug(topic)}_raw_original.mp4"
+        heatmap_path = output_root / f"{_slug(topic)}_heatmap.mp4"
+        for input_mode in input_modes:
+            if input_mode == "raw":
+                images, timestamps = _sample_video(
+                    raw_path, frame_count, start_sec, end_sec
+                )
+            elif input_mode == "heatmap":
+                images, timestamps = _sample_video(
+                    heatmap_path, frame_count, start_sec, end_sec
+                )
+            else:
+                raw_images, timestamps = _sample_video(
+                    raw_path, frame_count, start_sec, end_sec
+                )
+                heatmaps, _ = _sample_video(
+                    heatmap_path, frame_count, start_sec, end_sec
+                )
+                images = _pair_images(raw_images, heatmaps)
+
+            prediction = model.predict(
+                instruction,
+                images,
+                robot_description,
+                camera_description,
+            )
+            decision = _decision(prediction["match"], prediction["success"])
+            summaries.append(
                 {
+                    "test_bag": config["test_bag"],
                     "topic": topic,
-                    "sample_index": index,
-                    "timestamp_sec": timestamp,
-                    "remaining_time_seconds": remaining,
-                    "relative_time_seconds": (
-                        prediction["relative"][index - 1] if index > 0 else None
-                    ),
-                    "entropy": prediction["entropy"][index],
+                    "input_mode": input_mode,
+                    "decision": decision,
+                    "match": prediction["match"],
+                    "success": prediction["success"],
+                    "video_description": prediction["description"],
+                    "analysis_text": prediction["analysis_text"],
+                    "initial_remaining_time_seconds": prediction["remaining"][0],
+                    "final_remaining_time_seconds": prediction["remaining"][-1],
                 }
             )
-        print(
-            f"{topic}: decision={decision}, match={prediction['match']}, "
-            f"success={prediction['success']}"
-        )
+            for index, (timestamp, remaining) in enumerate(
+                zip(timestamps, prediction["remaining"])
+            ):
+                values.append(
+                    {
+                        "topic": topic,
+                        "input_mode": input_mode,
+                        "sample_index": index,
+                        "timestamp_sec": timestamp,
+                        "remaining_time_seconds": remaining,
+                        "relative_time_seconds": (
+                            prediction["relative"][index - 1]
+                            if index > 0
+                            else None
+                        ),
+                        "entropy": prediction["entropy"][index],
+                    }
+                )
+            print(
+                f"{topic} ({input_mode}): decision={decision}, "
+                f"match={prediction['match']}, success={prediction['success']}"
+            )
 
     pd.DataFrame(summaries).to_csv(
         result_directory / "rynnvalue_results.csv", index=False
