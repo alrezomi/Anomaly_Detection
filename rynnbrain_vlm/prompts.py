@@ -1,6 +1,6 @@
 # MULTI-TURN MODE PROMPTS
 # The model sees nominal reference-bag frames first, then evaluates test frames
-# against them in a second turn (same conversation context; no saved text).
+# against them in a second turn (visual memory - no saved description text).
 
 def task_context_prompt(task_description: str) -> str:
     """First turn: Keep the nominal reference clear and faithful to the user's intent."""

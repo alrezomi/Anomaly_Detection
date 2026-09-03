@@ -27,7 +27,7 @@
     "reference_bags": [
       "/data/normal_run_01"
     ],
-    "reference_camera_topics": [
+    "memory_camera_topics": [
       "/flange_camera/cam33/color/image_raw"
     ],
     "input_modes": ["raw"],
@@ -54,35 +54,6 @@
       "repetition_penalty": 1.1,
       "no_repeat_ngram_size": 6,
       "enable_thinking": false
-    }
-  },
-  "rynnvalue": {
-    "source": "generated_videos",
-    "task_instruction": "Pick and place the object from location A to location B",
-    "camera_topics": [
-      "/flange_camera/cam33/color/image_raw"
-    ],
-    "num_frames": 8,
-    "sampling_start_sec": 0.0,
-    "sampling_end_sec": null,
-    "regression_tolerance_sec": 1.0,
-    "robot_description": null,
-    "camera_descriptions": {
-      "/flange_camera/cam33/color/image_raw": "Wrist-mounted camera looking toward the gripper and workspace"
-    },
-    "ground_truth_label": "fail",
-    "output_dir": "/outputs/experiment_01/rynnvalue",
-    "model": {
-      "model_id": "Alibaba-DAMO-Academy/RynnValue-8B",
-      "dtype": "bfloat16",
-      "device": "cuda",
-      "max_image_side": 640,
-      "trust_remote_code": true,
-      "attn_implementation": "pred_slot_isolated_eager"
-    },
-    "generation": {
-      "enabled": true,
-      "max_new_tokens": 128
     }
   }
 }

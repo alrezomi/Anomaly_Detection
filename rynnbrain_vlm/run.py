@@ -206,7 +206,7 @@ def evaluate_multiturn(
     """
     task_description = vlm.get("task_description", "Robot manipulation task")
 
-    print("[MULTI-TURN MODE] Two-turn conversation with nominal frames in turn 1")
+    print(f"[MULTI-TURN MODE] Single model call with visual memory")
     print(f"Task: {task_description}\n")
 
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -263,18 +263,10 @@ def evaluate_multiturn(
             "rynnbrain.reference_bags must list at least one nominal demonstration bag "
             "for multi-turn evaluation (it supplies the turn-1 'nominal demonstration' images)."
         )
-    # ``memory_camera_topics`` was the old name from the discarded saved-text
-    # workflow. Accept it for existing local configs, but use the clearer name
-    # for the final two-turn implementation.
-    reference_topics = list(
-        vlm.get(
-            "reference_camera_topics",
-            vlm.get("memory_camera_topics", topics),
-        )
-    )
+    memory_topics = list(vlm.get("memory_camera_topics", topics))
     nominal_images: list[tuple[str, Image.Image]] = []
     for bag_value in reference_bags:
-        bag_images, _ = _raw_inputs(Path(bag_value), reference_topics, frame_count)
+        bag_images, _ = _raw_inputs(Path(bag_value), memory_topics, frame_count)
         nominal_images.extend(bag_images)
     _save_inputs(output_directory, "nominal", nominal_images)
 
@@ -391,7 +383,7 @@ def write_multiturn_outputs(
         json.dumps(
             {
                 "task_description": task_description,
-                "evaluation_method": "multiturn (two-turn visual context; no saved text)",
+                "evaluation_method": "multiturn (visual memory - no saved description)",
                 "selected_raw_frames": frame_metadata,
                 "results": raw_records
             },
@@ -404,7 +396,7 @@ def write_multiturn_outputs(
 
 def run_test_multiturn(arguments: argparse.Namespace) -> None:
     """
-    Run test evaluation using one two-turn visual conversation.
+    Run test evaluation using multi-turn conversation with visual memory.
     The model sees nominal frames first, then evaluates test frames against them.
     No need for saved nominal description - model uses visual understanding.
     """

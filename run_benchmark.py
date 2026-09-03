@@ -1,13 +1,13 @@
 """Benchmark the DINO + RynnBrain pipeline against every non-nominal demonstration.
 
 For every ROS 2 bag under the data root that was not used to build the DINO
-nominal cache or selected as a RynnBrain turn-1 reference bag, this:
+nominal memory or the RynnBrain task memory, this:
 
 1. Runs DINO test mode (`run_rosbag_vision.py --mode test`) against that bag,
-   reusing the existing nominal DINO cache unchanged.
+   reusing the existing nominal cache and task memory unchanged.
 2. Runs the RynnBrain multi-turn evaluation against the videos DINO produced,
-   showing the configured nominal reference frames in turn 1 and each test in
-   turn 2, while reusing one loaded VLM across every bag.
+   reusing one already-loaded VLM across every bag instead of reloading it
+   per bag.
 3. Writes each bag's full output (videos, CSVs, VLM responses) into its own
    folder, and appends one row per (bag, input_mode) to a single benchmark
    summary table.
