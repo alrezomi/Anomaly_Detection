@@ -7,10 +7,9 @@
     "/data/bag_20260730_095822",
     "/data/bag_20260730_120202"
   ],
-  "test_bag": "/data/bag_20260730_094554",
+  "test_bag": "/data/bag_20260730_094942",
   "camera_topics": [
-    "/flange_camera/cam33/color/image_raw",
-    "/flange_camera/cam45/color/image_raw"
+    "/flange_camera/cam33/color/image_raw"
   ],
   "stage_topic": "/recording_stage",
   "stage_count": 3,
@@ -25,7 +24,7 @@
   "stage_constrained_matching": true,
   "rynnbrain": {
     "source": "generated_videos",
-    "task_description": "Pick the scissor from location A and place it to position B",
+    "task_description": "Pick the scissor from left side and place it to the right side of the workspace",
     "camera_topics": [
       "/flange_camera/cam33/color/image_raw",
       "/flange_camera/cam45/color/image_raw"
@@ -64,20 +63,18 @@
     }
   },
   "rynnvalue": {
-    "task_description": "Pick the scissor from location A and place it to position B",
+    "task_description": "Pick up the gold-handled scissor from the white sheet on the left side of the workspace and place it on the right side.",
     "robot_description": "a robot arm with a gripper",
-    "camera_description": "two synchronized RGB cameras observing the robot workspace: one top-down camera and one end-effector-mounted camera",
+    "camera_description": "a fixed top-down RGB camera showing the complete robot workspace",
     "input_modes": [
-      "raw",
-      "multi_view_raw"
+      "raw"
     ],
-    "num_frames": 8,
-    "sampling_start_sec": 1.0,
-    "sampling_end_sec": null,
+    "num_frames": 50,
+    "sampling_start_sec": 5.0,
+    "sampling_end_sec": 70.0,
     "model": {
       "model_id": "Alibaba-DAMO-Academy/RynnValue-8B",
       "dtype": "float16",
-      "device_map": "auto",
       "input_device": "cuda",
       "max_image_size": 640
     }

@@ -118,8 +118,9 @@ class RynnValueModel:
         images: list[Image.Image],
         robot_description: str | None,
         camera_description: str | None,
+        resize_images: bool = False,
     ) -> dict[str, Any]:
-        prepared = self.prepare_images(images)
+        prepared = self.prepare_images(images) if resize_images else images
         processed = self.processor.process_episode(
             instruction=instruction,
             images=prepared,

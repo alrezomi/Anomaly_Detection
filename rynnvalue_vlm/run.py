@@ -507,7 +507,7 @@ def main() -> None:
                 frame_metadata = _input_metadata(
                     input_mode, raw_metadata, heatmap_metadata
                 )
-            model_images = model.prepare_images(images)
+            storyboard_images = model.prepare_images(images)
             storyboard_path = (
                 result_directory
                 / "storyboards"
@@ -515,7 +515,7 @@ def main() -> None:
             )
             _save_storyboard(
                 storyboard_path,
-                model_images,
+                storyboard_images,
                 frame_metadata,
                 [
                     f"RynnValue model: {model.model_id}",
@@ -533,9 +533,10 @@ def main() -> None:
             _print_case_input(topic, input_mode, frame_metadata, storyboard_path)
             prediction = model.predict(
                 instruction,
-                model_images,
+                images,
                 robot_description,
                 camera_description,
+                resize_images=multi_view,
             )
             decision = _decision(prediction["match"], prediction["success"])
             source_record = frame_metadata[0]
@@ -552,7 +553,7 @@ def main() -> None:
                     "analysis_text": prediction["analysis_text"],
                     "initial_remaining_time_seconds": prediction["remaining"][0],
                     "final_remaining_time_seconds": prediction["remaining"][-1],
-                    "sample_count": len(model_images),
+                    "sample_count": len(images),
                     "model_id": model.model_id,
                     "task_description": instruction,
                     "robot_description": robot_description,
@@ -566,7 +567,7 @@ def main() -> None:
                 }
             )
             for index, (metadata, model_image, remaining) in enumerate(
-                zip(frame_metadata, model_images, prediction["remaining"])
+                zip(frame_metadata, images, prediction["remaining"])
             ):
                 values.append(
                     {
