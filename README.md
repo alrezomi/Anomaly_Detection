@@ -508,10 +508,14 @@ Set `rynnvalue.task_description` to a short, literal description of the
 intended task. Also describe the actual setup in `robot_description` and
 `camera_description`; the released checkpoint requires at least one of these
 metadata fields. `rynnvalue.input_modes` accepts `raw`, `heatmap`, and
-`raw_heatmap`, and can contain one or several of them. For example:
+`raw_heatmap`, and `multi_view_raw`, and can contain one or several of them.
+`raw` samples the configured `test_bag` directly without using the
+intermediate MP4. `multi_view_raw` samples every configured camera topic
+directly and combines corresponding observations side by side into one
+episode. For example:
 
 ```json
-"input_modes": ["raw", "heatmap", "raw_heatmap"]
+"input_modes": ["raw", "multi_view_raw", "heatmap", "raw_heatmap"]
 ```
 
 `raw_heatmap` places the matching raw frame and heatmap side by side at each
@@ -523,9 +527,10 @@ No separate prompt file is needed. RynnValue's processor creates the model's
 native temporal-value and Match/Success prompts internally. The intended task
 and setup are the parts you control through the three description fields.
 
-The runner reads the raw and heatmap videos already written under the top-level
-`output_dir` for the top-level `camera_topics`, so those paths are not repeated
-inside the RynnValue block. Run `vision-test` first.
+The runner reads heatmap videos already written under the top-level
+`output_dir`. Direct `raw` and `multi_view_raw` modes read the configured
+`test_bag` directly, so they do not require `vision-test` first. Heatmap modes
+still require `vision-test` first.
 
 Build and run it with:
 
@@ -557,6 +562,12 @@ All sampled observations for one camera/mode are passed in one episode. Its
 remaining-time and entropy values are per observation, its relative values are
 per adjacent pair, and its natural-language `Video Description`, `Match`, and
 `Success` describe the complete sampled sequence.
+
+Single-camera `raw` rows remain independent decisions. A `multi_view_raw` row
+is one joint decision using all configured camera topics; the combined image
+for each sample is built in topic order. The sample index is synchronized
+across cameras, while the original bag timestamps are recorded in the output
+CSV.
 
 ## Benchmark across every demonstration
 

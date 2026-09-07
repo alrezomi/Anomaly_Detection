@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw
 
+from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
 from .model import RynnValueModel
 
 
@@ -70,6 +71,73 @@ def _sample_video(
     return images, frame_metadata
 
 
+def _sample_bag(
+    source: RosbagImageSource,
+    count: int,
+    start_sec: float,
+    end_sec: float | None,
+) -> tuple[list[Image.Image], list[dict[str, Any]]]:
+    sampled = sample_rosbag_image_frames_uniform(
+        source, num_frames=count, start_sec=start_sec, end_sec=end_sec
+    )
+    images = [image for _, _, image in sampled]
+    metadata = [
+        {
+            "source_video": str(source.bag_path),
+            "source_frame_index": frame_index,
+            "timestamp_sec": timestamp_sec,
+            "video_fps": None,
+            "video_frame_count": None,
+            "source_kind": "rosbag",
+        }
+        for frame_index, timestamp_sec, _ in sampled
+    ]
+    return images, metadata
+
+
+def _sample_multi_view_bag(
+    sources: list[RosbagImageSource],
+    count: int,
+    start_sec: float,
+    end_sec: float | None,
+) -> tuple[list[Image.Image], list[dict[str, Any]]]:
+    samples = [
+        _sample_bag(source, count, start_sec, end_sec) for source in sources
+    ]
+    sample_count = min(len(images) for images, _ in samples)
+    images = [
+        _combine_images([sample[0][index] for sample in samples])
+        for index in range(sample_count)
+    ]
+    metadata = []
+    for index in range(sample_count):
+        camera_metadata = [sample[1][index] for sample in samples]
+        metadata.append(
+            {
+                "sample_index": index,
+                "timestamp_sec": camera_metadata[0]["timestamp_sec"],
+                "raw_source_video": json.dumps(
+                    [item["source_video"] for item in camera_metadata]
+                ),
+                "raw_frame_index": json.dumps(
+                    [item["source_frame_index"] for item in camera_metadata]
+                ),
+                "raw_timestamp_sec": camera_metadata[0]["timestamp_sec"],
+                "raw_video_fps": None,
+                "heatmap_source_video": None,
+                "heatmap_frame_index": None,
+                "heatmap_timestamp_sec": None,
+                "heatmap_video_fps": None,
+                "input_mode": "multi_view_raw",
+                "camera_topics": json.dumps([source.topic for source in sources]),
+                "camera_timestamps_sec": json.dumps(
+                    [item["timestamp_sec"] for item in camera_metadata]
+                ),
+            }
+        )
+    return images, metadata
+
+
 def _pair_images(
     raw_images: list[Image.Image], heatmaps: list[Image.Image]
 ) -> list[Image.Image]:
@@ -88,6 +156,26 @@ def _pair_images(
         combined.paste(heatmap, (raw.width, 0))
         paired.append(combined)
     return paired
+
+
+def _combine_images(images: list[Image.Image]) -> Image.Image:
+    """Combine one synchronized observation from each camera horizontally."""
+    if not images:
+        raise ValueError("At least one image is required.")
+    height = min(image.height for image in images)
+    resized = []
+    for image in images:
+        rgb = image.convert("RGB")
+        width = max(1, round(rgb.width * height / rgb.height))
+        resized.append(rgb.resize((width, height), Image.Resampling.BICUBIC))
+    canvas = Image.new(
+        "RGB", (sum(image.width for image in resized), height), "black"
+    )
+    x = 0
+    for image in resized:
+        canvas.paste(image, (x, 0))
+        x += image.width
+    return canvas
 
 
 def _decision(match: str | None, success: str | None) -> str:
@@ -247,7 +335,7 @@ def _print_run_settings(
         flush=True,
     )
     print(
-        "  Decision scope: one complete sampled sequence per topic and input mode",
+        "  Decision scope: one complete sampled sequence per camera or joint view",
         flush=True,
     )
     print(
@@ -326,9 +414,13 @@ def main() -> None:
     input_modes = list(settings.get("input_modes", ["raw"]))
     if not input_modes:
         raise ValueError("rynnvalue.input_modes must contain at least one mode.")
-    unsupported = set(input_modes) - {"raw", "heatmap", "raw_heatmap"}
+    unsupported = set(input_modes) - {
+        "raw", "heatmap", "raw_heatmap", "multi_view_raw"
+    }
     if unsupported:
         raise ValueError(f"Unsupported RynnValue input modes: {sorted(unsupported)}")
+    if "multi_view_raw" in input_modes and len(topics) < 2:
+        raise ValueError("multi_view_raw requires at least two camera topics.")
     frame_count = int(settings.get("num_frames", 8))
     if frame_count < 1:
         raise ValueError("rynnvalue.num_frames must be at least 1.")
@@ -350,23 +442,56 @@ def main() -> None:
     )
     summaries: list[dict[str, Any]] = []
     values: list[dict[str, Any]] = []
-    for topic in topics:
+    evaluation_topics = list(topics)
+    if "multi_view_raw" in input_modes:
+        evaluation_topics.append("__multi_view__")
+
+    for topic in evaluation_topics:
+        multi_view = topic == "__multi_view__"
         raw_path = output_root / f"{_slug(topic)}_raw_original.mp4"
         heatmap_path = output_root / f"{_slug(topic)}_heatmap.mp4"
         raw_sample = (
-            _sample_video(raw_path, frame_count, start_sec, end_sec)
-            if {"raw", "raw_heatmap"} & set(input_modes)
-            else None
+            _sample_multi_view_bag(
+                [
+                    RosbagImageSource(
+                        config["test_bag"], camera_topic, "test", stage_topic=None
+                    )
+                    for camera_topic in topics
+                ],
+                frame_count,
+                start_sec,
+                end_sec,
+            )
+            if multi_view
+            else (
+                _sample_bag(
+                    RosbagImageSource(
+                        config["test_bag"], topic, "test", stage_topic=None
+                    ),
+                    frame_count,
+                    start_sec,
+                    end_sec,
+                )
+                if {"raw", "raw_heatmap"} & set(input_modes)
+                else None
+            )
         )
         heatmap_sample = (
             _sample_video(heatmap_path, frame_count, start_sec, end_sec)
-            if {"heatmap", "raw_heatmap"} & set(input_modes)
+            if not multi_view and {"heatmap", "raw_heatmap"} & set(input_modes)
             else None
         )
         for input_mode in input_modes:
+            if multi_view != (input_mode == "multi_view_raw"):
+                continue
             if input_mode == "raw":
                 assert raw_sample is not None
                 images, raw_metadata = raw_sample
+                heatmap_metadata = None
+            elif input_mode == "multi_view_raw":
+                assert raw_sample is not None
+                images, frame_metadata = raw_sample
+                raw_metadata = None
                 heatmap_metadata = None
             elif input_mode == "heatmap":
                 assert heatmap_sample is not None
@@ -378,9 +503,10 @@ def main() -> None:
                 heatmaps, heatmap_metadata = heatmap_sample
                 images = _pair_images(raw_images, heatmaps)
 
-            frame_metadata = _input_metadata(
-                input_mode, raw_metadata, heatmap_metadata
-            )
+            if input_mode != "multi_view_raw":
+                frame_metadata = _input_metadata(
+                    input_mode, raw_metadata, heatmap_metadata
+                )
             model_images = model.prepare_images(images)
             storyboard_path = (
                 result_directory
@@ -397,7 +523,7 @@ def main() -> None:
                     f"Robot description: {robot_description or '(not set)'}",
                     f"Camera description: {camera_description or '(not set)'}",
                     f"Test bag: {config['test_bag']}",
-                    f"Camera topic: {topic}",
+                    f"Camera topic(s): {', '.join(topics) if multi_view else topic}",
                     f"Input mode: {input_mode}",
                     "Scope: all observations below are passed together in "
                     "chronological order; Match and Success describe the whole "
@@ -416,7 +542,7 @@ def main() -> None:
             summaries.append(
                 {
                     "test_bag": config["test_bag"],
-                    "topic": topic,
+                    "topic": ",".join(topics) if multi_view else topic,
                     "input_mode": input_mode,
                     "decision_scope": "whole_sampled_sequence",
                     "decision": decision,

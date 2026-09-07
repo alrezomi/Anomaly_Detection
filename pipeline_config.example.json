@@ -59,8 +59,8 @@
   "rynnvalue": {
     "task_description": "Pick and place the object from location A to location B",
     "robot_description": "a robot arm",
-    "camera_description": "a flange-mounted RGB camera",
-    "input_modes": ["raw"],
+    "camera_description": "two synchronized RGB cameras observing the robot workspace: one top-down camera and one end-effector-mounted camera",
+    "input_modes": ["multi_view_raw"],
     "num_frames": 8,
     "sampling_start_sec": 0.0,
     "sampling_end_sec": null,

@@ -11,8 +11,6 @@ __pycache__/
 # Generated experiment results
 outputs/
 /dataset_manifest.csv
-/pipeline_config.json
-/.env
 
 # Machine-specific Docker GPU override
 /compose.gpu.yaml
