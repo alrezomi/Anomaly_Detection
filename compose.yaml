@@ -14,8 +14,8 @@ x-pipeline-common: &pipeline-common
     - ${ANOMALY_OUTPUT_DIR:-./outputs}:/outputs
     - huggingface-cache:/cache/huggingface
 
-# Shared GPU image for DINO test mode, RynnBrain, and RynnValue (same
-# Dockerfile/image; only the entrypoint differs per service).
+# Shared GPU image for DINO test mode and RynnBrain (same Dockerfile/image;
+# only the entrypoint differs per service).
 x-rynnbrain-common: &rynnbrain-common
   build:
     context: .
@@ -82,14 +82,6 @@ services:
   rynnbrain-test-multiturn:
     <<: *rynnbrain-common
     entrypoint: ["python", "-m", "rynnbrain_vlm.run"]
-    command: ["--config", "/config/pipeline_config.json"]
-
-  # RynnValue evaluates raw trajectories directly with task-conditioned
-  # temporal values and native Match/Success verification. No nominal visual
-  # memory is required.
-  rynnvalue-test:
-    <<: *rynnbrain-common
-    entrypoint: ["python", "-m", "rynnvalue_vlm.run"]
     command: ["--config", "/config/pipeline_config.json"]
 
   # Run DINO + RynnBrain multi-turn against every non-nominal demonstration,
