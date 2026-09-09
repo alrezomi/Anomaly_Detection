@@ -30,6 +30,7 @@ from typing import Any
 import pandas as pd
 
 from build_dataset_manifest import discover_bags, infer_bag_record
+from rynnbrain_vlm.cop_analysis import analyze_saved_vectors
 from rynnbrain_vlm.model import RynnBrainModel
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
 
@@ -63,15 +64,36 @@ def parse_arguments() -> argparse.Namespace:
         help="Defaults to $STAGE_STARTUP_IGNORE_SEC, then 0.1.",
     )
     parser.add_argument("--limit", type=int, default=None, help="Only benchmark the first N candidate bags.")
+    parser.add_argument(
+        "--bag",
+        action="append",
+        default=[],
+        metavar="BAG_NAME",
+        help=(
+            "Benchmark only this eligible bag name. Repeat for several held-out "
+            "normal/fail bags. Reference bags remain excluded."
+        ),
+    )
+    parser.add_argument(
+        "--include-nominal-bags",
+        action="store_true",
+        help=(
+            "Allow DINO nominal-memory bags as exploratory evaluation samples. "
+            "RynnBrain reference bags remain excluded to prevent direct leakage."
+        ),
+    )
     parser.add_argument("--skip-dino", action="store_true", help="Reuse already-generated per-bag videos/CSVs.")
     parser.add_argument("--skip-vlm", action="store_true", help="Only run the DINO stage.")
     return parser.parse_args()
 
 
-def _excluded_bag_names(config: dict[str, Any]) -> set[str]:
-    names = {Path(bag).name for bag in config.get("nominal_bags", [])}
+def _excluded_bag_names(
+    config: dict[str, Any], include_nominal_bags: bool = False
+) -> set[str]:
     rynnbrain = config.get("rynnbrain", {})
-    names |= {Path(bag).name for bag in rynnbrain.get("reference_bags", [])}
+    names = {Path(bag).name for bag in rynnbrain.get("reference_bags", [])}
+    if not include_nominal_bags:
+        names |= {Path(bag).name for bag in config.get("nominal_bags", [])}
     return names
 
 
@@ -130,6 +152,38 @@ def _decision_correct(ground_truth: str, decision: str) -> bool | None:
     return decision == expected
 
 
+def _select_named_records(
+    records: list[dict[str, Any]],
+    requested_names: list[str],
+    excluded_names: set[str],
+) -> list[dict[str, Any]]:
+    """Select eligible records by unique bag name while preserving CLI order."""
+    if not requested_names:
+        return records
+    if len(requested_names) != len(set(requested_names)):
+        raise ValueError("Each --bag BAG_NAME may be specified only once.")
+
+    excluded = sorted(set(requested_names) & excluded_names)
+    if excluded:
+        raise ValueError(
+            "The following --bag values are configured as nominal/reference memory "
+            "and cannot be evaluation samples: " + ", ".join(excluded)
+        )
+
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_name.setdefault(str(record["bag_name"]), []).append(record)
+    missing = [name for name in requested_names if name not in by_name]
+    if missing:
+        raise ValueError("Eligible bag(s) not found: " + ", ".join(missing))
+    ambiguous = [name for name in requested_names if len(by_name[name]) > 1]
+    if ambiguous:
+        raise ValueError(
+            "Bag name is not unique under the data root: " + ", ".join(ambiguous)
+        )
+    return [by_name[name][0] for name in requested_names]
+
+
 def main() -> None:
     arguments = parse_arguments()
     config = json.loads(arguments.config.read_text(encoding="utf-8"))
@@ -154,12 +208,13 @@ def main() -> None:
 
     print(f"Scanning bags under: {data_root}")
     all_bags = discover_bags(data_root, recursive=not arguments.no_recursive)
-    excluded_names = _excluded_bag_names(config)
+    excluded_names = _excluded_bag_names(config, arguments.include_nominal_bags)
     records = [
         infer_bag_record(bag_path, stage_topic, startup_ignore_sec)
         for bag_path in all_bags
         if bag_path.name not in excluded_names
     ]
+    records = _select_named_records(records, arguments.bag, excluded_names)
     selection_df = pd.DataFrame(records)
     selection_df.to_csv(benchmark_root / "benchmark_bag_selection.csv", index=False)
     print(f"Found {len(all_bags)} bag(s), excluding {len(excluded_names)} nominal/reference bag(s).")
@@ -218,6 +273,8 @@ def main() -> None:
                 "confidence": None,
                 "decision_correct": None,
                 "response": None,
+                "cop_vector_path": None,
+                "cop_metadata_path": None,
                 **dino_summary,
             })
             continue
@@ -232,12 +289,29 @@ def main() -> None:
                 "confidence": row["confidence"],
                 "decision_correct": _decision_correct(ground_truth, row["decision"]),
                 "response": row["response"],
+                "cop_vector_path": row.get("cop_vector_path"),
+                "cop_metadata_path": row.get("cop_metadata_path"),
                 **dino_summary,
             })
 
     summary_df = pd.DataFrame(master_rows)
     summary_path = benchmark_root / "benchmark_summary.csv"
     summary_df.to_csv(summary_path, index=False)
+
+    pca_summary = None
+    if (
+        not arguments.skip_vlm
+        and bool(dict(vlm.get("cop_vectors", {})).get("enabled", True))
+    ):
+        current_metadata_paths = [
+            Path(str(row["cop_metadata_path"]))
+            for row in master_rows
+            if row.get("cop_metadata_path")
+        ]
+        pca_summary = analyze_saved_vectors(
+            benchmark_root,
+            metadata_paths=current_metadata_paths,
+        )
 
     print("\n" + "=" * 90)
     print("BENCHMARK FINISHED")
@@ -251,6 +325,21 @@ def main() -> None:
             accuracy = scored.groupby("input_mode")["decision_correct"].mean()
             print(accuracy.to_string())
             print(f"\nOverall accuracy: {scored['decision_correct'].mean():.3f} ({len(scored)} scored rows)")
+    if pca_summary is not None:
+        created_plots = [
+            mode["plot_file"]
+            for mode in pca_summary["modes"]
+            if mode.get("status") == "created"
+        ]
+        if created_plots:
+            print("\nCoP PCA plots:")
+            for path in created_plots:
+                print(f"  {path}")
+        else:
+            print(
+                "\nCoP PCA did not create a plot. Check cop_pca_summary.json "
+                "for missing classes or incompatible vectors."
+            )
 
 
 if __name__ == "__main__":

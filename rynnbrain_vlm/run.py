@@ -14,7 +14,8 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
-from .model import RynnBrainModel
+from .cop_analysis import save_cop_vector
+from .model import COP_REPRESENTATION_ID, RynnBrainModel
 from .prompts import task_context_prompt, evaluation_prompt_multiturn
 
 
@@ -217,6 +218,8 @@ def evaluate_multiturn(
     sampling_start_sec = float(vlm.get("sampling_start_sec", 0.0))
     end_value = vlm.get("sampling_end_sec")
     sampling_end_sec = float(end_value) if end_value is not None else None
+    cop_config = dict(vlm.get("cop_vectors", {}))
+    capture_cop_vectors = bool(cop_config.get("enabled", True))
 
     source = vlm.get("source", "generated_videos")
     input_modes = list(vlm.get("input_modes", ["raw"]))
@@ -313,8 +316,16 @@ def evaluate_multiturn(
         _print_inputs(f"MULTITURN NOMINAL ({mode})", nominal_images)
         _print_inputs(f"MULTITURN TEST ({mode})", inputs)
         
-        # Use multi-turn generation
-        nominal_response, response = model.generate_multiturn(turns, generation)
+        # Use multi-turn generation. When requested, capture the final normalized
+        # decoder state from the turn-2 prompt prefill without an extra forward pass.
+        cop_vector = None
+        if capture_cop_vectors:
+            generated = model.generate_multiturn_with_cop_vector(turns, generation)
+            nominal_response = generated.nominal_response
+            response = generated.evaluation_response
+            cop_vector = generated.cop_vector
+        else:
+            nominal_response, response = model.generate_multiturn(turns, generation)
         
         # Display prompts and response
         prompt_display = f"[Turn 1] Nominal demonstration:\n{turn1_text}\n\n[Turn 2] Test evaluation:\n{turn2_text}"
@@ -324,6 +335,58 @@ def evaluate_multiturn(
         _print_exchange(f"MULTITURN TURN 2 ({mode})", turn2_text, response)
         
         decision, confidence = _parse_response(response)
+        cop_vector_path: str | None = None
+        cop_metadata_path: str | None = None
+        if cop_vector is not None:
+            text_config = getattr(model.model.config, "text_config", None)
+            model_revision = getattr(model.model.config, "_commit_hash", None)
+            comparison_signature = {
+                "representation_id": COP_REPRESENTATION_ID,
+                "model_id": model.model_id,
+                "model_revision": model_revision,
+                "model_config": dict(vlm.get("model", {})),
+                "task_description": task_description,
+                "nominal_response": nominal_response,
+                "source": source,
+                "reference_bags": [str(value) for value in reference_bags],
+                "test_camera_topics": topics,
+                "memory_camera_topics": memory_topics,
+                "input_mode": mode,
+                "num_frames": frame_count,
+                "sampling_start_sec": sampling_start_sec,
+                "sampling_end_sec": sampling_end_sec,
+                "enable_thinking": bool(generation.get("enable_thinking", False)),
+                "hidden_size": getattr(text_config, "hidden_size", None),
+                "turn1_prompt": turn1_text,
+                "turn2_prompt": turn2_text,
+            }
+            vector_path, metadata_path = save_cop_vector(
+                output_directory,
+                mode,
+                cop_vector.numpy(),
+                {
+                    "representation_id": COP_REPRESENTATION_ID,
+                    "representation_description": (
+                        "Post-final-normalization language-decoder state at the "
+                        "last non-padding token of the complete turn-2 prompt, "
+                        "captured before answer generation."
+                    ),
+                    "model_id": model.model_id,
+                    "model_revision": model_revision,
+                    "bag_name": Path(config["test_bag"]).name,
+                    "test_bag": str(config["test_bag"]),
+                    "ground_truth_label": vlm.get("ground_truth_label", "unknown"),
+                    "decision": decision,
+                    "confidence": confidence,
+                    "comparison_signature": comparison_signature,
+                },
+            )
+            cop_vector_path = str(vector_path)
+            cop_metadata_path = str(metadata_path)
+            print(
+                f"Saved {mode} CoP vector ({cop_vector.numel()} values): "
+                f"{vector_path}"
+            )
         rows.append(
             {
                 "test_bag": config["test_bag"],
@@ -333,7 +396,15 @@ def evaluate_multiturn(
                 "ground_truth_label": vlm.get("ground_truth_label", ""),
                 "nominal_response": nominal_response,
                 "response": response,
-                "evaluation_method": "multiturn"
+                "evaluation_method": "multiturn",
+                "cop_representation_id": (
+                    COP_REPRESENTATION_ID if cop_vector is not None else None
+                ),
+                "cop_vector_dimension": (
+                    int(cop_vector.numel()) if cop_vector is not None else None
+                ),
+                "cop_vector_path": cop_vector_path,
+                "cop_metadata_path": cop_metadata_path,
             }
         )
         raw_records.append({
@@ -360,7 +431,12 @@ def evaluate_multiturn(
             ],
             "prompt": prompt_display,
             "nominal_response": nominal_response,
-            "response": response
+            "response": response,
+            "cop_representation_id": (
+                COP_REPRESENTATION_ID if cop_vector is not None else None
+            ),
+            "cop_vector_path": cop_vector_path,
+            "cop_metadata_path": cop_metadata_path,
         })
         print(f"{mode} (multiturn): decision={decision}, confidence={confidence}")
 

@@ -488,6 +488,67 @@ FPS, and camera topic. Use `rynnbrain.sampling_start_sec` and
 `rynnbrain.sampling_end_sec` to exclude stale frames before or after the actual
 task while keeping raw and heatmap selection aligned.
 
+### CoP last-layer vectors and PCA
+
+The pipeline exports one fixed-size vector for every tested bag and input mode
+by default; set `rynnbrain.cop_vectors.enabled` to `false` to turn it off.
+RynnBrain-CoP uses Chain-of-Point training, but the checkpoint does not expose a
+separately named "CoP embedding." This pipeline therefore uses a precise,
+repeatable representation: the final
+normalized language-decoder state at the last non-padding token of the complete
+turn-2 prompt, captured immediately before the test answer is generated. It
+contains the nominal-reference and test context, but not generated decision
+words that could leak the predicted class into the PCA.
+
+Each evaluation writes:
+
+- `cop_vectors/<input_mode>.npy`: the raw one-dimensional float32 vector.
+- `cop_vectors/<input_mode>.json`: its bag label, model/configuration signature,
+  vector definition, dimension, decision, and paths.
+
+At the end of a benchmark, all compatible saved vectors below the benchmark
+directory are L2-normalized, centered, and fitted jointly with PCA. A separate
+PCA is fitted for each input mode so differences between `raw` and
+`raw_heatmap` do not masquerade as failure separation. Ground-truth `normal`
+points appear as **Nominal**, `fail` points as **Failure**, and `unknown` points
+are excluded. The `cop_pca/` directory contains, per input mode:
+
+- `cop_vectors_<mode>.npz`: aligned raw vectors, labels, names, and paths.
+- `cop_pca_<mode>.csv`: PC1/PC2 coordinates for every plotted bag.
+- `cop_pca_model_<mode>.npz`: fitted PCA axes, feature mean, explained
+  variance, and preprocessing identifier.
+- `cop_pca_<mode>.png`: labeled nominal-versus-failure scatter plot.
+- `cop_pca_summary.json`: counts, explained variance, output paths, or the
+  reason a plot was skipped.
+
+Prefer held-out `normal` bags for the nominal PCA class. By default, bags in
+`nominal_bags` or `rynnbrain.reference_bags` remain excluded because evaluating
+reference-memory data can make separation look artificially easy. To run only a
+small explicit set, repeat `--bag` with eligible bag directory names and include
+at least one held-out normal and one failure bag (several of each is better):
+
+```bash
+docker compose run --build --rm benchmark \
+  --config /config/pipeline_config.json \
+  --bag held_out_normal_bag \
+  --bag failure_bag
+```
+
+For an explicitly exploratory plot, `--include-nominal-bags` allows bags from
+the DINO `nominal_bags` list to be selected with `--bag`. This is not a held-out
+evaluation, especially for heatmap-based modes. A bag in
+`rynnbrain.reference_bags` is always excluded because it is already shown in
+turn 1.
+
+The benchmark creates the PCA automatically. To recreate plots later from the
+already-saved vectors without loading RynnBrain or processing bags again:
+
+```bash
+docker compose run --rm --entrypoint python benchmark \
+  -m rynnbrain_vlm.cop_analysis \
+  --input-dir /outputs/experiments/example/rynnbrain_benchmark
+```
+
 The default RynnBrain base is NVIDIA's PyTorch 25.08 container for Jetson AGX
 Thor. It can be overridden with `RYNNBRAIN_BASE_IMAGE` when running on a
 different NVIDIA platform.
