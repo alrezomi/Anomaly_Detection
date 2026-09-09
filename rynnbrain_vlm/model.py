@@ -102,10 +102,8 @@ class RynnBrainModel:
             with torch.inference_mode():
                 output_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=int(generation.get("max_new_tokens", 300)),
+                    max_new_tokens=int(generation.get("max_new_tokens", 500)),
                     do_sample=bool(generation.get("do_sample", False)),
-                    repetition_penalty=float(generation.get("repetition_penalty", 1.1)),
-                    no_repeat_ngram_size=int(generation.get("no_repeat_ngram_size", 6)),
                     use_cache=True,
                 )
             new_tokens = output_ids[:, inputs["input_ids"].shape[1]:]
