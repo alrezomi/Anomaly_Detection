@@ -15,6 +15,7 @@ FAIL_PATTERN = re.compile(
     r"(?:^|[^a-z])(error|anomaly|fail|failure|failed|nok|not[_ -]?ok|fehler)(?:$|[^a-z])",
     re.IGNORECASE,
 )
+LABEL_MESSAGE_COUNT = 3
 
 
 def discover_bags(data_root: Path, recursive: bool) -> list[Path]:
@@ -40,7 +41,11 @@ def infer_bag_record(
         "read_status": "ok",
         "message_count": 0,
         "startup_ignore_sec": startup_ignore_sec,
+        "label_message_count": LABEL_MESSAGE_COUNT,
+        "stage_message_count": 0,
+        "considered_message_count": 0,
         "ignored_startup_markers": "",
+        "ignored_earlier_markers": "",
         "used_stage_markers": "",
         "failure_markers": "",
         "label": "unknown",
@@ -53,8 +58,18 @@ def infer_bag_record(
             return record
 
         events = read_stage_events(bag_path, stage_topic)
+        if events.empty:
+            record["used_stage_markers"] = "<no stage messages>"
+            return record
+
+        order_column = "time_ns" if "time_ns" in events.columns else "time"
+        events = events.sort_values(order_column, kind="stable").reset_index(drop=True)
+        record["stage_message_count"] = len(events)
         ignored_events = events[events["time"] < startup_ignore_sec]
-        used_events = events[events["time"] >= startup_ignore_sec]
+        eligible_events = events[events["time"] >= startup_ignore_sec]
+        ignored_earlier_events = eligible_events.iloc[:-LABEL_MESSAGE_COUNT]
+        used_events = eligible_events.tail(LABEL_MESSAGE_COUNT)
+        record["considered_message_count"] = len(used_events)
         markers = [str(value).strip() for value in used_events["stage"]]
         failure_mask = used_events["stage"].astype(str).map(
             lambda value: FAIL_PATTERN.search(value) is not None
@@ -62,6 +77,7 @@ def infer_bag_record(
         failure_events = used_events[failure_mask]
         failures = [str(value).strip() for value in failure_events["stage"]]
         record["ignored_startup_markers"] = _format_events(ignored_events)
+        record["ignored_earlier_markers"] = _format_events(ignored_earlier_events)
         record["used_stage_markers"] = _format_events(used_events)
         record["failure_markers"] = _format_events(failure_events)
         if markers:

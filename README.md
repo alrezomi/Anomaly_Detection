@@ -234,12 +234,13 @@ Generate or refresh one label for every bag with:
 ```
 
 This scans every immediate ROS bag directory automatically. Add `--recursive`
-if bags are nested more deeply. The label is derived only from recorded stage
-messages:
+if bags are nested more deeply. After the startup-ignore interval, the label is
+derived only from the final three recorded stage messages:
 
-- A stage marker containing `Error`, `Anomaly`, `Fail`, or a related spelling
-  gives the whole bag the label `fail`.
-- Recorded stage messages without a failure marker give the bag `normal`.
+- If any of those final three messages contains `Error`, `Anomaly`, `Fail`, or
+  a related spelling, the whole bag is labeled `fail`.
+- If up to three final messages exist and none is a failure marker, the bag is
+  labeled `normal`.
 - A missing stage topic, no stage messages, or an unreadable bag gives it
   `unknown`.
 
@@ -415,9 +416,10 @@ docker compose run --rm bag-labels
 ```
 
 The clean label file is written to `dataset_labels.csv` in the configured host
-output directory. `dataset_labels_details.csv` shows timestamped ignored and
-used markers for debugging. By default, stage messages earlier than 0.1 seconds
-are treated as cached startup history and do not affect the label.
+output directory. `dataset_labels_details.csv` shows timestamped startup,
+earlier, and considered markers separately for debugging. By default, stage
+messages earlier than 0.1 seconds are treated as cached startup history. Of the
+remaining messages, only the final three affect the label.
 
 ### Run without GPU
 

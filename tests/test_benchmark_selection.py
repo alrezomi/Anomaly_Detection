@@ -7,10 +7,10 @@ from unittest.mock import patch
 
 
 # Keep these selection tests independent of ROS and the GPU model dependencies.
-manifest_module = ModuleType("build_dataset_manifest")
-manifest_module.discover_bags = lambda *args, **kwargs: []
-manifest_module.infer_bag_record = lambda *args, **kwargs: {}
-sys.modules.setdefault("build_dataset_manifest", manifest_module)
+rosbag_module = ModuleType("rosbag_io")
+rosbag_module.list_bag_topics = lambda *args, **kwargs: None
+rosbag_module.read_stage_events = lambda *args, **kwargs: None
+sys.modules.setdefault("rosbag_io", rosbag_module)
 
 model_module = ModuleType("rynnbrain_vlm.model")
 model_module.RynnBrainModel = object
