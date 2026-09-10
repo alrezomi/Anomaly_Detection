@@ -12,9 +12,9 @@ nominal memory or the RynnBrain task memory, this:
    folder, and appends one row per (bag, input_mode) to a single benchmark
    summary table.
 
-Ground truth for scoring comes from the same recorded-stage-marker heuristic
-as build_dataset_manifest.py (normal/fail/unknown), so failing/unlabeled bags
-still run but cannot be scored for accuracy.
+Ground truth for scoring comes from explicit CLI labels when supplied, or from
+the same recorded-stage-marker heuristic as build_dataset_manifest.py
+(normal/fail/unknown) otherwise.
 """
 
 from __future__ import annotations
@@ -72,6 +72,26 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Benchmark only this eligible bag name. Repeat for several held-out "
             "normal/fail bags. Reference bags remain excluded."
+        ),
+    )
+    parser.add_argument(
+        "--normal-bag",
+        action="append",
+        default=[],
+        metavar="BAG_NAME",
+        help=(
+            "Benchmark this bag and set its ground truth to normal, overriding "
+            "the recorded-stage label. Repeat for multiple normal bags."
+        ),
+    )
+    parser.add_argument(
+        "--failure-bag",
+        action="append",
+        default=[],
+        metavar="BAG_NAME",
+        help=(
+            "Benchmark this bag and set its ground truth to fail, overriding "
+            "the recorded-stage label. Repeat for multiple failure bags."
         ),
     )
     parser.add_argument(
@@ -156,17 +176,21 @@ def _select_named_records(
     records: list[dict[str, Any]],
     requested_names: list[str],
     excluded_names: set[str],
+    manual_labels: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Select eligible records by unique bag name while preserving CLI order."""
     if not requested_names:
         return records
     if len(requested_names) != len(set(requested_names)):
-        raise ValueError("Each --bag BAG_NAME may be specified only once.")
+        raise ValueError(
+            "Each bag name may appear only once across --bag, --normal-bag, "
+            "and --failure-bag."
+        )
 
     excluded = sorted(set(requested_names) & excluded_names)
     if excluded:
         raise ValueError(
-            "The following --bag values are configured as nominal/reference memory "
+            "The following selected bags are configured as nominal/reference memory "
             "and cannot be evaluation samples: " + ", ".join(excluded)
         )
 
@@ -181,7 +205,18 @@ def _select_named_records(
         raise ValueError(
             "Bag name is not unique under the data root: " + ", ".join(ambiguous)
         )
-    return [by_name[name][0] for name in requested_names]
+    selected: list[dict[str, Any]] = []
+    overrides = manual_labels or {}
+    for name in requested_names:
+        record = dict(by_name[name][0])
+        record["recorded_label"] = record.get("label", "unknown")
+        if name in overrides:
+            record["label"] = overrides[name]
+            record["label_source"] = "manual_cli"
+        else:
+            record["label_source"] = "recorded_stage"
+        selected.append(record)
+    return selected
 
 
 def main() -> None:
@@ -214,12 +249,29 @@ def main() -> None:
         for bag_path in all_bags
         if bag_path.name not in excluded_names
     ]
-    records = _select_named_records(records, arguments.bag, excluded_names)
+    requested_names = (
+        list(arguments.bag)
+        + list(arguments.normal_bag)
+        + list(arguments.failure_bag)
+    )
+    manual_labels = {
+        **{name: "normal" for name in arguments.normal_bag},
+        **{name: "fail" for name in arguments.failure_bag},
+    }
+    records = _select_named_records(
+        records,
+        requested_names,
+        excluded_names,
+        manual_labels,
+    )
     selection_df = pd.DataFrame(records)
     selection_df.to_csv(benchmark_root / "benchmark_bag_selection.csv", index=False)
     print(f"Found {len(all_bags)} bag(s), excluding {len(excluded_names)} nominal/reference bag(s).")
     print(f"Benchmarking {len(records)} demonstration(s).")
-    print(selection_df[["bag_name", "label"]].to_string(index=False) if records else "  (none)")
+    selection_columns = ["bag_name", "label"]
+    if records and "label_source" in selection_df:
+        selection_columns.extend(["label_source", "recorded_label"])
+    print(selection_df[selection_columns].to_string(index=False) if records else "  (none)")
 
     candidates = records[: arguments.limit] if arguments.limit else records
 

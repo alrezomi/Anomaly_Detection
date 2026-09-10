@@ -534,6 +534,18 @@ docker compose run --build --rm benchmark \
   --bag failure_bag
 ```
 
+When recorded stage labels are unreliable, select and label each bag explicitly
+with repeatable `--normal-bag` and `--failure-bag` options. These manual labels
+override the recorded label and are used for accuracy, vector metadata, and PCA:
+
+```bash
+docker compose run --build --rm benchmark \
+  --config /config/pipeline_config.json \
+  --normal-bag normal_bag_01 \
+  --failure-bag failure_bag_01 \
+  --failure-bag failure_bag_02
+```
+
 For an explicitly exploratory plot, `--include-nominal-bags` allows bags from
 the DINO `nominal_bags` list to be selected with `--bag`. This is not a held-out
 evaluation, especially for heatmap-based modes. A bag in
@@ -576,8 +588,9 @@ For each remaining bag it writes a self-contained folder (videos, DINO CSVs,
 selected VLM frames, prompts/responses) under
 `<rynnbrain.output_dir>_benchmark/<bag_name>/`, and appends one row per
 `(bag, input_mode)` to a single `benchmark_summary.csv` in that same directory.
-Ground truth per bag comes from the same recorded-stage-marker heuristic as
-`build_dataset_manifest.py`; bags without a clear `normal`/`fail` marker still
+Ground truth per bag comes from `--normal-bag`/`--failure-bag` when supplied;
+otherwise it uses the recorded-stage-marker heuristic from
+`build_dataset_manifest.py`. Bags without a clear `normal`/`fail` marker still
 run but are excluded from the printed accuracy numbers. The RynnBrain model is
 loaded once for the whole run rather than once per bag. Pass `--limit N` to
 smoke-test on a handful of bags, or `--skip-dino`/`--skip-vlm` to rerun only
