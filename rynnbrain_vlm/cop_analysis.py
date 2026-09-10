@@ -312,6 +312,13 @@ def analyze_saved_vectors(
             continue
 
         matrix = np.stack([record.vector for record in usable])
+        try:
+            coordinates, components, explained_ratio, feature_mean = pca_2d(matrix)
+        except ValueError as error:
+            mode_summary.update(status="skipped", reason=str(error))
+            summary["modes"].append(mode_summary)
+            continue
+
         stem = _slug(input_mode)
         archive_path = output / f"cop_vectors_{stem}.npz"
         l2_norms = np.linalg.norm(matrix.astype(np.float64), axis=1)
@@ -324,7 +331,6 @@ def analyze_saved_vectors(
             vector_paths=np.asarray([row["vector_path"] for row in rows]),
         )
 
-        coordinates, components, explained_ratio, feature_mean = pca_2d(matrix)
         for index, row in enumerate(rows):
             row["pc1"] = float(coordinates[index, 0])
             row["pc2"] = float(coordinates[index, 1])

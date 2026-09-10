@@ -138,6 +138,18 @@ class CoPAnalysisTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identical vectors"):
             pca_2d(np.ones((3, 4), dtype=np.float32))
 
+    def test_analysis_skips_identical_vectors_and_writes_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._save(root, "normal_01", "normal", [1.0, 1.0, 1.0])
+            self._save(root, "failure_01", "fail", [1.0, 1.0, 1.0])
+
+            summary = analyze_saved_vectors(root)
+
+            self.assertEqual(summary["modes"][0]["status"], "skipped")
+            self.assertIn("identical vectors", summary["modes"][0]["reason"])
+            self.assertTrue(Path(summary["summary_file"]).is_file())
+
     def test_metadata_is_plain_json_and_vector_is_not_embedded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
