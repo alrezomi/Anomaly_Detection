@@ -57,6 +57,12 @@
     },
     "cop_vectors": {
       "enabled": true
+    },
+    "cop_classifier": {
+      "enabled": false,
+      "model_paths": {
+        "raw": "/outputs/experiment_01/cop_classifier/raw_logistic.npz"
+      }
     }
   }
 }

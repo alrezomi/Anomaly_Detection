@@ -563,6 +563,59 @@ docker compose run --rm --entrypoint python benchmark \
   --input-dir /outputs/experiments/example/rynnbrain_benchmark
 ```
 
+### Frozen-vector logistic failure classifier
+
+RynnBrain remains fully frozen. After collecting labeled vectors, a small
+L2-regularized logistic-regression head can be trained directly on the complete
+hidden vectors (PCA coordinates are not used). Each vector is L2-normalized and
+centered using training-set statistics. The saved classifier contains only one
+weight per hidden feature, an intercept, preprocessing values, and metadata.
+
+First generate a representative training set containing multiple nominal and
+failure bags with identical RynnBrain settings. Then train the classifier from
+the saved vectors:
+
+```bash
+docker compose run --rm cop-classifier-train \
+  --input-dir /outputs/experiments/example/rynnbrain_benchmark \
+  --output-file /outputs/experiments/example/cop_classifier/raw_logistic.npz \
+  --input-mode raw
+```
+
+By default all labeled `raw` vectors under `--input-dir` are training samples.
+Repeat `--bag BAG_NAME` to select an explicit training subset. The trainer
+rejects mixed model/prompt/reference/camera/frame settings, duplicate bags,
+unknown labels, and datasets with fewer than two bags per class. Several dozen
+diverse bags per class are strongly preferable to the minimum.
+
+Training creates:
+
+- `raw_logistic.npz`: weights, intercept, training mean, and threshold.
+- `raw_logistic.json`: exact representation signature, class counts, fit
+  diagnostics, and deterministic stratified cross-validation metrics.
+- `raw_logistic_training_predictions.csv`: out-of-fold probability for every
+  training bag. These predictions are more informative than fitted-set scores.
+
+Enable the trained head for future runs in `pipeline_config.json`:
+
+```json
+"cop_classifier": {
+  "enabled": true,
+  "model_paths": {
+    "raw": "/outputs/experiments/example/cop_classifier/raw_logistic.npz"
+  }
+}
+```
+
+Every later RynnBrain result and benchmark row then includes
+`classifier_failure_probability`, `classifier_failure_percent`,
+`classifier_decision`, and `classifier_decision_correct`. The original
+RynnBrain text decision remains alongside it. Evaluate performance on bags that
+were not used to train the classifier; scoring the training bags only measures
+memorization. The percentage is a logistic estimate, not a guaranteed calibrated
+real-world probability. Calibration becomes credible only with a sufficiently
+large, representative, independently evaluated dataset.
+
 The default RynnBrain base is NVIDIA's PyTorch 25.08 container for Jetson AGX
 Thor. It can be overridden with `RYNNBRAIN_BASE_IMAGE` when running on a
 different NVIDIA platform.

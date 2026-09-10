@@ -327,6 +327,12 @@ def main() -> None:
                 "response": None,
                 "cop_vector_path": None,
                 "cop_metadata_path": None,
+                "classifier_failure_probability": None,
+                "classifier_failure_percent": None,
+                "classifier_decision": None,
+                "classifier_decision_correct": None,
+                "classifier_threshold": None,
+                "classifier_model_path": None,
                 **dino_summary,
             })
             continue
@@ -343,6 +349,18 @@ def main() -> None:
                 "response": row["response"],
                 "cop_vector_path": row.get("cop_vector_path"),
                 "cop_metadata_path": row.get("cop_metadata_path"),
+                "classifier_failure_probability": row.get(
+                    "classifier_failure_probability"
+                ),
+                "classifier_failure_percent": row.get("classifier_failure_percent"),
+                "classifier_decision": row.get("classifier_decision"),
+                "classifier_decision_correct": (
+                    _decision_correct(ground_truth, row["classifier_decision"])
+                    if row.get("classifier_decision")
+                    else None
+                ),
+                "classifier_threshold": row.get("classifier_threshold"),
+                "classifier_model_path": row.get("classifier_model_path"),
                 **dino_summary,
             })
 

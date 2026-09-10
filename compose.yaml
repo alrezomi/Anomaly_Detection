@@ -91,5 +91,11 @@ services:
     entrypoint: ["python", "run_benchmark.py"]
     command: ["--config", "/config/pipeline_config.json"]
 
+  # Fit a small logistic head from already-saved frozen RynnBrain vectors.
+  cop-classifier-train:
+    <<: *rynnbrain-common
+    entrypoint: ["python", "-m", "rynnbrain_vlm.cop_classifier"]
+    command: ["--help"]
+
 volumes:
   huggingface-cache:

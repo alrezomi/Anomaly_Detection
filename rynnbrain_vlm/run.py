@@ -14,6 +14,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
+from .cop_classifier import CoPLogisticClassifier, load_classifier
 from .cop_analysis import save_cop_vector
 from .model import COP_REPRESENTATION_ID, RynnBrainModel
 from .prompts import task_context_prompt, evaluation_prompt_multiturn
@@ -223,6 +224,35 @@ def evaluate_multiturn(
 
     source = vlm.get("source", "generated_videos")
     input_modes = list(vlm.get("input_modes", ["raw"]))
+    classifier_config = dict(vlm.get("cop_classifier", {}))
+    classifier_enabled = bool(classifier_config.get("enabled", False))
+    classifiers: dict[str, CoPLogisticClassifier] = {}
+    if classifier_enabled:
+        if not capture_cop_vectors:
+            raise ValueError(
+                "rynnbrain.cop_classifier requires rynnbrain.cop_vectors.enabled=true."
+            )
+        model_paths = classifier_config.get("model_paths", {})
+        if not isinstance(model_paths, dict):
+            raise ValueError("rynnbrain.cop_classifier.model_paths must be an object.")
+        missing_models = [mode for mode in input_modes if not model_paths.get(mode)]
+        if missing_models:
+            raise ValueError(
+                "Missing classifier model path(s) for input mode(s): "
+                + ", ".join(missing_models)
+            )
+        classifiers = {
+            mode: load_classifier(Path(str(model_paths[mode]))) for mode in input_modes
+        }
+        incompatible_modes = [
+            mode for mode, classifier in classifiers.items()
+            if classifier.input_mode != mode
+        ]
+        if incompatible_modes:
+            raise ValueError(
+                "Classifier file input mode does not match configured mode(s): "
+                + ", ".join(incompatible_modes)
+            )
     raw_video_paths = {
         topic: str(vision_output_directory / f"{_slug(topic)}_raw_original.mp4")
         for topic in topics
@@ -337,6 +367,10 @@ def evaluate_multiturn(
         decision, confidence = _parse_response(response)
         cop_vector_path: str | None = None
         cop_metadata_path: str | None = None
+        classifier_failure_probability: float | None = None
+        classifier_decision: str | None = None
+        classifier_threshold: float | None = None
+        classifier_model_path: str | None = None
         if cop_vector is not None:
             text_config = getattr(model.model.config, "text_config", None)
             model_revision = getattr(model.model.config, "_commit_hash", None)
@@ -360,6 +394,24 @@ def evaluate_multiturn(
                 "turn1_prompt": turn1_text,
                 "turn2_prompt": turn2_text,
             }
+            if classifier_enabled:
+                classifier = classifiers[mode]
+                if classifier.representation_id != COP_REPRESENTATION_ID:
+                    raise ValueError(
+                        "Classifier representation does not match the captured CoP vector."
+                    )
+                classifier_failure_probability = classifier.predict_failure_probability(
+                    cop_vector.numpy(),
+                    input_mode=mode,
+                    comparison_signature=comparison_signature,
+                )
+                classifier_decision = classifier.predict_label(
+                    classifier_failure_probability
+                )
+                classifier_threshold = classifier.threshold
+                classifier_model_path = str(
+                    Path(str(classifier_config["model_paths"][mode])).resolve()
+                )
             vector_path, metadata_path = save_cop_vector(
                 output_directory,
                 mode,
@@ -378,6 +430,10 @@ def evaluate_multiturn(
                     "ground_truth_label": vlm.get("ground_truth_label", "unknown"),
                     "decision": decision,
                     "confidence": confidence,
+                    "classifier_failure_probability": classifier_failure_probability,
+                    "classifier_decision": classifier_decision,
+                    "classifier_threshold": classifier_threshold,
+                    "classifier_model_path": classifier_model_path,
                     "comparison_signature": comparison_signature,
                 },
             )
@@ -405,6 +461,15 @@ def evaluate_multiturn(
                 ),
                 "cop_vector_path": cop_vector_path,
                 "cop_metadata_path": cop_metadata_path,
+                "classifier_failure_probability": classifier_failure_probability,
+                "classifier_failure_percent": (
+                    classifier_failure_probability * 100.0
+                    if classifier_failure_probability is not None
+                    else None
+                ),
+                "classifier_decision": classifier_decision,
+                "classifier_threshold": classifier_threshold,
+                "classifier_model_path": classifier_model_path,
             }
         )
         raw_records.append({
@@ -437,8 +502,23 @@ def evaluate_multiturn(
             ),
             "cop_vector_path": cop_vector_path,
             "cop_metadata_path": cop_metadata_path,
+            "classifier_failure_probability": classifier_failure_probability,
+            "classifier_failure_percent": (
+                classifier_failure_probability * 100.0
+                if classifier_failure_probability is not None
+                else None
+            ),
+            "classifier_decision": classifier_decision,
+            "classifier_threshold": classifier_threshold,
+            "classifier_model_path": classifier_model_path,
         })
         print(f"{mode} (multiturn): decision={decision}, confidence={confidence}")
+        if classifier_failure_probability is not None:
+            print(
+                f"{mode} (frozen-vector logistic classifier): "
+                f"failure={classifier_failure_probability * 100.0:.2f}%, "
+                f"decision={classifier_decision}"
+            )
 
     return rows, frame_metadata, raw_records, task_description
 
