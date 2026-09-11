@@ -95,7 +95,7 @@ services:
   cop-classifier-train:
     <<: *rynnbrain-common
     entrypoint: ["python", "-m", "rynnbrain_vlm.cop_classifier"]
-    command: ["--help"]
+    command: ["--config", "/config/pipeline_config.json"]
 
 volumes:
   huggingface-cache:

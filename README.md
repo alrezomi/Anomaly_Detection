@@ -572,21 +572,57 @@ centered using training-set statistics. The saved classifier contains only one
 weight per hidden feature, an intercept, preprocessing values, and metadata.
 
 First generate a representative training set containing multiple nominal and
-failure bags with identical RynnBrain settings. Then train the classifier from
-the saved vectors:
+failure bags with identical RynnBrain settings. Store the fixed training split
+in `pipeline_config.json`; this avoids rebuilding the classifier during normal
+testing:
 
-```bash
-docker compose run --rm cop-classifier-train \
-  --input-dir /outputs/experiments/example/rynnbrain_benchmark \
-  --output-file /outputs/experiments/example/cop_classifier/raw_logistic.npz \
-  --input-mode raw
+```json
+"cop_classifier": {
+  "enabled": false,
+  "model_paths": {
+    "raw": "/outputs/experiments/example/cop_classifier/raw_logistic.npz"
+  },
+  "training": {
+    "input_dir": "/outputs/experiments/example/rynnbrain_benchmark",
+    "input_mode": "raw",
+    "normal_bags": [
+      "normal_training_bag_01",
+      "normal_training_bag_02"
+    ],
+    "failure_bags": [
+      "failure_training_bag_01",
+      "failure_training_bag_02"
+    ],
+    "class_weight": "balanced",
+    "regularization_c": 1.0,
+    "threshold": 0.5
+  }
+}
 ```
 
-By default all labeled `raw` vectors under `--input-dir` are training samples.
-Repeat `--bag BAG_NAME` to select an explicit training subset. The trainer
-rejects mixed model/prompt/reference/camera/frame settings, duplicate bags,
-unknown labels, and datasets with fewer than two bags per class. Several dozen
-diverse bags per class are strongly preferable to the minimum.
+Run the dedicated service once:
+
+```bash
+docker compose run --build --rm cop-classifier-train
+```
+
+This is the only command that trains or overwrites the classifier. Benchmark
+and single-bag RynnBrain runs only load the saved model. The trainer uses only
+the names in `training.normal_bags` and `training.failure_bags`; these lists
+explicitly override recorded labels. Empty lists are rejected to prevent an
+accidental train-on-everything run. Set `training.allow_all_labeled` to `true`
+only when that behavior is intentional. Command-line options remain available
+as explicit overrides. The trainer rejects mixed model/prompt/
+reference/camera/frame settings, duplicate bags, unknown labels, and datasets
+with fewer than two bags per class. Several dozen diverse bags per class are
+strongly preferable to the minimum.
+
+`class_weight: "balanced"` gives the normal and failure classes equal total
+influence even when their bag counts differ. Use `"none"` to optimize ordinary
+unweighted logistic loss. Balanced weighting is usually preferable for failure
+detection with an uneven training set, but its percentage reflects an equal-
+class training prior and is not automatically calibrated to the real failure
+rate.
 
 Training creates:
 
@@ -596,7 +632,7 @@ Training creates:
 - `raw_logistic_training_predictions.csv`: out-of-fold probability for every
   training bag. These predictions are more informative than fitted-set scores.
 
-Enable the trained head for future runs in `pipeline_config.json`:
+After that one training run, enable the saved head for future tests:
 
 ```json
 "cop_classifier": {

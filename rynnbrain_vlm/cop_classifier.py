@@ -100,6 +100,7 @@ def fit_logistic_classifier(
     *,
     c_value: float = 1.0,
     threshold: float = 0.5,
+    class_weight: str = "balanced",
     max_iterations: int = 200,
     tolerance: float = 1e-8,
 ) -> tuple[np.ndarray, float, np.ndarray, dict[str, Any]]:
@@ -108,12 +109,25 @@ def fit_logistic_classifier(
         raise ValueError("c_value must be greater than zero.")
     if not 0 < threshold < 1:
         raise ValueError("threshold must be strictly between zero and one.")
+    if class_weight not in {"balanced", "none"}:
+        raise ValueError("class_weight must be 'balanced' or 'none'.")
     normalized, _ = _normalize_rows(np.asarray(vectors))
     labels = np.asarray(targets, dtype=np.float64)
     if labels.ndim != 1 or labels.size != normalized.shape[0]:
         raise ValueError("targets must contain one value per vector.")
     if set(np.unique(labels)) != {0.0, 1.0}:
         raise ValueError("Training requires both normal (0) and failure (1) targets.")
+
+    class_counts = {target: int(np.sum(labels == target)) for target in (0.0, 1.0)}
+    if class_weight == "balanced":
+        class_weights = {
+            target: labels.size / (2.0 * count) for target, count in class_counts.items()
+        }
+        sample_weights = np.asarray([class_weights[target] for target in labels])
+    else:
+        class_weights = {0.0: 1.0, 1.0: 1.0}
+        sample_weights = np.ones(labels.size, dtype=np.float64)
+    total_weight = float(sample_weights.sum())
 
     feature_mean = normalized.mean(axis=0)
     centered = normalized - feature_mean
@@ -127,15 +141,18 @@ def fit_logistic_classifier(
     design = np.column_stack([reduced, np.ones(reduced.shape[0])])
 
     parameters = np.zeros(rank + 1, dtype=np.float64)
-    prevalence = float(np.clip(labels.mean(), 1e-6, 1 - 1e-6))
+    prevalence = float(
+        np.clip(np.average(labels, weights=sample_weights), 1e-6, 1 - 1e-6)
+    )
     parameters[-1] = np.log(prevalence / (1.0 - prevalence))
-    regularization = 1.0 / (c_value * labels.size)
+    regularization = 1.0 / (c_value * total_weight)
     regularizer = np.zeros(rank + 1, dtype=np.float64)
     regularizer[:-1] = regularization
 
     def objective(candidate: np.ndarray) -> float:
         logits = design @ candidate
-        loss = np.mean(np.logaddexp(0.0, logits) - labels * logits)
+        losses = np.logaddexp(0.0, logits) - labels * logits
+        loss = float(sample_weights @ losses / total_weight)
         penalty = 0.5 * regularization * float(candidate[:-1] @ candidate[:-1])
         return float(loss + penalty)
 
@@ -145,14 +162,14 @@ def fit_logistic_classifier(
     for iterations in range(1, max_iterations + 1):
         logits = design @ parameters
         probabilities = _sigmoid(logits)
-        gradient = design.T @ (probabilities - labels) / labels.size
+        gradient = design.T @ (sample_weights * (probabilities - labels)) / total_weight
         gradient += regularizer * parameters
         gradient_norm = float(np.max(np.abs(gradient)))
         if gradient_norm <= tolerance:
             converged = True
             break
-        curvature = probabilities * (1.0 - probabilities)
-        hessian = design.T @ (curvature[:, None] * design) / labels.size
+        curvature = sample_weights * probabilities * (1.0 - probabilities)
+        hessian = design.T @ (curvature[:, None] * design) / total_weight
         hessian.flat[:: hessian.shape[0] + 1] += regularizer + 1e-10
         try:
             step_direction = np.linalg.solve(hessian, gradient)
@@ -179,6 +196,11 @@ def fit_logistic_classifier(
         "effective_rank": rank,
         "regularization_c": float(c_value),
         "regularization_strength": float(regularization),
+        "class_weight": class_weight,
+        "class_weights": {
+            "normal": float(class_weights[0.0]),
+            "fail": float(class_weights[1.0]),
+        },
         "threshold": float(threshold),
     }
     return weights, float(parameters[-1]), feature_mean, diagnostics
@@ -223,6 +245,7 @@ def _cross_validated_probabilities(
     vectors: np.ndarray,
     targets: np.ndarray,
     c_value: float,
+    class_weight: str,
 ) -> tuple[np.ndarray, int]:
     class_counts = [int(np.sum(targets == target)) for target in (0, 1)]
     fold_count = min(5, min(class_counts))
@@ -242,7 +265,10 @@ def _cross_validated_probabilities(
         validation = np.asarray(sorted(validation_indices), dtype=np.int64)
         training = np.setdiff1d(all_indices, validation, assume_unique=True)
         weights, intercept, mean, _ = fit_logistic_classifier(
-            vectors[training], targets[training], c_value=c_value
+            vectors[training],
+            targets[training],
+            c_value=c_value,
+            class_weight=class_weight,
         )
         normalized, _ = _normalize_rows(vectors[validation])
         probabilities[validation] = _sigmoid((normalized - mean) @ weights + intercept)
@@ -316,17 +342,16 @@ def load_classifier(model_file: Path) -> CoPLogisticClassifier:
 def _select_training_records(
     records: list[SavedCoPVector], input_mode: str, bag_names: list[str]
 ) -> list[SavedCoPVector]:
-    usable = [
+    mode_records = [
         record
         for record in records
         if str(record.metadata.get("input_mode")) == input_mode
-        and str(record.metadata.get("ground_truth_label", "")).lower() in LABEL_TO_TARGET
     ]
     if bag_names:
         if len(bag_names) != len(set(bag_names)):
-            raise ValueError("Each training --bag name may be supplied only once.")
+            raise ValueError("Each training bag name may be supplied only once.")
         by_name: dict[str, list[SavedCoPVector]] = {}
-        for record in usable:
+        for record in mode_records:
             by_name.setdefault(str(record.metadata.get("bag_name")), []).append(record)
         missing = [name for name in bag_names if name not in by_name]
         if missing:
@@ -337,6 +362,13 @@ def _select_training_records(
                 "Multiple training vectors found for bag(s): " + ", ".join(ambiguous)
             )
         usable = [by_name[name][0] for name in bag_names]
+    else:
+        usable = [
+            record
+            for record in mode_records
+            if str(record.metadata.get("ground_truth_label", "")).strip().lower()
+            in LABEL_TO_TARGET
+        ]
     names = [str(record.metadata.get("bag_name")) for record in usable]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -350,16 +382,41 @@ def train_from_saved_vectors(
     *,
     input_mode: str = "raw",
     bag_names: list[str] | None = None,
+    label_overrides: dict[str, str] | None = None,
     c_value: float = 1.0,
     threshold: float = 0.5,
+    class_weight: str = "balanced",
 ) -> dict[str, Any]:
     records = _select_training_records(
         discover_saved_vectors(input_directory), input_mode, bag_names or []
     )
     if not records:
         raise ValueError(f"No labeled {input_mode!r} vectors were found.")
+    overrides = label_overrides or {}
+    selected_names = {str(record.metadata.get("bag_name")) for record in records}
+    unused_overrides = sorted(set(overrides) - selected_names)
+    if unused_overrides:
+        raise ValueError(
+            "Configured training labels have no selected vector for: "
+            + ", ".join(unused_overrides)
+        )
+    training_labels = [
+        str(
+            overrides.get(
+                str(record.metadata.get("bag_name")),
+                record.metadata.get("ground_truth_label", ""),
+            )
+        ).strip().lower()
+        for record in records
+    ]
+    invalid_labels = sorted({label for label in training_labels if label not in LABEL_TO_TARGET})
+    if invalid_labels:
+        raise ValueError(
+            "Training vectors need explicit normal/fail labels; invalid label(s): "
+            + ", ".join(invalid_labels)
+        )
     targets = np.asarray(
-        [LABEL_TO_TARGET[str(record.metadata["ground_truth_label"]).lower()] for record in records],
+        [LABEL_TO_TARGET[label] for label in training_labels],
         dtype=np.int64,
     )
     counts = {"normal": int(np.sum(targets == 0)), "fail": int(np.sum(targets == 1))}
@@ -378,10 +435,16 @@ def train_from_saved_vectors(
         raise ValueError("Training vectors use different or missing representation definitions.")
 
     matrix = np.stack([record.vector for record in records])
-    cv_probabilities, fold_count = _cross_validated_probabilities(matrix, targets, c_value)
+    cv_probabilities, fold_count = _cross_validated_probabilities(
+        matrix, targets, c_value, class_weight
+    )
     cv_metrics = _classification_metrics(targets, cv_probabilities, threshold)
     weights, intercept, feature_mean, diagnostics = fit_logistic_classifier(
-        matrix, targets, c_value=c_value, threshold=threshold
+        matrix,
+        targets,
+        c_value=c_value,
+        threshold=threshold,
+        class_weight=class_weight,
     )
     signature = dict(records[0].metadata["comparison_signature"])
     model_path = output_file.resolve()
@@ -409,10 +472,18 @@ def train_from_saved_vectors(
         "vector_dimension": int(matrix.shape[1]),
         "training_bag_count": len(records),
         "training_class_counts": counts,
+        "class_weight": class_weight,
         "training_bags": [row["bag_name"] for row in rows],
+        "training_labels": {
+            row["bag_name"]: row["ground_truth_label"] for row in rows
+        },
         "failure_probability_note": (
             "Logistic estimate from the frozen hidden vector; calibration depends on "
-            "training-set size, balance, and representativeness."
+            "training-set size and representativeness. Balanced class weights use an "
+            "equal-class training prior rather than the observed real-world failure rate."
+            if class_weight == "balanced"
+            else "Logistic estimate from the frozen hidden vector; calibration depends "
+            "on training-set size, class prevalence, and representativeness."
         ),
         "cross_validation": {
             "method": "deterministic_stratified_k_fold",
@@ -441,25 +512,102 @@ def train_from_saved_vectors(
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=Path, required=True)
-    parser.add_argument("--output-file", type=Path, required=True)
-    parser.add_argument("--input-mode", default="raw")
-    parser.add_argument("--bag", action="append", default=[], metavar="BAG_NAME")
-    parser.add_argument("--regularization-c", type=float, default=1.0)
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Read defaults from rynnbrain.cop_classifier.training in this JSON file.",
+    )
+    parser.add_argument("--input-dir", type=Path)
+    parser.add_argument("--output-file", type=Path)
+    parser.add_argument("--input-mode")
+    parser.add_argument("--bag", action="append", default=None, metavar="BAG_NAME")
+    parser.add_argument("--normal-bag", action="append", default=None, metavar="BAG_NAME")
+    parser.add_argument("--failure-bag", action="append", default=None, metavar="BAG_NAME")
+    parser.add_argument("--regularization-c", type=float)
+    parser.add_argument("--threshold", type=float)
+    parser.add_argument("--class-weight", choices=("balanced", "none"))
     return parser.parse_args()
+
+
+def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]:
+    classifier_config: dict[str, Any] = {}
+    training_config: dict[str, Any] = {}
+    if arguments.config is not None:
+        config = json.loads(arguments.config.read_text(encoding="utf-8"))
+        classifier_config = dict(config.get("rynnbrain", {}).get("cop_classifier", {}))
+        training_config = dict(classifier_config.get("training", {}))
+
+    input_mode = arguments.input_mode or training_config.get("input_mode", "raw")
+    input_directory = arguments.input_dir or training_config.get("input_dir")
+    model_paths = classifier_config.get("model_paths", {})
+    configured_model = model_paths.get(input_mode) if isinstance(model_paths, dict) else None
+    output_file = (
+        arguments.output_file
+        or training_config.get("output_file")
+        or configured_model
+    )
+    if input_directory is None:
+        raise ValueError(
+            "Set --input-dir or rynnbrain.cop_classifier.training.input_dir."
+        )
+    if output_file is None:
+        raise ValueError(
+            "Set --output-file, training.output_file, or model_paths for the input mode."
+        )
+    cli_selection_supplied = any(
+        value is not None
+        for value in (arguments.bag, arguments.normal_bag, arguments.failure_bag)
+    )
+    if cli_selection_supplied:
+        generic_bags = list(arguments.bag or [])
+        normal_bags = list(arguments.normal_bag or [])
+        failure_bags = list(arguments.failure_bag or [])
+    else:
+        generic_bags = list(training_config.get("bags", []))
+        normal_bags = list(training_config.get("normal_bags", []))
+        failure_bags = list(training_config.get("failure_bags", []))
+    selected_bags = generic_bags + normal_bags + failure_bags
+    if (
+        not selected_bags
+        and arguments.config is not None
+        and not bool(training_config.get("allow_all_labeled", False))
+    ):
+        raise ValueError(
+            "No classifier training bags are configured. Fill training.normal_bags "
+            "and training.failure_bags, or explicitly set training.allow_all_labeled=true."
+        )
+    label_overrides = {
+        **{name: "normal" for name in normal_bags},
+        **{name: "fail" for name in failure_bags},
+    }
+
+    return {
+        "input_directory": Path(str(input_directory)),
+        "output_file": Path(str(output_file)),
+        "input_mode": str(input_mode),
+        "bag_names": selected_bags,
+        "label_overrides": label_overrides,
+        "c_value": float(
+            arguments.regularization_c
+            if arguments.regularization_c is not None
+            else training_config.get("regularization_c", 1.0)
+        ),
+        "threshold": float(
+            arguments.threshold
+            if arguments.threshold is not None
+            else training_config.get("threshold", 0.5)
+        ),
+        "class_weight": str(
+            arguments.class_weight
+            or training_config.get("class_weight", "balanced")
+        ),
+    }
 
 
 def main() -> None:
     arguments = parse_arguments()
-    metadata = train_from_saved_vectors(
-        arguments.input_dir,
-        arguments.output_file,
-        input_mode=arguments.input_mode,
-        bag_names=arguments.bag,
-        c_value=arguments.regularization_c,
-        threshold=arguments.threshold,
-    )
+    settings = _resolved_training_settings(arguments)
+    metadata = train_from_saved_vectors(**settings)
     print(json.dumps(metadata, indent=2))
 
 

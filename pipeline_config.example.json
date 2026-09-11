@@ -62,6 +62,21 @@
       "enabled": false,
       "model_paths": {
         "raw": "/outputs/experiment_01/cop_classifier/raw_logistic.npz"
+      },
+      "training": {
+        "input_dir": "/outputs/experiment_01/rynnbrain_multiturn_benchmark",
+        "input_mode": "raw",
+        "normal_bags": [
+          "normal_training_bag_01",
+          "normal_training_bag_02"
+        ],
+        "failure_bags": [
+          "failure_training_bag_01",
+          "failure_training_bag_02"
+        ],
+        "class_weight": "balanced",
+        "regularization_c": 1.0,
+        "threshold": 0.5
       }
     }
   }
