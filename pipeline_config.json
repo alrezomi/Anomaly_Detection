@@ -66,9 +66,24 @@
       "max_new_tokens": 500,
       "do_sample": false,
       "enable_thinking": true
-    }
-  },
+    },
     "cop_vectors": {
       "enabled": true
+    },
+    "cop_classifier": {
+      "enabled": false,
+      "model_paths": {
+        "raw": "/outputs/experiments/pick_place_dino728_v100/cop_classifier/raw_logistic.npz"
+      },
+      "training": {
+        "input_dir": "/outputs/experiments/pick_place_dino728_v100/rynnbrain_benchmark",
+        "input_mode": "raw",
+        "normal_bags": [],
+        "failure_bags": [],
+        "class_weight": "balanced",
+        "regularization_c": 1.0,
+        "threshold": 0.5
+      }
     }
+  }
 }
