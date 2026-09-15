@@ -118,21 +118,29 @@ class CoPClassifierTests(unittest.TestCase):
             self._save_training_vector(root, "normal_02", "fail", [0.9, 0.1, 0.0])
             self._save_training_vector(root, "failure_01", "normal", [-1.0, -0.2, 0.0])
             self._save_training_vector(root, "failure_02", "normal", [-0.9, -0.1, 0.0])
-            labels = {
-                "normal_01": "normal",
-                "normal_02": "normal",
-                "failure_01": "fail",
-                "failure_02": "fail",
+            selectors = {
+                "/data/normal_01": "normal",
+                "/data/normal_02": "normal",
+                "/data/failure_01": "fail",
+                "/data/failure_02": "fail",
             }
 
             metadata = train_from_saved_vectors(
                 root,
                 root / "classifier.npz",
-                bag_names=list(labels),
-                label_overrides=labels,
+                bag_names=list(selectors),
+                label_overrides=selectors,
             )
 
-            self.assertEqual(metadata["training_labels"], labels)
+            self.assertEqual(
+                metadata["training_labels"],
+                {
+                    "normal_01": "normal",
+                    "normal_02": "normal",
+                    "failure_01": "fail",
+                    "failure_02": "fail",
+                },
+            )
 
     def test_balanced_weighting_equalizes_uneven_class_totals(self) -> None:
         vectors = np.asarray(

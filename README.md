@@ -586,12 +586,12 @@ testing:
     "input_dir": "/outputs/experiments/example/rynnbrain_benchmark",
     "input_mode": "raw",
     "normal_bags": [
-      "normal_training_bag_01",
-      "normal_training_bag_02"
+      "/data/Nominal/setting 1/nominal_1.2",
+      "/data/Nominal/setting 1/nominal_1.3"
     ],
     "failure_bags": [
-      "failure_training_bag_01",
-      "failure_training_bag_02"
+      "/data/Failure_1_grasp_miss/failure_1.1",
+      "/data/Failure_1_grasp_miss/failure_1.2"
     ],
     "class_weight": "balanced",
     "regularization_c": 1.0,
@@ -616,6 +616,12 @@ as explicit overrides. The trainer rejects mixed model/prompt/
 reference/camera/frame settings, duplicate bags, unknown labels, and datasets
 with fewer than two bags per class. Several dozen diverse bags per class are
 strongly preferable to the minimum.
+
+For nested datasets, full container paths such as
+`/data/Nominal/setting 1/nominal_1.2` are recommended. Data-root-relative paths
+such as `Nominal/setting 1/nominal_1.2` and unique final names such as
+`nominal_1.2` are also accepted. JSON paths need no escaping for underscores;
+spaces are preserved inside the quoted string.
 
 `class_weight: "balanced"` gives the normal and failure classes equal total
 influence even when their bag counts differ. Use `"none"` to optimize ordinary

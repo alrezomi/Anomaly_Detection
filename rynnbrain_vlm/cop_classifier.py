@@ -339,6 +339,20 @@ def load_classifier(model_file: Path) -> CoPLogisticClassifier:
     )
 
 
+def _normalize_bag_selector(value: Any) -> str:
+    return str(value).strip().replace("\\", "/").rstrip("/")
+
+
+def _training_record_keys(record: SavedCoPVector) -> set[str]:
+    """Return accepted short, /data, and data-relative identifiers for a vector."""
+    bag_name = _normalize_bag_selector(record.metadata.get("bag_name", ""))
+    test_bag = _normalize_bag_selector(record.metadata.get("test_bag", ""))
+    keys = {value for value in (bag_name, test_bag) if value}
+    if test_bag.startswith("/data/"):
+        keys.add(test_bag[len("/data/"):])
+    return keys
+
+
 def _select_training_records(
     records: list[SavedCoPVector], input_mode: str, bag_names: list[str]
 ) -> list[SavedCoPVector]:
@@ -348,20 +362,22 @@ def _select_training_records(
         if str(record.metadata.get("input_mode")) == input_mode
     ]
     if bag_names:
-        if len(bag_names) != len(set(bag_names)):
+        selectors = [_normalize_bag_selector(value) for value in bag_names]
+        if len(selectors) != len(set(selectors)):
             raise ValueError("Each training bag name may be supplied only once.")
         by_name: dict[str, list[SavedCoPVector]] = {}
         for record in mode_records:
-            by_name.setdefault(str(record.metadata.get("bag_name")), []).append(record)
-        missing = [name for name in bag_names if name not in by_name]
+            for key in _training_record_keys(record):
+                by_name.setdefault(key, []).append(record)
+        missing = [name for name in selectors if name not in by_name]
         if missing:
             raise ValueError("Labeled vector(s) not found for: " + ", ".join(missing))
-        ambiguous = [name for name in bag_names if len(by_name[name]) > 1]
+        ambiguous = [name for name in selectors if len(by_name[name]) > 1]
         if ambiguous:
             raise ValueError(
                 "Multiple training vectors found for bag(s): " + ", ".join(ambiguous)
             )
-        usable = [by_name[name][0] for name in bag_names]
+        usable = [by_name[name][0] for name in selectors]
     else:
         usable = [
             record
@@ -392,23 +408,34 @@ def train_from_saved_vectors(
     )
     if not records:
         raise ValueError(f"No labeled {input_mode!r} vectors were found.")
-    overrides = label_overrides or {}
-    selected_names = {str(record.metadata.get("bag_name")) for record in records}
-    unused_overrides = sorted(set(overrides) - selected_names)
+    overrides = {
+        _normalize_bag_selector(key): value
+        for key, value in (label_overrides or {}).items()
+    }
+    selected_keys = set().union(*(_training_record_keys(record) for record in records))
+    unused_overrides = sorted(set(overrides) - selected_keys)
     if unused_overrides:
         raise ValueError(
             "Configured training labels have no selected vector for: "
             + ", ".join(unused_overrides)
         )
-    training_labels = [
-        str(
-            overrides.get(
-                str(record.metadata.get("bag_name")),
-                record.metadata.get("ground_truth_label", ""),
+    training_labels: list[str] = []
+    for record in records:
+        override_labels = {
+            str(overrides[key]).strip().lower()
+            for key in _training_record_keys(record)
+            if key in overrides
+        }
+        if len(override_labels) > 1:
+            raise ValueError(
+                f"Conflicting configured labels for {record.metadata_path}."
             )
-        ).strip().lower()
-        for record in records
-    ]
+        label = (
+            next(iter(override_labels))
+            if override_labels
+            else str(record.metadata.get("ground_truth_label", "")).strip().lower()
+        )
+        training_labels.append(label)
     invalid_labels = sorted({label for label in training_labels if label not in LABEL_TO_TARGET})
     if invalid_labels:
         raise ValueError(
@@ -452,6 +479,7 @@ def train_from_saved_vectors(
     rows = [
         {
             "bag_name": str(record.metadata.get("bag_name")),
+            "bag_path": str(record.metadata.get("test_bag", "")),
             "ground_truth_label": "fail" if target else "normal",
             "out_of_fold_failure_probability": float(probability),
             "out_of_fold_decision": "failure" if probability >= threshold else "success",
