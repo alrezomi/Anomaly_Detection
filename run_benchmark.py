@@ -172,6 +172,69 @@ def _decision_correct(ground_truth: str, decision: str) -> bool | None:
     return decision == expected
 
 
+def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Keep only the fields needed to inspect each model decision."""
+    columns = ["bag_name", "label", "model_decision", "correct"]
+    return pd.DataFrame(
+        [
+            {
+                "bag_name": row.get("bag_name"),
+                "label": row.get("ground_truth_label"),
+                "model_decision": row.get("decision"),
+                "correct": row.get("decision_correct"),
+            }
+            for row in master_rows
+        ],
+        columns=columns,
+    )
+
+
+def _report_statistics(master_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return JSON-serializable correctness counts for the benchmark rows."""
+    dataframe = pd.DataFrame(master_rows)
+    if dataframe.empty:
+        return {
+            "total_rows": 0,
+            "scored_rows": 0,
+            "correct_rows": 0,
+            "incorrect_rows": 0,
+            "unscored_rows": 0,
+            "accuracy": None,
+            "accuracy_percent": None,
+            "by_label": {},
+            "by_decision": {},
+            "by_input_mode": {},
+        }
+
+    def counts(group: pd.DataFrame) -> dict[str, Any]:
+        group_scored = group[group["decision_correct"].notna()]
+        correct = int(group_scored["decision_correct"].sum())
+        scored_count = len(group_scored)
+        return {
+            "total_rows": int(len(group)),
+            "scored_rows": scored_count,
+            "correct_rows": correct,
+            "incorrect_rows": scored_count - correct,
+            "unscored_rows": int(len(group) - scored_count),
+            "accuracy": correct / scored_count if scored_count else None,
+            "accuracy_percent": 100.0 * correct / scored_count if scored_count else None,
+        }
+
+    def grouped_counts(column: str) -> dict[str, dict[str, Any]]:
+        return {
+            str(value): counts(group)
+            for value, group in dataframe.groupby(column, dropna=False, sort=True)
+        }
+
+    overall = counts(dataframe)
+    return {
+        **overall,
+        "by_label": grouped_counts("ground_truth_label"),
+        "by_decision": grouped_counts("decision"),
+        "by_input_mode": grouped_counts("input_mode"),
+    }
+
+
 def _select_named_records(
     records: list[dict[str, Any]],
     requested_names: list[str],
@@ -367,6 +430,14 @@ def main() -> None:
     summary_df = pd.DataFrame(master_rows)
     summary_path = benchmark_root / "benchmark_summary.csv"
     summary_df.to_csv(summary_path, index=False)
+    clean_report = _build_clean_report(master_rows)
+    clean_report_path = benchmark_root / "benchmark_clean.csv"
+    clean_report.to_csv(clean_report_path, index=False)
+    statistics = _report_statistics(master_rows)
+    statistics_path = benchmark_root / "benchmark_statistics.json"
+    statistics_path.write_text(
+        json.dumps(statistics, indent=2) + "\n", encoding="utf-8"
+    )
 
     pca_summary = None
     if (
@@ -388,13 +459,18 @@ def main() -> None:
     print("=" * 90)
     print(f"Per-demonstration folders and combined table under: {benchmark_root}")
     print(f"Summary table: {summary_path}")
-    if not summary_df.empty and "input_mode" in summary_df:
-        scored = summary_df.dropna(subset=["decision_correct"])
-        if not scored.empty:
-            print("\nAccuracy by input mode (unknown-ground-truth bags excluded):")
-            accuracy = scored.groupby("input_mode")["decision_correct"].mean()
-            print(accuracy.to_string())
-            print(f"\nOverall accuracy: {scored['decision_correct'].mean():.3f} ({len(scored)} scored rows)")
+    print(f"Clean report: {clean_report_path}")
+    print(f"Statistics: {statistics_path}")
+    if statistics["scored_rows"]:
+        print(
+            "\nOverall accuracy: "
+            f"{statistics['accuracy']:.3f} "
+            f"({statistics['correct_rows']}/{statistics['scored_rows']} scored rows)"
+        )
+        print("Accuracy by input mode (unknown-ground-truth bags excluded):")
+        for mode, mode_stats in statistics["by_input_mode"].items():
+            if mode_stats["scored_rows"]:
+                print(f"  {mode}: {mode_stats['accuracy']:.3f}")
     if pca_summary is not None:
         created_plots = [
             mode["plot_file"]

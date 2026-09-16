@@ -21,10 +21,70 @@ run_module.evaluate_multiturn = lambda *args, **kwargs: None
 run_module.write_multiturn_outputs = lambda *args, **kwargs: None
 sys.modules.setdefault("rynnbrain_vlm.run", run_module)
 
-from run_benchmark import _select_named_records, parse_arguments
+from run_benchmark import (
+    _build_clean_report,
+    _report_statistics,
+    _select_named_records,
+    parse_arguments,
+)
 
 
 class BenchmarkSelectionTests(unittest.TestCase):
+    def test_clean_report_contains_only_decision_fields(self) -> None:
+        report = _build_clean_report(
+            [
+                {
+                    "bag_name": "bag_01",
+                    "ground_truth_label": "normal",
+                    "decision": "success",
+                    "decision_correct": True,
+                    "response": "unneeded",
+                }
+            ]
+        )
+
+        self.assertEqual(
+            list(report.columns),
+            ["bag_name", "label", "model_decision", "correct"],
+        )
+        self.assertEqual(report.iloc[0].tolist(), ["bag_01", "normal", "success", True])
+
+    def test_report_statistics_counts_scored_and_unscored_rows(self) -> None:
+        statistics = _report_statistics(
+            [
+                {
+                    "bag_name": "normal_01",
+                    "ground_truth_label": "normal",
+                    "decision": "success",
+                    "decision_correct": True,
+                    "input_mode": "raw",
+                },
+                {
+                    "bag_name": "fail_01",
+                    "ground_truth_label": "fail",
+                    "decision": "success",
+                    "decision_correct": False,
+                    "input_mode": "raw",
+                },
+                {
+                    "bag_name": "unknown_01",
+                    "ground_truth_label": "unknown",
+                    "decision": "failure",
+                    "decision_correct": None,
+                    "input_mode": "raw_heatmap",
+                },
+            ]
+        )
+
+        self.assertEqual(statistics["total_rows"], 3)
+        self.assertEqual(statistics["scored_rows"], 2)
+        self.assertEqual(statistics["correct_rows"], 1)
+        self.assertEqual(statistics["incorrect_rows"], 1)
+        self.assertEqual(statistics["unscored_rows"], 1)
+        self.assertEqual(statistics["accuracy"], 0.5)
+        self.assertEqual(statistics["by_label"]["fail"]["incorrect_rows"], 1)
+        self.assertEqual(statistics["by_input_mode"]["raw_heatmap"]["scored_rows"], 0)
+
     def test_manual_cli_options_are_repeatable(self) -> None:
         argv = [
             "run_benchmark.py",

@@ -8,7 +8,7 @@ def task_context_prompt(task_description: str) -> str:
 
         Nominal reference task that robot is trying to perform: {task_description}
 
-        This nominal demonstration represents the expected behavior. Two different viewpoints are provided: one from the top view and one from the end-effector view, so you can inspect the same action from different angles.
+        This nominal demonstration represents the expected behavior. You have the top view from the workspace and you can see the progress in several diffrent frames in row.
         Your task is to decide whether the observed behavior matches the expected behavior or deviates from it.
         Focus on the object appearance, the motion sequence, the initial and final positions of the object the robot is manipulating.
 
@@ -32,7 +32,6 @@ def evaluation_prompt_multiturn(task_description: str, input_mode: str) -> str:
         Now look at the current observation carefully and compare it with the nominal behavior you saw earlier.{heatmap_info}
 
         Check whether the current scene follows the same pattern as the nominal reference:
-        - Is the same object present, with the same appearance and size as in the nominal demonstration?
         - Does the object start and finish in the locations as what the nominal reference expects exactly?
         - Does the object move through the same general sequence and direction as the nominal behavior?
         - Are there visible differences in the scene that suggest the current observation deviates from the nominal pattern?
