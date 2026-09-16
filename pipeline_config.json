@@ -17,7 +17,7 @@
     "/data/Nominal/setting 1/nominal_1.14",
     "/data/Nominal/setting 1/nominal_1.15"
   ],
-  "test_bag": "/data/Failure_1_grasp_miss/failure_1.5",
+  "test_bag": "/data/Failure_1_grasp_miss/failure_1.10",
   "camera_topics": [
     "/top_camera/cam_135222070433/color/image_raw/compressed"
   ],
@@ -58,12 +58,12 @@
       "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",
       "dtype": "float16",
       "device_map": "auto",
-      "input_device": "cuda",
       "max_image_size": 640,
+      "input_device": "cuda",
       "trust_remote_code": true
     },
     "generation": {
-      "max_new_tokens": 500,
+      "max_new_tokens": 200,
       "do_sample": false,
       "enable_thinking": true
     },
@@ -71,7 +71,7 @@
       "enabled": true
     },
     "cop_classifier": {
-      "enabled": true,
+      "enabled": false,
       "model_paths": {
         "raw": "/outputs/experiments/pick_place_dino728_v100/cop_classifier/raw_logistic.npz"
       },
@@ -113,7 +113,7 @@
           "/data/Failure_2_slip_at_start/failure_2.5"
         ],
         "class_weight": "balanced",
-        "regularization_c": 1.0,
+        "regularization_c": 100.0,
         "threshold": 0.5
       }
     }

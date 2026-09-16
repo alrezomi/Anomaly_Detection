@@ -686,7 +686,8 @@ selected VLM frames, prompts/responses) under
 `<rynnbrain.output_dir>_benchmark/<bag_name>/`, and appends one row per
 `(bag, input_mode)` to a single `benchmark_summary.csv` in that same directory.
 It also writes `benchmark_clean.csv`, containing only `bag_name`, `label`,
-`model_decision`, and `correct`, plus
+`model_decision`, `correct`, and the logistic classifier's
+`failure_probability`, plus
 `benchmark_statistics.json` with overall counts, accuracy, and breakdowns by
 label, decision, and input mode.
 Ground truth per bag comes from `--normal-bag`/`--failure-bag` when supplied;

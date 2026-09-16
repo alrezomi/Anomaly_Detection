@@ -174,7 +174,13 @@ def _decision_correct(ground_truth: str, decision: str) -> bool | None:
 
 def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
     """Keep only the fields needed to inspect each model decision."""
-    columns = ["bag_name", "label", "model_decision", "correct"]
+    columns = [
+        "bag_name",
+        "label",
+        "model_decision",
+        "correct",
+        "failure_probability",
+    ]
     return pd.DataFrame(
         [
             {
@@ -182,6 +188,7 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
                 "label": row.get("ground_truth_label"),
                 "model_decision": row.get("decision"),
                 "correct": row.get("decision_correct"),
+                "failure_probability": row.get("classifier_failure_probability"),
             }
             for row in master_rows
         ],

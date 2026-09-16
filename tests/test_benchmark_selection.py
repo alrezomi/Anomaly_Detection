@@ -38,6 +38,7 @@ class BenchmarkSelectionTests(unittest.TestCase):
                     "ground_truth_label": "normal",
                     "decision": "success",
                     "decision_correct": True,
+                    "classifier_failure_probability": 0.12,
                     "response": "unneeded",
                 }
             ]
@@ -45,9 +46,17 @@ class BenchmarkSelectionTests(unittest.TestCase):
 
         self.assertEqual(
             list(report.columns),
-            ["bag_name", "label", "model_decision", "correct"],
+            [
+                "bag_name",
+                "label",
+                "model_decision",
+                "correct",
+                "failure_probability",
+            ],
         )
-        self.assertEqual(report.iloc[0].tolist(), ["bag_01", "normal", "success", True])
+        self.assertEqual(
+            report.iloc[0].tolist(), ["bag_01", "normal", "success", True, 0.12]
+        )
 
     def test_report_statistics_counts_scored_and_unscored_rows(self) -> None:
         statistics = _report_statistics(

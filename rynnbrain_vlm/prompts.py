@@ -8,7 +8,8 @@ def task_context_prompt(task_description: str) -> str:
 
         Nominal reference task that robot is trying to perform: {task_description}
 
-        This nominal demonstration represents the expected behavior. You have the top view from the workspace and you can see the progress in several diffrent frames in row.
+        This nominal demonstration represents the expected behavior.  You have the top view of the workspace, and you can see the progress across several frames.
+
         Your task is to decide whether the observed behavior matches the expected behavior or deviates from it.
         Focus on the object appearance, the motion sequence, the initial and final positions of the object the robot is manipulating.
 
