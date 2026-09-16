@@ -30,6 +30,7 @@ from typing import Any
 import pandas as pd
 
 from build_dataset_manifest import discover_bags, infer_bag_record
+from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report
 from rynnbrain_vlm.cop_analysis import analyze_saved_vectors
 from rynnbrain_vlm.model import RynnBrainModel
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
@@ -434,6 +435,8 @@ def main() -> None:
                 **dino_summary,
             })
 
+    for row in master_rows:
+        row["failure_category"] = failure_category(row["bag_path"], row["ground_truth_label"])
     summary_df = pd.DataFrame(master_rows)
     summary_path = benchmark_root / "benchmark_summary.csv"
     summary_df.to_csv(summary_path, index=False)
@@ -441,6 +444,8 @@ def main() -> None:
     clean_report_path = benchmark_root / "benchmark_clean.csv"
     clean_report.to_csv(clean_report_path, index=False)
     statistics = _report_statistics(master_rows)
+    roc_report = write_roc_report(master_rows, benchmark_root)
+    statistics["roc"] = roc_report
     statistics_path = benchmark_root / "benchmark_statistics.json"
     statistics_path.write_text(
         json.dumps(statistics, indent=2) + "\n", encoding="utf-8"
@@ -468,6 +473,10 @@ def main() -> None:
     print(f"Summary table: {summary_path}")
     print(f"Clean report: {clean_report_path}")
     print(f"Statistics: {statistics_path}")
+    print(f"ROC curves and per-category AUROC: {benchmark_root / 'benchmark_roc'}")
+    for metric in roc_report["metrics"]:
+        value = f"AUROC={metric['auroc']:.3f}" if metric["status"] == "created" else metric["reason"]
+        print(f"  {metric['input_mode']} / {metric['failure_category']}: {value}")
     if statistics["scored_rows"]:
         print(
             "\nOverall accuracy: "

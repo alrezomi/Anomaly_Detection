@@ -697,3 +697,48 @@ run but are excluded from the printed accuracy numbers. The RynnBrain model is
 loaded once for the whole run rather than once per bag. Pass `--limit N` to
 smoke-test on a handful of bags, or `--skip-dino`/`--skip-vlm` to rerun only
 one stage.
+
+### ROC curves and AUROC by failure category
+
+Each benchmark also writes `benchmark_roc/` inside its existing benchmark
+output directory:
+
+- `roc_<input_mode>.png`: overall and per-category ROC curves, with AUROC in
+  the legend; each input mode is evaluated separately.
+- `auroc.csv`: AUROC, normal/failure sample counts, excluded-score counts,
+  and reasons for skipped curves.
+- `roc_points.csv`: thresholds and false/true positive rates for each curve.
+- `roc_summary.json`: the same metrics and plot paths (also included under
+  `roc` in `benchmark_statistics.json`).
+
+The score is `classifier_failure_probability` from the saved CoP logistic
+classifier. Enable `rynnbrain.cop_classifier.enabled` after training the saved
+head, using its existing `model_paths`, then run the usual benchmark command.
+This reporting does not train the classifier or change prompts, configuration,
+paths, or bag names. The VLM's text decisions are still scored by the existing
+accuracy reports; they are not substituted for numeric failure probabilities.
+
+Categories come directly from existing `Failure_<number>_<description>` parent
+folders, such as `Failure_1_grasp_miss` and `Failure_2_slip_at_start`, and are
+recorded in `benchmark_summary.csv` as `failure_category`. Each category is
+compared against the evaluated normal bags; other failure categories are
+excluded from that curve. The overall curve uses all labeled failures versus
+normal bags. Existing manual/stage ground-truth labels remain authoritative;
+failure bags without a matching category folder appear as
+`uncategorized_failure`.
+
+Use held-out bags not used to train the classifier. Each curve needs at least
+one normal and one failure bag with a finite probability between 0 and 1.
+Unknown labels and missing/invalid scores are excluded and counted. If the
+classifier is disabled or either class is missing, AUROC is left empty with a
+skip reason rather than reporting a misleading value.
+
+To regenerate just the ROC reports from an existing summary, without loading
+the VLM or processing bags again (replace the example summary path with your
+existing benchmark output):
+
+```bash
+docker compose run --rm --entrypoint python benchmark \
+  -m rynnbrain_vlm.benchmark_roc \
+  --summary /outputs/experiments/example/rynnbrain_benchmark/benchmark_summary.csv
+```
