@@ -36,7 +36,7 @@
   
   "rynnbrain": {
     "source": "rosbag",
-    "task_description": "Pick the scissor from the location marked A and place it to the exact location that marked B.",
+    "task_description": "Pick the scissor from its initial location and place it inside the blue basket.",
     "camera_topics": [
       "/top_camera/cam_135222070433/color/image_raw/compressed"
     ],
@@ -64,7 +64,7 @@
       "trust_remote_code": true
     },
     "generation": {
-      "max_new_tokens": 200,
+      "max_new_tokens": 280,
       "do_sample": false,
       "enable_thinking": true
     },
@@ -94,12 +94,12 @@
       "enabled": true
     },
     "cop_classifier": {
-      "enabled": false,
+      "enabled": true,
       "model_paths": {
         "raw": "/outputs/experiments/pick_place_dino728_v102/cop_classifier/raw_logistic.npz"
       },
       "training": {
-        "input_dir": "/outputs/experiments/pick_place_dino728_v100/rynnbrain_benchmark",
+        "input_dir": "/outputs/experiments/pick_place_dino728_v102/rynnbrain_benchmark",
         "input_mode": "raw",
         "normal_bags": [
 
