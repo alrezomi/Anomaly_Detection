@@ -97,5 +97,11 @@ services:
     entrypoint: ["python", "-m", "rynnbrain_vlm.cop_classifier"]
     command: ["--config", "/config/pipeline_config.json"]
 
+  # Train only a LoRA decision adapter from explicitly selected labeled bags.
+  rynnbrain-lora-train:
+    <<: *rynnbrain-common
+    entrypoint: ["python", "-m", "rynnbrain_vlm.train_lora"]
+    command: ["--config", "/config/pipeline_config.json"]
+
 volumes:
   huggingface-cache:

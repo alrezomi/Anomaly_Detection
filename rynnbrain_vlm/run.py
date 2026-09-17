@@ -208,6 +208,9 @@ def evaluate_multiturn(
     """
     task_description = vlm.get("task_description", "Robot manipulation task")
 
+    if Path(config["test_bag"]).name in getattr(model, "adapter_training_bags", set()):
+        raise ValueError("This bag was used to train the loaded LoRA adapter; select a held-out evaluation bag.")
+
     print(f"[MULTI-TURN MODE] Single model call with visual memory")
     print(f"Task: {task_description}\n")
 
@@ -378,7 +381,10 @@ def evaluate_multiturn(
                 "representation_id": COP_REPRESENTATION_ID,
                 "model_id": model.model_id,
                 "model_revision": model_revision,
-                "model_config": dict(vlm.get("model", {})),
+                "model_config": {
+                    key: value for key, value in vlm.get("model", {}).items()
+                    if key != "lora_adapter_path" or value
+                },
                 "task_description": task_description,
                 "nominal_response": nominal_response,
                 "source": source,
@@ -394,6 +400,8 @@ def evaluate_multiturn(
                 "turn1_prompt": turn1_text,
                 "turn2_prompt": turn2_text,
             }
+            if getattr(model, "adapter_identity", None):
+                comparison_signature["lora_adapter_sha256"] = model.adapter_identity
             if classifier_enabled:
                 classifier = classifiers[mode]
                 if classifier.representation_id != COP_REPRESENTATION_ID:

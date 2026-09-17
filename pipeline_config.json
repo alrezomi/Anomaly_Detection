@@ -56,6 +56,7 @@
     "sampling_end_sec": null,
      "model": {
       "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",
+      "lora_adapter_path": null,
       "dtype": "float16",
       "device_map": "auto",
       "max_image_size": 640,
@@ -66,6 +67,28 @@
       "max_new_tokens": 200,
       "do_sample": false,
       "enable_thinking": true
+    },
+    "lora": {
+      "rank": 8,
+      "alpha": 16,
+      "dropout": 0.05,
+      "target_modules": ["q_proj", "v_proj"],
+      "training": {
+        "normal_bags": [],
+        "failure_bags": [],
+        "validation_normal_bags": [],
+        "validation_failure_bags": [],
+        "input_mode": "raw",
+        "output_dir": null,
+        "epochs": 3,
+        "learning_rate": 0.0001,
+        "gradient_accumulation_steps": 8,
+        "precision": "bfloat16",
+        "gradient_checkpointing": true,
+        "max_tokens": 16384,
+        "class_weight": "balanced",
+        "seed": 42
+      }
     },
     "cop_vectors": {
       "enabled": true

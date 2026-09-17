@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +47,14 @@ class RynnBrainModel:
         self.model = AutoModelForImageTextToText.from_pretrained(
             self.model_id, **kwargs
         )
+        self.adapter_identity = None
+        self.adapter_training_bags: set[str] = set()
+        if config.get("lora_adapter_path"):
+            from .lora import load_lora_adapter
+
+            self.model, self.adapter_identity, self.adapter_training_bags = load_lora_adapter(
+                self.model, config["lora_adapter_path"], self.model_id
+            )
         self.model.eval()
         self.input_device = config.get(
             "input_device", "cuda" if torch.cuda.is_available() else "cpu"
@@ -58,7 +67,8 @@ class RynnBrainModel:
 
     def _final_language_norm(self) -> Any:
         """Return Qwen3-VL's final language normalization module."""
-        base_model = getattr(self.model, "model", None)
+        unwrapped = self.model.get_base_model() if self.adapter_identity else self.model
+        base_model = getattr(unwrapped, "model", None)
         language_model = getattr(base_model, "language_model", None)
         norm = getattr(language_model, "norm", None)
         if norm is None or not hasattr(norm, "register_forward_hook"):
@@ -67,6 +77,39 @@ class RynnBrainModel:
                 "CoP-vector extraction requires the Qwen3-VL architecture."
             )
         return norm
+
+    def conversation_message(self, turn: dict[str, Any]) -> dict[str, Any]:
+        """Shared image order and resizing for inference and supervised training."""
+        content: list[dict[str, Any]] = []
+        for label, image in turn.get("images", []):
+            content.append({"type": "text", "text": label})
+            content.append({"type": "image", "image": self._resize(image)})
+        content.append({"type": "text", "text": turn["text"]})
+        return {"role": turn["role"], "content": content}
+
+    def tokenize_conversation(self, conversation: list[dict[str, Any]], generation: dict[str, Any]) -> Any:
+        template_kwargs = {
+            "add_generation_prompt": True, "tokenize": True,
+            "return_dict": True, "return_tensors": "pt",
+        }
+        try:
+            return self.processor.apply_chat_template(
+                conversation, enable_thinking=bool(generation.get("enable_thinking", False)),
+                **template_kwargs,
+            )
+        except TypeError:
+            return self.processor.apply_chat_template(conversation, **template_kwargs)
+
+    def generate_nominal(self, turn: dict[str, Any], generation: dict[str, Any]) -> str:
+        """Generate the frozen base model's nominal response for training context."""
+        inputs = self.tokenize_conversation([self.conversation_message(turn)], generation).to(self.input_device)
+        context = self.model.disable_adapter() if self.adapter_identity else nullcontext()
+        with context, torch.inference_mode():
+            output = self.model.generate(
+                **inputs, max_new_tokens=int(generation.get("max_new_tokens", 500)),
+                do_sample=bool(generation.get("do_sample", False)), use_cache=True,
+            )
+        return self.processor.decode(output[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
     def _generate_multiturn(
         self,
@@ -83,35 +126,8 @@ class RynnBrainModel:
         cop_vector: torch.Tensor | None = None
 
         for turn_index, turn in enumerate(turns):
-            role = turn["role"]
-            content: list[dict[str, Any]] = []
-
-            # Add images if provided (typically for user turns)
-            if "images" in turn and turn["images"]:
-                for label, image in turn["images"]:
-                    content.append({"type": "text", "text": label})
-                    content.append({"type": "image", "image": self._resize(image)})
-            
-            # Add text (prompt or assistant response)
-            content.append({"type": "text", "text": turn["text"]})
-            conversation.append({"role": role, "content": content})
-
-            template_kwargs = {
-                "add_generation_prompt": True,
-                "tokenize": True,
-                "return_dict": True,
-                "return_tensors": "pt",
-            }
-            try:
-                inputs = self.processor.apply_chat_template(
-                    conversation,
-                    enable_thinking=bool(generation.get("enable_thinking", False)),
-                    **template_kwargs,
-                )
-            except TypeError:
-                inputs = self.processor.apply_chat_template(
-                    conversation, **template_kwargs
-                )
+            conversation.append(self.conversation_message(turn))
+            inputs = self.tokenize_conversation(conversation, generation)
             inputs = inputs.to(self.input_device)
 
             capture_this_turn = capture_cop_vector and turn_index == len(turns) - 1
@@ -150,7 +166,13 @@ class RynnBrainModel:
                 )
 
             try:
-                with torch.inference_mode():
+                # Keep the reference turn on the frozen base model as in training.
+                # The learned adapter applies only to the test turn.
+                adapter_context = (
+                    self.model.disable_adapter()
+                    if self.adapter_identity and turn_index == 0 else nullcontext()
+                )
+                with adapter_context, torch.inference_mode():
                     output_ids = self.model.generate(
                         **inputs,
                         max_new_tokens=int(generation.get("max_new_tokens", 500)),
