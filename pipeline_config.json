@@ -29,14 +29,14 @@
   "vision_memory_name": "pick_place_dino728_v2",
   "dino_input_size": 728,
   "nominal_cache_dir": "/outputs/nominal_cache",
-  "output_dir": "/outputs/experiments/pick_place_dino728_v101",
+  "output_dir": "/outputs/experiments/pick_place_dino728_v102",
   "rebuild_nominal_cache": false,
   "stage_constrained_matching": true,
   
   
   "rynnbrain": {
     "source": "rosbag",
-    "task_description": "Pick the scissor from its initial location and place it inside the blue basket.",
+    "task_description": "Pick the scissor from the location marked A and place it to the exact location that marked B.",
     "camera_topics": [
       "/top_camera/cam_135222070433/color/image_raw/compressed"
     ],
@@ -51,7 +51,7 @@
     ],
     "num_frames": 8,
     "ground_truth_label": "fail",
-    "output_dir": "/outputs/experiments/pick_place_dino728_v101/rynnbrain",
+    "output_dir": "/outputs/experiments/pick_place_dino728_v102/rynnbrain",
     "sampling_start_sec": 1.0,
     "sampling_end_sec": null,
      "model": {
@@ -96,27 +96,36 @@
     "cop_classifier": {
       "enabled": false,
       "model_paths": {
-        "raw": "/outputs/experiments/pick_place_dino728_v100/cop_classifier/raw_logistic.npz"
+        "raw": "/outputs/experiments/pick_place_dino728_v102/cop_classifier/raw_logistic.npz"
       },
       "training": {
         "input_dir": "/outputs/experiments/pick_place_dino728_v100/rynnbrain_benchmark",
         "input_mode": "raw",
         "normal_bags": [
 
-        "/data/Nominal/setting 1/nominal_1.2",
-        "/data/Nominal/setting 1/nominal_1.3",
-        "/data/Nominal/setting 1/nominal_1.4",
-        "/data/Nominal/setting 1/nominal_1.5",
-        "/data/Nominal/setting 1/nominal_1.6",
-        "/data/Nominal/setting 1/nominal_1.7",
-        "/data/Nominal/setting 1/nominal_1.8",
-        "/data/Nominal/setting 1/nominal_1.9",
-        "/data/Nominal/setting 1/nominal_1.10",
-        "/data/Nominal/setting 1/nominal_1.11",
-        "/data/Nominal/setting 1/nominal_1.12",
-        "/data/Nominal/setting 1/nominal_1.13",
-        "/data/Nominal/setting 1/nominal_1.14",
-        "/data/Nominal/setting 1/nominal_1.15"
+        "/data/Nominal/setting 1/nominal_1.16",
+        "/data/Nominal/setting 1/nominal_1.17",
+        "/data/Nominal/setting 1/nominal_1.18",
+        "/data/Nominal/setting 1/nominal_1.19",
+        "/data/Nominal/setting 1/nominal_1.20",
+        "/data/Nominal/setting 1/nominal_1.21",
+        "/data/Nominal/setting 1/nominal_1.22",
+        "/data/Nominal/setting 1/nominal_1.23",
+        "/data/Nominal/setting 1/nominal_1.24",
+        "/data/Nominal/setting 1/nominal_1.25",
+        "/data/Nominal/setting 1/nominal_1.26",
+        "/data/Nominal/setting 1/nominal_1.27",
+        "/data/Nominal/setting 1/nominal_1.28",
+        "/data/Nominal/setting 1/nominal_1.29",
+        "/data/Nominal/setting 1/nominal_1.30",
+
+        "/data/Nominal/setting 2/nominal_2.1",
+        "/data/Nominal/setting 2/nominal_2.2",
+        "/data/Nominal/setting 2/nominal_2.3",
+        "/data/Nominal/setting 2/nominal_2.4",
+        "/data/Nominal/setting 2/nominal_2.5",
+        "/data/Nominal/setting 2/nominal_2.6",
+        "/data/Nominal/setting 2/nominal_2.7"
       ],
         "failure_bags": [
           "/data/Failure_1_grasp_miss/failure_1.1",
@@ -133,7 +142,12 @@
           "/data/Failure_2_slip_at_start/failure_2.2",
           "/data/Failure_2_slip_at_start/failure_2.3",
           "/data/Failure_2_slip_at_start/failure_2.4",
-          "/data/Failure_2_slip_at_start/failure_2.5"
+          "/data/Failure_2_slip_at_start/failure_2.5",
+          "/data/Failure_2_slip_at_start/failure_2.6",
+          "/data/Failure_2_slip_at_start/failure_2.7",
+          "/data/Failure_2_slip_at_start/failure_2.8",
+          "/data/Failure_2_slip_at_start/failure_2.9",
+          "/data/Failure_2_slip_at_start/failure_2.10"
         ],
         "class_weight": "balanced",
         "regularization_c": 100.0,

@@ -666,7 +666,7 @@ the base checkpoint; optimizer-state resumption is not implemented.
 To evaluate the trained adapter, set **`rynnbrain.model.lora_adapter_path`** to
 the printed adapter directory, then use the existing evaluation or benchmark
 commands. For the current configuration, the default directory is
-`/outputs/experiments/pick_place_dino728_v101/rynnbrain/lora_adapter`.
+`/outputs/experiments/pick_place_dino728_v102/rynnbrain/lora_adapter`.
 Keep this setting `null` for the original model and before training a new
 adapter. Training is never triggered by evaluation. The classifier can remain
 disabled throughout this workflow.
