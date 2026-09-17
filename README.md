@@ -570,6 +570,116 @@ docker compose run --rm --entrypoint python benchmark \
   --input-dir /outputs/experiments/example/rynnbrain_benchmark
 ```
 
+### LoRA fine-tuning for generated success/failure decisions
+
+The optional LoRA trainer adapts the VLM's **generated decision**, using labeled
+nominal and failure executions. It freezes the original RynnBrain weights and
+vision encoder and trains small adapters in the language decoder's attention
+projections (`q_proj` and `v_proj` by default). It uses the existing multi-turn
+prompts: nominal reference images and a frozen-base nominal response, followed
+by the execution images. Only the target `Decision: success` or
+`Decision: failure` and the end-of-answer token contribute to cross-entropy
+loss. Prompts, images and the nominal response are masked from the loss. No
+visual-evidence or reasoning annotations are invented from binary labels.
+This follows the standard [PEFT LoRA API](https://huggingface.co/docs/peft/v0.17.0/en/package_reference/lora).
+
+**Choose the bags yourself in `pipeline_config.json`, under
+`rynnbrain.lora.training`:**
+
+```json
+"normal_bags": [
+  "/data/Nominal/setting 1/nominal_1.2",
+  "/data/Nominal/setting 1/nominal_1.3"
+],
+"failure_bags": [
+  "/data/Failure_1_grasp_miss/failure_1.1",
+  "/data/Failure_2_slip_at_start/failure_2.1"
+],
+"validation_normal_bags": [],
+"validation_failure_bags": []
+```
+
+These are examples only; the committed lists are empty. List membership is the
+explicit ground truth: `normal_bags` means success and `failure_bags` means
+failure, regardless of recorded-stage markers or previous VLM predictions.
+Full container paths, data-root-relative paths, and unique bag names are
+accepted. Training requires both classes. For validation, either supply both
+classes in the validation lists or leave both lists empty. Duplicate bags,
+overlap between training and validation, and selecting a nominal reference
+demonstration as a supervised sample are rejected. Keep a further test set out
+of both lists for the final benchmark.
+
+Validate your selection without loading the model:
+
+```bash
+docker compose run --build --rm rynnbrain-lora-train \
+  --config /config/pipeline_config.json --validate-only
+```
+
+Then train explicitly:
+
+```bash
+docker compose run --rm rynnbrain-lora-train
+```
+
+With the current `source: "rosbag"` and `input_mode: "raw"`, images come directly
+from the selected ROS bags using the same sampling and camera ordering as
+inference; a benchmark run is not required first. For `generated_videos` or
+heatmap input modes, generate the selected bags' DINO outputs first. Training
+reads `<training.benchmark_dir>/<bag_name>/<camera>_raw_original.mp4` and/or
+`<camera>_heatmap.mp4`; `benchmark_dir` defaults to the existing
+`<rynnbrain.output_dir>_benchmark`. Global per-video overrides are rejected for
+multi-bag training. Nominal images always come from `reference_bags`.
+
+The trainer uses one GPU, one bag per forward pass, and gradient accumulation
+(8 bags per optimizer update by default; the final smaller group is handled
+separately). Each successful optimizer step updates only the LoRA weights.
+`class_weight: "balanced"` gives nominal and failure training samples equal
+total weight; `"none"` uses ordinary per-bag loss. Validation loss is unweighted.
+Training defaults are rank 8, alpha 16, dropout 0.05, 3 epochs and learning rate
+0.0001. The rank and projection settings live directly under `rynnbrain.lora`;
+the other settings live under its `training` section.
+
+Training uses bfloat16 and gradient checkpointing by default. Set
+`training.precision` to `"float16"` for a GPU without bfloat16 support; float16
+uses gradient scaling. Training loads the full base model on the GPU, so it
+needs more memory than inference with CPU offloading. It does not use
+quantization or the inference `max_memory` setting. Reduce `num_frames` or
+`model.max_image_size` if needed. Overlong examples are rejected with their
+token count; images and answers are never silently truncated. The configured
+`generation.do_sample` must be false for repeatable nominal context.
+
+With `training.output_dir: null`, training saves beneath
+`<rynnbrain.output_dir>/lora_adapter/`:
+
+- `adapter_model.safetensors` and `adapter_config.json`: only the learned adapter.
+- `training_manifest.json`: exact bag labels/splits, settings and nominal response.
+- `loss_history.csv`: training loss and whether each optimizer update succeeded.
+- `training_summary.json`: epoch training/validation losses and saved epoch.
+- `training_frames/`: resized, lossless execution frames reused across epochs.
+
+With validation, the adapter with the lowest validation loss is kept; otherwise
+the final epoch is kept. A new run requires an empty output directory, so set
+a different `training.output_dir` for another experiment. Training starts from
+the base checkpoint; optimizer-state resumption is not implemented.
+
+To evaluate the trained adapter, set **`rynnbrain.model.lora_adapter_path`** to
+the printed adapter directory, then use the existing evaluation or benchmark
+commands. For the current configuration, the default directory is
+`/outputs/experiments/pick_place_dino728_v102/rynnbrain/lora_adapter`.
+Keep this setting `null` for the original model and before training a new
+adapter. Training is never triggered by evaluation. The classifier can remain
+disabled throughout this workflow.
+
+During adapter evaluation, the nominal turn uses the frozen base model; the
+adapter is enabled for the execution decision turn. The benchmark automatically
+excludes the adapter's training bags, even with `--include-nominal-bags`, and
+single-bag evaluation also rejects training bags. Adapter weights are
+fingerprinted in the CoP comparison signature, so PCA and saved classifiers
+cannot silently combine base-model features with adapted-model features.
+Existing paths and bag names are unchanged. Use a separate benchmark output
+directory to retain both base and adapted results for comparison.
+
 ### Frozen-vector logistic failure classifier
 
 RynnBrain remains fully frozen. After collecting labeled vectors, a small

@@ -56,6 +56,7 @@
     "sampling_end_sec": null,
      "model": {
       "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",
+      "lora_adapter_path": null,
       "dtype": "float16",
       "device_map": "auto",
       "max_image_size": 640,
@@ -63,15 +64,37 @@
       "trust_remote_code": true
     },
     "generation": {
-      "max_new_tokens": 200,
+      "max_new_tokens": 280,
       "do_sample": false,
       "enable_thinking": true
+    },
+    "lora": {
+      "rank": 8,
+      "alpha": 16,
+      "dropout": 0.05,
+      "target_modules": ["q_proj", "v_proj"],
+      "training": {
+        "normal_bags": [],
+        "failure_bags": [],
+        "validation_normal_bags": [],
+        "validation_failure_bags": [],
+        "input_mode": "raw",
+        "output_dir": null,
+        "epochs": 3,
+        "learning_rate": 0.0001,
+        "gradient_accumulation_steps": 8,
+        "precision": "bfloat16",
+        "gradient_checkpointing": true,
+        "max_tokens": 16384,
+        "class_weight": "balanced",
+        "seed": 42
+      }
     },
     "cop_vectors": {
       "enabled": true
     },
     "cop_classifier": {
-      "enabled": false,
+      "enabled": true,
       "model_paths": {
         "raw": "/outputs/experiments/pick_place_dino728_v102/cop_classifier/raw_logistic.npz"
       },
@@ -80,20 +103,6 @@
         "input_mode": "raw",
         "normal_bags": [
 
-        "/data/Nominal/setting 1/nominal_1.2",
-        "/data/Nominal/setting 1/nominal_1.3",
-        "/data/Nominal/setting 1/nominal_1.4",
-        "/data/Nominal/setting 1/nominal_1.5",
-        "/data/Nominal/setting 1/nominal_1.6",
-        "/data/Nominal/setting 1/nominal_1.7",
-        "/data/Nominal/setting 1/nominal_1.8",
-        "/data/Nominal/setting 1/nominal_1.9",
-        "/data/Nominal/setting 1/nominal_1.10",
-        "/data/Nominal/setting 1/nominal_1.11",
-        "/data/Nominal/setting 1/nominal_1.12",
-        "/data/Nominal/setting 1/nominal_1.13",
-        "/data/Nominal/setting 1/nominal_1.14",
-        "/data/Nominal/setting 1/nominal_1.15",
         "/data/Nominal/setting 1/nominal_1.16",
         "/data/Nominal/setting 1/nominal_1.17",
         "/data/Nominal/setting 1/nominal_1.18",
@@ -104,13 +113,19 @@
         "/data/Nominal/setting 1/nominal_1.23",
         "/data/Nominal/setting 1/nominal_1.24",
         "/data/Nominal/setting 1/nominal_1.25",
-        "/data/Nominal/setting 1/nominal_2.1",
-        "/data/Nominal/setting 1/nominal_2.2",
-        "/data/Nominal/setting 1/nominal_2.3",
-        "/data/Nominal/setting 1/nominal_2.4",
-        "/data/Nominal/setting 1/nominal_2.5",
-        "/data/Nominal/setting 1/nominal_2.6",
-        "/data/Nominal/setting 1/nominal_2.7"
+        "/data/Nominal/setting 1/nominal_1.26",
+        "/data/Nominal/setting 1/nominal_1.27",
+        "/data/Nominal/setting 1/nominal_1.28",
+        "/data/Nominal/setting 1/nominal_1.29",
+        "/data/Nominal/setting 1/nominal_1.30",
+
+        "/data/Nominal/setting 2/nominal_2.1",
+        "/data/Nominal/setting 2/nominal_2.2",
+        "/data/Nominal/setting 2/nominal_2.3",
+        "/data/Nominal/setting 2/nominal_2.4",
+        "/data/Nominal/setting 2/nominal_2.5",
+        "/data/Nominal/setting 2/nominal_2.6",
+        "/data/Nominal/setting 2/nominal_2.7"
       ],
         "failure_bags": [
           "/data/Failure_1_grasp_miss/failure_1.1",
@@ -127,7 +142,7 @@
           "/data/Failure_2_slip_at_start/failure_2.2",
           "/data/Failure_2_slip_at_start/failure_2.3",
           "/data/Failure_2_slip_at_start/failure_2.4",
-          "/data/Failure_2_slip_at_start/failure_2.5", 
+          "/data/Failure_2_slip_at_start/failure_2.5",
           "/data/Failure_2_slip_at_start/failure_2.6",
           "/data/Failure_2_slip_at_start/failure_2.7",
           "/data/Failure_2_slip_at_start/failure_2.8",

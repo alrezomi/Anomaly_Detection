@@ -23,6 +23,7 @@ sys.modules.setdefault("rynnbrain_vlm.run", run_module)
 
 from run_benchmark import (
     _build_clean_report,
+    _excluded_bag_names,
     _report_statistics,
     _select_named_records,
     parse_arguments,
@@ -30,6 +31,16 @@ from run_benchmark import (
 
 
 class BenchmarkSelectionTests(unittest.TestCase):
+    def test_lora_training_bags_stay_excluded_with_nominal_override(self) -> None:
+        config = {
+            "nominal_bags": ["/data/dino_memory"],
+            "rynnbrain": {"reference_bags": ["/data/reference"], "model": {"lora_adapter_path": "/saved/adapter"}},
+        }
+        with patch("rynnbrain_vlm.lora.adapter_training_bag_names", return_value={"trained_bag"}):
+            self.assertEqual(_excluded_bag_names(config, include_nominal_bags=True), {"reference", "trained_bag"})
+            with self.assertRaisesRegex(ValueError, "LoRA training"):
+                _select_named_records([], ["trained_bag"], _excluded_bag_names(config, True))
+
     def test_clean_report_contains_only_decision_fields(self) -> None:
         report = _build_clean_report(
             [

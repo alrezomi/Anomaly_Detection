@@ -38,6 +38,7 @@
     "output_dir": "/outputs/experiment_01/rynnbrain_multiturn",
     "model": {
       "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",
+      "lora_adapter_path": null,
       "dtype": "float16",
       "device_map": "auto",
       "input_device": "cuda",
@@ -54,6 +55,28 @@
       "repetition_penalty": 1.1,
       "no_repeat_ngram_size": 6,
       "enable_thinking": false
+    },
+    "lora": {
+      "rank": 8,
+      "alpha": 16,
+      "dropout": 0.05,
+      "target_modules": ["q_proj", "v_proj"],
+      "training": {
+        "normal_bags": [],
+        "failure_bags": [],
+        "validation_normal_bags": [],
+        "validation_failure_bags": [],
+        "input_mode": "raw",
+        "output_dir": null,
+        "epochs": 3,
+        "learning_rate": 0.0001,
+        "gradient_accumulation_steps": 8,
+        "precision": "bfloat16",
+        "gradient_checkpointing": true,
+        "max_tokens": 16384,
+        "class_weight": "balanced",
+        "seed": 42
+      }
     },
     "cop_vectors": {
       "enabled": true

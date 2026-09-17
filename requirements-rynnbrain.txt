@@ -1,5 +1,6 @@
 transformers==4.57.1
 accelerate==1.11.0
+peft==0.17.1
 opencv-python-headless==4.11.0.86
 numpy==1.26.4
 pandas==2.3.3

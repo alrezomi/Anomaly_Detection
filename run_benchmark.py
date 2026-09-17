@@ -113,6 +113,11 @@ def _excluded_bag_names(
 ) -> set[str]:
     rynnbrain = config.get("rynnbrain", {})
     names = {Path(bag).name for bag in rynnbrain.get("reference_bags", [])}
+    adapter_path = rynnbrain.get("model", {}).get("lora_adapter_path")
+    if adapter_path:
+        from rynnbrain_vlm.lora import adapter_training_bag_names
+
+        names |= adapter_training_bag_names(adapter_path)
     if not include_nominal_bags:
         names |= {Path(bag).name for bag in config.get("nominal_bags", [])}
     return names
@@ -261,7 +266,7 @@ def _select_named_records(
     excluded = sorted(set(requested_names) & excluded_names)
     if excluded:
         raise ValueError(
-            "The following selected bags are configured as nominal/reference memory "
+            "The following selected bags are nominal/reference memory or LoRA training bags "
             "and cannot be evaluation samples: " + ", ".join(excluded)
         )
 
@@ -337,7 +342,7 @@ def main() -> None:
     )
     selection_df = pd.DataFrame(records)
     selection_df.to_csv(benchmark_root / "benchmark_bag_selection.csv", index=False)
-    print(f"Found {len(all_bags)} bag(s), excluding {len(excluded_names)} nominal/reference bag(s).")
+    print(f"Found {len(all_bags)} bag(s), excluding {len(excluded_names)} nominal/reference/LoRA-training bag(s).")
     print(f"Benchmarking {len(records)} demonstration(s).")
     selection_columns = ["bag_name", "label"]
     if records and "label_source" in selection_df:
