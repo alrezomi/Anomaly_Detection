@@ -473,7 +473,8 @@ def main() -> None:
     print(f"Summary table: {summary_path}")
     print(f"Clean report: {clean_report_path}")
     print(f"Statistics: {statistics_path}")
-    print(f"ROC curves and per-category AUROC: {benchmark_root / 'benchmark_roc'}")
+    print(f"VLM decision ROC and per-category metrics: {benchmark_root / 'benchmark_roc'}")
+    print("  Binary decision AUROC equals balanced accuracy on decided bags; see abstention counts and coverage.")
     for metric in roc_report["metrics"]:
         value = f"AUROC={metric['auroc']:.3f}" if metric["status"] == "created" else metric["reason"]
         print(f"  {metric['input_mode']} / {metric['failure_category']}: {value}")

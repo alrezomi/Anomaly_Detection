@@ -698,25 +698,34 @@ loaded once for the whole run rather than once per bag. Pass `--limit N` to
 smoke-test on a handful of bags, or `--skip-dino`/`--skip-vlm` to rerun only
 one stage.
 
-### ROC curves and AUROC by failure category
+### VLM decision evaluation and binary ROC by failure category
 
 Each benchmark also writes `benchmark_roc/` inside its existing benchmark
 output directory:
 
-- `roc_<input_mode>.png`: overall and per-category ROC curves, with AUROC in
-  the legend; each input mode is evaluated separately.
-- `auroc.csv`: AUROC, normal/failure sample counts, excluded-score counts,
+- `roc_<input_mode>.png`: overall and per-category binary ROC plots, with the
+  VLM's operating point marked and binary AUROC in the legend. Each input mode
+  is evaluated separately.
+- `auroc.csv`: binary AUROC, confusion counts (TP/FP/TN/FN), accuracy, failure
+  recall, specificity, false-alarm rate, decision coverage, abstention counts,
   and reasons for skipped curves.
-- `roc_points.csv`: thresholds and false/true positive rates for each curve.
+- `roc_points.csv`: thresholds on the binary decision encoding and false/true
+  positive rates. These thresholds are not model confidence thresholds.
 - `roc_summary.json`: the same metrics and plot paths (also included under
   `roc` in `benchmark_statistics.json`).
 
-The score is `classifier_failure_probability` from the saved CoP logistic
-classifier. Enable `rynnbrain.cop_classifier.enabled` after training the saved
-head, using its existing `model_paths`, then run the usual benchmark command.
-This reporting does not train the classifier or change prompts, configuration,
-paths, or bag names. The VLM's text decisions are still scored by the existing
-accuracy reports; they are not substituted for numeric failure probabilities.
+Evaluation uses the VLM's generated `Decision: success` or `Decision: failure`
+answer, as stored in the benchmark's `decision` column. The CoP classifier is
+not needed and its probabilities do not enter this report; it can remain
+disabled. Run the usual benchmark command. Prompts, configuration, paths, and
+bag names are unchanged.
+
+For ROC only, `success` is encoded as 0 and `failure` as 1. These are binary
+decisions, not probabilities. They give one operating point (false-alarm rate,
+failure detection rate); dotted lines connect it to the ROC endpoints. The
+resulting **binary AUROC equals balanced accuracy on decided bags**, the mean
+of failure recall and normal specificity. It does not measure confidence
+ranking or provide a choice of model confidence thresholds.
 
 Categories come directly from existing `Failure_<number>_<description>` parent
 folders, such as `Failure_1_grasp_miss` and `Failure_2_slip_at_start`, and are
@@ -727,11 +736,19 @@ normal bags. Existing manual/stage ground-truth labels remain authoritative;
 failure bags without a matching category folder appear as
 `uncategorized_failure`.
 
-Use held-out bags not used to train the classifier. Each curve needs at least
-one normal and one failure bag with a finite probability between 0 and 1.
-Unknown labels and missing/invalid scores are excluded and counted. If the
-classifier is disabled or either class is missing, AUROC is left empty with a
-skip reason rather than reporting a misleading value.
+Include held-out normal and failure bags, keeping the existing reference-bag
+exclusions. Each ROC needs at least one normal and one failure bag with a parsed
+binary decision. `uncertain`, `not_parsed`, and missing/invalid decisions are
+excluded from ROC and confusion counts, and counted separately by ground-truth
+class. `normal_count` and `failure_count` count only decided bags; columns ending
+in `_decided` also refer only to this subset. Always read AUROC alongside
+`decision_coverage`: excluding many uncertain answers can make it look better.
+`accuracy` counts abstentions as incorrect over all labeled rows in the
+comparison. Unknown labels are excluded from decision metrics and counted.
+Runs without an input mode (e.g. failed/skipped VLM runs) are counted separately
+as `rows_without_input_mode` in the JSON report. If either decided class is
+missing, AUROC is empty with a skip reason; available decision metrics are
+still saved.
 
 To regenerate just the ROC reports from an existing summary, without loading
 the VLM or processing bags again (replace the example summary path with your
