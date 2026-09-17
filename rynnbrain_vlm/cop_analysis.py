@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .benchmark_roc import failure_category
+
 
 VECTOR_SCHEMA_VERSION = 1
 PCA_LABELS = ("normal", "fail")
@@ -168,26 +170,50 @@ def _comparison_signature(record: SavedCoPVector) -> str:
     return json.dumps(signature, sort_keys=True, separators=(",", ":"))
 
 
+def _pca_category_styles(categories: set[str]) -> dict[str, dict[str, Any]]:
+    """Use one marker per category, shared by all input modes in an analysis."""
+    markers = ["^", "s", "D", "v", "P", "X", "*", "<", ">", "p", "h", "H"]
+    colors = ["#e1812c", "#3a923a", "#c03d3e", "#9372b2", "#845b53",
+              "#d684bd", "#797979", "#a9a52b", "#35a0ad"]
+    styles: dict[str, dict[str, Any]] = {
+        "Nominal": {"marker": "o", "color": "#2f78c4"},
+    }
+    # Natural ordering keeps Failure_2 before Failure_10.
+    ordered = sorted(categories - {"Nominal"}, key=lambda value: [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", value)
+    ])
+    for index, category in enumerate(ordered):
+        styles[category] = {
+            "marker": markers[index] if index < len(markers) else (index - len(markers) + 7, 0, 0),
+            "color": colors[index % len(colors)],
+        }
+    return {category: style for category, style in styles.items() if category in categories}
+
+
+def _pca_category(record: SavedCoPVector) -> str:
+    label = _canonical_label(record.metadata.get("ground_truth_label"))
+    return failure_category(str(record.metadata.get("test_bag", "")), label) or "Nominal"
+
+
 def _write_pca_plot(
     coordinates: np.ndarray,
     rows: list[dict[str, Any]],
     explained_ratio: np.ndarray,
     input_mode: str,
     output_path: Path,
+    category_styles: dict[str, dict[str, Any]],
 ) -> None:
     import matplotlib
 
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
-    styles = {
-        "normal": {"label": "Nominal", "color": "#2f78c4", "marker": "o"},
-        "fail": {"label": "Failure", "color": "#d1495b", "marker": "X"},
-    }
-    figure, axis = plt.subplots(figsize=(9, 7))
-    for label in PCA_LABELS:
-        indices = [index for index, row in enumerate(rows) if row["label"] == label]
-        style = styles[label]
+    figure, axis = plt.subplots(figsize=(11, 7))
+    for category, style in category_styles.items():
+        indices = [index for index, row in enumerate(rows) if row["category"] == category]
+        if not indices:
+            continue
         axis.scatter(
             coordinates[indices, 0],
             coordinates[indices, 1],
@@ -195,19 +221,10 @@ def _write_pca_plot(
             alpha=0.85,
             edgecolors="white",
             linewidths=0.7,
-            label=style["label"],
+            label=f"{category.replace('_', ' ')} (n={len(indices)})",
             color=style["color"],
             marker=style["marker"],
         )
-        for index in indices:
-            axis.annotate(
-                rows[index]["bag_name"],
-                (coordinates[index, 0], coordinates[index, 1]),
-                xytext=(5, 4),
-                textcoords="offset points",
-                fontsize=8,
-                alpha=0.8,
-            )
 
     axis.set_xlabel(f"PC1 ({explained_ratio[0] * 100:.1f}% variance)")
     axis.set_ylabel(f"PC2 ({explained_ratio[1] * 100:.1f}% variance)")
@@ -215,9 +232,10 @@ def _write_pca_plot(
     axis.axhline(0, color="#999999", linewidth=0.6, alpha=0.5)
     axis.axvline(0, color="#999999", linewidth=0.6, alpha=0.5)
     axis.grid(alpha=0.2)
-    axis.legend()
+    axis.set_axisbelow(True)
+    axis.legend(title="Category", loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=9)
     figure.tight_layout()
-    figure.savefig(output_path, dpi=180)
+    figure.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(figure)
 
 
@@ -228,6 +246,10 @@ def analyze_saved_vectors(
 ) -> dict[str, Any]:
     """Fit one PCA per input mode across saved nominal and failure vectors."""
     records = discover_saved_vectors(input_directory, metadata_paths)
+    category_styles = _pca_category_styles({
+        _pca_category(record) for record in records
+        if _canonical_label(record.metadata.get("ground_truth_label")) in PCA_LABELS
+    })
     output = (output_directory or input_directory / "cop_pca").resolve()
     output.mkdir(parents=True, exist_ok=True)
     for pattern in (
@@ -295,6 +317,7 @@ def analyze_saved_vectors(
                 "bag_name": str(record.metadata.get("bag_name", "")),
                 "bag_path": str(record.metadata.get("test_bag", "")),
                 "label": _canonical_label(record.metadata.get("ground_truth_label")),
+                "category": _pca_category(record),
                 "input_mode": input_mode,
                 "vector_path": str(record.vector_path),
                 "metadata_path": str(record.metadata_path),
@@ -327,6 +350,7 @@ def analyze_saved_vectors(
             vectors=matrix.astype(np.float32, copy=False),
             l2_norms=l2_norms,
             labels=np.asarray([row["label"] for row in rows]),
+            categories=np.asarray([row["category"] for row in rows]),
             bag_names=np.asarray([row["bag_name"] for row in rows]),
             vector_paths=np.asarray([row["vector_path"] for row in rows]),
         )
@@ -345,13 +369,18 @@ def analyze_saved_vectors(
             preprocessing=np.asarray("l2_normalize_then_center"),
         )
         plot_path = output / f"cop_pca_{stem}.png"
-        _write_pca_plot(coordinates, rows, explained_ratio, input_mode, plot_path)
+        _write_pca_plot(coordinates, rows, explained_ratio, input_mode, plot_path, category_styles)
 
         mode_summary.update(
             status="created",
             vector_dimension=int(matrix.shape[1]),
             normal_count=sum(row["label"] == "normal" for row in rows),
             failure_count=sum(row["label"] == "fail" for row in rows),
+            categories={
+                category: {**style, "count": sum(row["category"] == category for row in rows)}
+                for category, style in category_styles.items()
+                if any(row["category"] == category for row in rows)
+            },
             explained_variance_ratio=[float(value) for value in explained_ratio],
             vectors_archive=str(archive_path),
             coordinates_csv=str(coordinates_path),

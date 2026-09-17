@@ -513,13 +513,20 @@ directory are L2-normalized, centered, and fitted jointly with PCA. A separate
 PCA is fitted for each input mode so differences between `raw` and
 `raw_heatmap` do not masquerade as failure separation. Ground-truth `normal`
 points appear as **Nominal**, `fail` points as **Failure**, and `unknown` points
-are excluded. The `cop_pca/` directory contains, per input mode:
+are excluded. Nominal bags use circles; each failure category, read from its
+existing `Failure_<number>_<description>` parent folder, has its own marker
+shape and color. Categories share the same styling across input modes within
+an analysis. The legend sits outside the plot and includes category counts.
+Individual bag-name annotations are omitted to keep dense clusters readable;
+bag names and categories remain available in the coordinate CSV. Failure bags
+without a category folder are grouped as `uncategorized_failure`.
+The `cop_pca/` directory contains, per input mode:
 
 - `cop_vectors_<mode>.npz`: aligned raw vectors, labels, names, and paths.
-- `cop_pca_<mode>.csv`: PC1/PC2 coordinates for every plotted bag.
+- `cop_pca_<mode>.csv`: PC1/PC2 coordinates, category, and name for every plotted bag.
 - `cop_pca_model_<mode>.npz`: fitted PCA axes, feature mean, explained
   variance, and preprocessing identifier.
-- `cop_pca_<mode>.png`: labeled nominal-versus-failure scatter plot.
+- `cop_pca_<mode>.png`: scatter plot with distinct category markers and a legend.
 - `cop_pca_summary.json`: counts, explained variance, output paths, or the
   reason a plot was skipped.
 
