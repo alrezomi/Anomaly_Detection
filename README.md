@@ -680,6 +680,30 @@ cannot silently combine base-model features with adapted-model features.
 Existing paths and bag names are unchanged. Use a separate benchmark output
 directory to retain both base and adapted results for comparison.
 
+The adapter is trained on `Decision: success` or `Decision: failure`, followed
+by the end-of-answer token. A decision without an explanation is therefore
+expected; increasing `max_new_tokens` does not force it to continue.
+For an optional description of the visible evidence, add `"explain_decision": true`
+inside the existing `rynnbrain.generation` object, then run:
+
+```bash
+docker compose run --rm --build rynnbrain-test-multiturn
+```
+
+This performs one extra generation on the same reference and observation images
+using the original model with the adapter temporarily disabled. It is an
+independent visual description, **not the adapted model's own explanation or
+confidence**, and may disagree with its decision. The adapted decision is not
+shown to this pass. The decision response and CoP vector remain unchanged;
+`visual_evidence`, its source, and any generation error are saved separately in
+the existing result files. The option defaults to false and needs no retraining.
+
+Inference follows the input embedding's actual execution device after adapter
+loading, including Accelerate offload hooks. A stale `input_device: "cuda"`
+setting no longer sends tokens to CUDA when the model has been placed on CPU.
+The resolved device is printed at startup. If it reports CPU unexpectedly,
+check `nvidia-smi` on the lab PC for available GPU memory; CPU inference is slow.
+
 ### Frozen-vector logistic failure classifier
 
 RynnBrain remains fully frozen. After collecting labeled vectors, a small

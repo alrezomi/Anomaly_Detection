@@ -15,6 +15,37 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 COP_REPRESENTATION_ID = "qwen3vl_final_norm_last_turn2_prompt_token_v1"
 
 
+def _input_execution_device(model: Any) -> torch.device:
+    """Follow the final placement, including Accelerate's offload hooks."""
+    embeddings = model.get_input_embeddings()
+
+    def hook_device(hook: Any) -> Any:
+        device = getattr(hook, "execution_device", None)
+        if device is not None:
+            return device
+        for child in getattr(hook, "hooks", ()):
+            device = hook_device(child)
+            if device is not None:
+                return device
+        return None
+
+    modules = dict(model.named_modules())
+    name = next((name for name, module in modules.items() if module is embeddings), None)
+    # A hook on the embedding or its containing block can materialize weights
+    # stored on CPU/meta on a different device just before the forward pass.
+    if name is not None:
+        parts = name.split(".") if name else []
+        for depth in range(len(parts), -1, -1):
+            module = modules[".".join(parts[:depth])]
+            device = hook_device(getattr(module, "_hf_hook", None))
+            if device is not None:
+                return torch.device(f"cuda:{device}" if isinstance(device, int) else device)
+    device = embeddings.weight.device
+    if device.type == "meta":
+        raise RuntimeError("Input embeddings are on meta without an execution-device hook.")
+    return device
+
+
 @dataclass(frozen=True)
 class MultiturnGeneration:
     """Text responses plus an optional fixed-size CoP context vector."""
@@ -56,9 +87,12 @@ class RynnBrainModel:
                 self.model, config["lora_adapter_path"], self.model_id
             )
         self.model.eval()
-        self.input_device = config.get(
-            "input_device", "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        # PEFT can redispatch an automatically placed model during adapter load.
+        # Resolve after loading; the configured preference may now be stale.
+        self.input_device = _input_execution_device(self.model)
+        print(f"Model input execution device: {self.input_device}")
+        if self.input_device.type == "cpu" and str(config.get("input_device", "")).startswith("cuda"):
+            print("Model inputs are on CPU after loading; inference may be slow. Check available GPU memory with nvidia-smi.")
 
     def _resize(self, image: Image.Image) -> Image.Image:
         output = image.convert("RGB").copy()
@@ -103,6 +137,25 @@ class RynnBrainModel:
     def generate_nominal(self, turn: dict[str, Any], generation: dict[str, Any]) -> str:
         """Generate the frozen base model's nominal response for training context."""
         inputs = self.tokenize_conversation([self.conversation_message(turn)], generation).to(self.input_device)
+        context = self.model.disable_adapter() if self.adapter_identity else nullcontext()
+        with context, torch.inference_mode():
+            output = self.model.generate(
+                **inputs, max_new_tokens=int(generation.get("max_new_tokens", 500)),
+                do_sample=bool(generation.get("do_sample", False)), use_cache=True,
+            )
+        return self.processor.decode(output[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+    def generate_visual_evidence(
+        self, turns: list[dict[str, Any]], nominal_response: str,
+        evidence_prompt: str, generation: dict[str, Any],
+    ) -> str:
+        """Independent base-model observations, without the adapted decision."""
+        conversation = [
+            self.conversation_message(turns[0]),
+            {"role": "assistant", "content": [{"type": "text", "text": nominal_response}]},
+            self.conversation_message({**turns[1], "text": evidence_prompt}),
+        ]
+        inputs = self.tokenize_conversation(conversation, generation).to(self.input_device)
         context = self.model.disable_adapter() if self.adapter_identity else nullcontext()
         with context, torch.inference_mode():
             output = self.model.generate(
