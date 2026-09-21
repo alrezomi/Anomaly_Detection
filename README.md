@@ -906,6 +906,44 @@ loaded once for the whole run rather than once per bag. Pass `--limit N` to
 smoke-test on a handful of bags, or `--skip-dino`/`--skip-vlm` to rerun only
 one stage.
 
+### CoP probability ROC and AUROC by failure category
+
+With `rynnbrain.cop_classifier.enabled: true`, the usual benchmark command also
+produces probability-based ROC/AUROC reports automatically, using the scores
+already computed for test bags. No extra model calls or second benchmark run
+are needed. These reports live in `benchmark_probability_roc/` inside the
+existing benchmark output directory:
+
+- `roc_<input_mode>.png`: ROC curves for all failures and each failure category
+  versus nominal bags, with AUROC values in the legend.
+- `auroc_<input_mode>.png`: a horizontal AUROC comparison chart.
+- `auroc.csv`: AUROC, scored class counts, score coverage, missing/invalid-score
+  counts, and reasons for skipped comparisons.
+- `roc_points.csv`: every distinct probability threshold and its false/true
+  positive rates. Thresholds use 0–1 probabilities; `inf` is the initial
+  endpoint where no bags are predicted as failures.
+- `roc_summary.json`: report metadata and metrics, also saved under
+  `probability_roc` in `benchmark_statistics.json`.
+
+This report uses `classifier_failure_probability` directly, without converting
+it to a success/failure decision at 0.5 or the configured classifier threshold.
+Failure is the positive class. Tied scores enter together; a constant score
+has AUROC 0.5 when both classes are present. A curve may still have few points
+if only a few distinct probabilities are available.
+
+Each category is compared against the same held-out nominal bags; other failure
+categories are excluded from that category's curve. Input modes are kept
+separate. Both ground-truth classes and finite scores in [0, 1] are required.
+Missing/invalid probabilities and unknown ground truth are excluded and counted;
+an uncertain/unparsed VLM text decision does not exclude a valid classifier
+score. AUROC measures ranking, not probability calibration or VLM text accuracy.
+Classifier-training and LoRA-training bags remain excluded by the benchmark.
+
+The existing report-regeneration command below regenerates both the binary
+and probability reports from `benchmark_summary.csv` without loading the VLM.
+If that CSV has no classifier scores, probability curves are skipped with an
+explicit reason rather than substituting the VLM's binary outputs.
+
 ### VLM decision evaluation and binary ROC by failure category
 
 Each benchmark also writes `benchmark_roc/` inside its existing benchmark

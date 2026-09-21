@@ -30,7 +30,7 @@ from typing import Any
 import pandas as pd
 
 from build_dataset_manifest import discover_bags, infer_bag_record
-from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report
+from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report, write_probability_roc_report
 from rynnbrain_vlm.cop_analysis import analyze_saved_vectors, write_failure_probability_report
 from rynnbrain_vlm.model import RynnBrainModel
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
@@ -498,6 +498,9 @@ def main() -> None:
         ])
     roc_report = write_roc_report(master_rows, benchmark_root)
     statistics["roc"] = roc_report
+    statistics["probability_roc"] = write_probability_roc_report(
+        master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"])
+    )
     statistics_path = benchmark_root / "benchmark_statistics.json"
     statistics_path.write_text(
         json.dumps(statistics, indent=2) + "\n", encoding="utf-8"
@@ -531,6 +534,10 @@ def main() -> None:
     print(f"VLM decision ROC and per-category metrics: {benchmark_root / 'benchmark_roc'}")
     print("  Binary decision AUROC equals balanced accuracy on decided bags; see abstention counts and coverage.")
     for metric in roc_report["metrics"]:
+        value = f"AUROC={metric['auroc']:.3f}" if metric["status"] == "created" else metric["reason"]
+        print(f"  {metric['input_mode']} / {metric['failure_category']}: {value}")
+    print(f"CoP probability ROC/AUROC: {benchmark_root / 'benchmark_probability_roc'}")
+    for metric in statistics["probability_roc"]["metrics"]:
         value = f"AUROC={metric['auroc']:.3f}" if metric["status"] == "created" else metric["reason"]
         print(f"  {metric['input_mode']} / {metric['failure_category']}: {value}")
     if statistics["scored_rows"]:

@@ -136,6 +136,9 @@ class ClassifierPreparationTests(unittest.TestCase):
         probability_report = statistics["failure_probability"]["modes"][0]
         self.assertEqual(probability_report["scored_rows"], 2)
         self.assertTrue(Path(probability_report["plot_file"]).is_file())
+        self.assertEqual(statistics["probability_roc"]["score_column"], "classifier_failure_probability")
+        self.assertEqual(statistics["probability_roc"]["metrics"][0]["status"], "created")
+        self.assertTrue(all(Path(path).is_file() for path in statistics["probability_roc"]["plot_files"]))
         self.assertEqual(json.loads(self.config_path.read_text()), self.config)
 
     def test_dino_only_benchmark_does_not_load_vlm_or_prepare_enabled_classifier(self):

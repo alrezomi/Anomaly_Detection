@@ -1,4 +1,4 @@
-"""Evaluate the VLM's generated success/failure decisions per failure category."""
+"""ROC reports for generated decisions and CoP classifier probabilities."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import textwrap
 from typing import Any
 
 import numpy as np
@@ -210,6 +211,128 @@ def write_roc_report(master_rows: list[dict[str, Any]], benchmark_root: Path) ->
     return report
 
 
+def write_probability_roc_report(
+    master_rows: list[dict[str, Any]], benchmark_root: Path, *,
+    input_modes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Sweep continuous classifier scores, independent of the VLM's decision."""
+    score_column = "classifier_failure_probability"
+    dataframe = pd.DataFrame(master_rows).reindex(columns=[
+        "bag_name", "bag_path", "ground_truth_label", "input_mode", score_column,
+    ])
+    dataframe["failure_category"] = [failure_category(path, label)
+                                     for path, label in zip(dataframe["bag_path"], dataframe["ground_truth_label"])]
+    dataframe["missing_score"] = dataframe[score_column].isna() | dataframe[score_column].astype(str).str.strip().eq("")
+    dataframe["score"] = pd.to_numeric(dataframe[score_column], errors="coerce")
+    dataframe["valid_score"] = np.isfinite(dataframe["score"]) & dataframe["score"].between(0, 1)
+    output_dir = Path(benchmark_root) / "benchmark_probability_roc"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metrics, points, plot_files = [], [], []
+    modes = sorted(set(input_modes or []) | set(dataframe["input_mode"].dropna().astype(str)))
+    for mode in modes:
+        group = dataframe[dataframe["input_mode"] == mode]
+        categories = sorted(group.loc[group["ground_truth_label"] == "fail", "failure_category"].unique())
+        curves = []
+        for category in [None, *categories]:
+            selected = group[group["ground_truth_label"].isin(["normal", "fail"])]
+            if category is not None:
+                selected = selected[(selected["ground_truth_label"] == "normal") | (selected["failure_category"] == category)]
+            valid = selected[selected["valid_score"]]
+            normal_count = int((valid["ground_truth_label"] == "normal").sum())
+            failure_count = int((valid["ground_truth_label"] == "fail").sum())
+            result = {
+                "input_mode": mode, "failure_category": category or "all_failures",
+                "normal_count": normal_count, "failure_count": failure_count,
+                "missing_probability_count": int(selected["missing_score"].sum()),
+                "invalid_probability_count": int((~selected["valid_score"] & ~selected["missing_score"]).sum()),
+                "excluded_probability_count": int((~selected["valid_score"]).sum()),
+                "unknown_label_count": int((~group["ground_truth_label"].isin(["normal", "fail"])).sum()),
+                "probability_coverage": len(valid) / len(selected) if len(selected) else None,
+                "distinct_score_count": int(valid["score"].nunique()),
+                "auroc": None, "status": "skipped", "reason": "",
+            }
+            metrics.append(result)
+            if not normal_count or not failure_count:
+                result["reason"] = "ROC requires both normal and failure bags with finite probabilities in [0, 1]."
+                continue
+            fpr, tpr, thresholds, auroc = roc_curve(
+                (valid["ground_truth_label"] == "fail").to_numpy(dtype=int),
+                valid["score"].to_numpy(dtype=float),
+            )
+            result.update(auroc=auroc, status="created")
+            curves.append((result["failure_category"], fpr, tpr, auroc))
+            points.extend({
+                "input_mode": mode, "failure_category": result["failure_category"],
+                "threshold": float(threshold), "false_positive_rate": float(x), "true_positive_rate": float(y),
+            } for threshold, x, y in zip(thresholds, fpr, tpr))
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", mode).strip("_").lower()
+        roc_path, auc_path = output_dir / f"roc_{slug}.png", output_dir / f"auroc_{slug}.png"
+        if curves:
+            _plot_probability_curves(curves, mode, roc_path, auc_path)
+            plot_files.extend([str(roc_path), str(auc_path)])
+        else:
+            roc_path.unlink(missing_ok=True)
+            auc_path.unlink(missing_ok=True)
+    pd.DataFrame(metrics, columns=[
+        "input_mode", "failure_category", "normal_count", "failure_count", "missing_probability_count",
+        "invalid_probability_count", "excluded_probability_count", "unknown_label_count", "probability_coverage",
+        "distinct_score_count", "auroc", "status", "reason",
+    ]).to_csv(output_dir / "auroc.csv", index=False)
+    pd.DataFrame(points, columns=[
+        "input_mode", "failure_category", "threshold", "false_positive_rate", "true_positive_rate",
+    ]).to_csv(output_dir / "roc_points.csv", index=False)
+    report = {
+        "score_column": score_column, "positive_class": "fail",
+        "threshold_rule": "Predict failure when probability >= threshold; scores and thresholds use [0, 1], with inf as the no-positive endpoint.",
+        "roc_interpretation": "ROC sweeps distinct CoP failure probabilities, grouping ties. AUROC measures failure-vs-normal ranking, not calibration or VLM decision accuracy.",
+        "exclusion_policy": "Missing/nonfinite/out-of-range scores and unknown ground truth are excluded and counted. VLM uncertain/unparsed decisions do not exclude valid classifier scores.",
+        "comparison": "Each failure category versus normal; other failures excluded. Input modes are separate.",
+        "rows_without_input_mode": int(dataframe["input_mode"].isna().sum()),
+        "metrics": metrics, "plot_files": plot_files,
+    }
+    (output_dir / "roc_summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    return report
+
+
+def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    colors = ["#222222"] + [plt.get_cmap("tab10")(index % 10) for index in range(len(curves) - 1)]
+    labels = [textwrap.fill(category.replace("_", " "), width=45) for category, *_ in curves]
+    figure, axis = plt.subplots(figsize=(7, 6))
+    try:
+        for (category, fpr, tpr, auroc), color, label in zip(curves, colors, labels):
+            axis.plot(fpr, tpr, color=color, linewidth=2.4 if category == "all_failures" else 1.5,
+                      label=f"{label}\nAUROC = {auroc:.3f}")
+        axis.plot([0, 1], [0, 1], "--", color="#999999", label="Chance (AUROC = 0.5)")
+        axis.set(xlabel="False positive rate (normal bags)", ylabel="True positive rate (failure bags)",
+                 title=f"CoP probability ROC — {mode}", xlim=(0, 1), ylim=(0, 1.02))
+        axis.grid(alpha=0.2)
+        axis.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
+        figure.savefig(roc_path, dpi=180, bbox_inches="tight")
+    finally:
+        plt.close(figure)
+    figure, axis = plt.subplots(figsize=(8, max(3.5, 0.75 * len(curves))))
+    try:
+        values = [curve[3] for curve in curves]
+        bars = axis.barh(range(len(curves)), values, color=colors, height=0.6)
+        axis.set_yticks(range(len(curves)), labels)
+        axis.invert_yaxis()
+        axis.set(xlim=(0, 1.12), xlabel="AUROC", title=f"CoP probability AUROC — {mode}")
+        axis.set_xticks(np.linspace(0, 1, 6))
+        axis.axvline(0.5, color="#777777", linestyle="--", linewidth=1, label="Chance (0.5)")
+        for bar, value in zip(bars, values):
+            axis.text(value + 0.015, bar.get_y() + bar.get_height() / 2, f"{value:.3f}", va="center")
+        axis.grid(axis="x", alpha=0.2)
+        axis.set_axisbelow(True)
+        axis.legend(loc="lower right", fontsize=8)
+        figure.savefig(auc_path, dpi=180, bbox_inches="tight")
+    finally:
+        plt.close(figure)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", type=Path, required=True, help="Existing benchmark_summary.csv")
@@ -220,7 +343,9 @@ def main() -> None:
     if missing:
         raise ValueError("Benchmark summary is missing columns: " + ", ".join(sorted(missing)))
     write_roc_report(dataframe.to_dict("records"), arguments.summary.parent)
+    write_probability_roc_report(dataframe.to_dict("records"), arguments.summary.parent)
     print(f"ROC report: {arguments.summary.parent / 'benchmark_roc'}")
+    print(f"Probability ROC report: {arguments.summary.parent / 'benchmark_probability_roc'}")
 
 
 if __name__ == "__main__":
