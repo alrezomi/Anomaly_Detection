@@ -8,12 +8,19 @@ from unittest.mock import patch
 
 import pandas as pd
 
+_previous_rosbag_module = sys.modules.get("rosbag_io")
 rosbag_module = ModuleType("rosbag_io")
 rosbag_module.list_bag_topics = lambda *args, **kwargs: None
 rosbag_module.read_stage_events = lambda *args, **kwargs: None
 sys.modules.setdefault("rosbag_io", rosbag_module)
 
 import build_dataset_manifest
+
+# Keep the lightweight ROS stub local to this test module's imports.
+if _previous_rosbag_module is None:
+    sys.modules.pop("rosbag_io", None)
+else:
+    sys.modules["rosbag_io"] = _previous_rosbag_module
 
 
 class DatasetLabelTests(unittest.TestCase):

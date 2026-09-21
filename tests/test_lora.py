@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from rynnbrain_vlm.lora import (
     adapter_training_bag_names, answer_loss, attach_lora, load_lora_adapter,
@@ -159,6 +160,54 @@ class LoraGradientTests(unittest.TestCase):
             self.assertNotAlmostEqual(float(expected), float(base_loss), places=5)
             with self.assertRaisesRegex(ValueError, "trained for"):
                 load_lora_adapter(self.tiny_model(), root, "wrong-base")
+
+    def check_preserved_device_map(self, device_map):
+        from accelerate import dispatch_model
+        from rynnbrain_vlm.model import _input_execution_device
+
+        torch = self.torch
+        adapted = attach_lora(self.tiny_model(), {"rank": 2, "alpha": 4, "dropout": 0.0})
+        with torch.no_grad():
+            for name, parameter in adapted.named_parameters():
+                if "lora_B" in name:
+                    parameter.fill_(0.03)
+        adapted.eval()
+        prefix, tokenizer = self.sample()
+        sample = supervised_example(prefix, tokenizer, "fail", 20)
+        with torch.no_grad():
+            expected = answer_loss(adapted, sample)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapted.save_pretrained(root, safe_serialization=True)
+            (root / "training_manifest.json").write_text(json.dumps({"bags": []}))
+            base = dispatch_model(self.tiny_model(), device_map=device_map)
+            with patch("peft.peft_model.infer_auto_device_map", side_effect=AssertionError("Must not recalculate placement")):
+                restored, _, _ = load_lora_adapter(base, root, "tiny-rynnbrain-test")
+            expected_map = {"base_model.model" + (f".{name}" if name else ""): device
+                            for name, device in device_map.items()}
+            self.assertEqual(restored.hf_device_map, expected_map)
+            device = _input_execution_device(restored)
+            inputs = {key: value.to(device) for key, value in sample.items()}
+            with torch.no_grad():
+                torch.testing.assert_close(answer_loss(restored, inputs).cpu(), expected, rtol=1e-4, atol=1e-5)
+                restored.generate(
+                    **{key: value.to(device) for key, value in prefix.items()},
+                    max_new_tokens=1, do_sample=False, pad_token_id=0,
+                )
+
+    def test_adapter_keeps_root_and_module_maps_without_recalculating_memory(self):
+        for device_map in ({"": "cpu"}, {"model": "cpu", "lm_head": "cpu"}):
+            with self.subTest(device_map=device_map):
+                self.check_preserved_device_map(device_map)
+
+    def test_adapter_keeps_gpu_cpu_offload_map(self):
+        if not self.torch.cuda.is_available():
+            self.skipTest("Needs a CUDA GPU for mixed GPU/CPU offload verification")
+        self.check_preserved_device_map({
+            "model.visual": 0, "model.language_model.embed_tokens": 0,
+            "model.language_model.layers.0": 0, "model.language_model.layers.1": "cpu",
+            "model.language_model.norm": 0, "lm_head": 0,
+        })
 
 
 if __name__ == "__main__":
