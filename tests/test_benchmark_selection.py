@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 
 # Keep these selection tests independent of ROS and the GPU model dependencies.
+_stub_names = ("rosbag_io", "rynnbrain_vlm.model", "rynnbrain_vlm.run")
+_previous_modules = {name: sys.modules.get(name) for name in _stub_names}
 rosbag_module = ModuleType("rosbag_io")
 rosbag_module.list_bag_topics = lambda *args, **kwargs: None
 rosbag_module.read_stage_events = lambda *args, **kwargs: None
@@ -28,6 +30,13 @@ from run_benchmark import (
     _select_named_records,
     parse_arguments,
 )
+
+# Do not leak dependency stubs into the real inference tests during discovery.
+for _name, _previous in _previous_modules.items():
+    if _previous is None:
+        sys.modules.pop(_name, None)
+    else:
+        sys.modules[_name] = _previous
 
 
 class BenchmarkSelectionTests(unittest.TestCase):

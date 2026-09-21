@@ -2,6 +2,15 @@
 # The model sees nominal reference-bag frames first, then evaluates test frames
 # against them in a second turn (visual memory - no saved description text).
 
+def visual_evidence_prompt(task_description: str, input_mode: str) -> str:
+    return f"""Compare these current observation frames with the nominal demonstration above.
+Task: {task_description}
+Input mode: {input_mode}. Heatmaps, if present, indicate differences, not proof of failure.
+Describe the visible object motion, grasp, and final position relative to the target.
+Mention concrete matches or mismatches and say when the frames are insufficient to tell.
+Do not infer unseen events or give a success/failure decision.
+Return: Visual evidence: [one or two sentences describing what is visible]"""
+
 def task_context_prompt(task_description: str) -> str:
     """First turn: Keep the nominal reference clear and faithful to the user's intent."""
     return f"""You are a Failure Detector for Robotic Manipulation Tasks.

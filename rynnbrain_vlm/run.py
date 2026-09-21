@@ -17,7 +17,7 @@ from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
 from .cop_classifier import CoPLogisticClassifier, load_classifier
 from .cop_analysis import save_cop_vector
 from .model import COP_REPRESENTATION_ID, RynnBrainModel
-from .prompts import task_context_prompt, evaluation_prompt_multiturn
+from .prompts import task_context_prompt, evaluation_prompt_multiturn, visual_evidence_prompt
 
 
 def _slug(value: str) -> str:
@@ -211,7 +211,7 @@ def evaluate_multiturn(
     if Path(config["test_bag"]).name in getattr(model, "adapter_training_bags", set()):
         raise ValueError("This bag was used to train the loaded LoRA adapter; select a held-out evaluation bag.")
 
-    print(f"[MULTI-TURN MODE] Single model call with visual memory")
+    print("[MULTI-TURN MODE] Nominal reference followed by execution evaluation")
     print(f"Task: {task_description}\n")
 
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -451,6 +451,26 @@ def evaluate_multiturn(
                 f"Saved {mode} CoP vector ({cop_vector.numel()} values): "
                 f"{vector_path}"
             )
+        visual_evidence = None
+        evidence_error = None
+        evidence_prompt = None
+        evidence_source = None
+        if generation.get("explain_decision", False):
+            evidence_prompt = visual_evidence_prompt(task_description, mode)
+            evidence_source = "base_model_separate_pass"
+            try:
+                visual_evidence = model.generate_visual_evidence(
+                    turns, nominal_response, evidence_prompt, generation
+                )
+                _print_exchange(
+                    f"VISUAL EVIDENCE ({mode}) - BASE MODEL, SEPARATE PASS",
+                    evidence_prompt, visual_evidence,
+                )
+            except RuntimeError as error:
+                # An optional extra generation must not discard the decision
+                # and vector already produced (e.g. if this pass runs out of VRAM).
+                evidence_error = str(error)
+                print(f"Visual evidence unavailable; keeping the evaluation: {error}")
         rows.append(
             {
                 "test_bag": config["test_bag"],
@@ -460,6 +480,9 @@ def evaluate_multiturn(
                 "ground_truth_label": vlm.get("ground_truth_label", ""),
                 "nominal_response": nominal_response,
                 "response": response,
+                "visual_evidence": visual_evidence,
+                "visual_evidence_source": evidence_source,
+                "visual_evidence_error": evidence_error,
                 "evaluation_method": "multiturn",
                 "cop_representation_id": (
                     COP_REPRESENTATION_ID if cop_vector is not None else None
@@ -505,6 +528,10 @@ def evaluate_multiturn(
             "prompt": prompt_display,
             "nominal_response": nominal_response,
             "response": response,
+            "visual_evidence": visual_evidence,
+            "visual_evidence_source": evidence_source,
+            "visual_evidence_prompt": evidence_prompt,
+            "visual_evidence_error": evidence_error,
             "cop_representation_id": (
                 COP_REPRESENTATION_ID if cop_vector is not None else None
             ),
