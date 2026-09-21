@@ -169,6 +169,7 @@ class RynnBrainModel:
         turns: list[dict[str, Any]],
         generation: dict[str, Any],
         capture_cop_vector: bool,
+        reference_response: str | None = None,
     ) -> MultiturnGeneration:
         gc.collect()
         if torch.cuda.is_available():
@@ -180,6 +181,10 @@ class RynnBrainModel:
 
         for turn_index, turn in enumerate(turns):
             conversation.append(self.conversation_message(turn))
+            if turn_index == 0 and reference_response is not None:
+                responses.append(reference_response)
+                conversation.append({"role": "assistant", "content": [{"type": "text", "text": reference_response}]})
+                continue
             inputs = self.tokenize_conversation(conversation, generation)
             inputs = inputs.to(self.input_device)
 
@@ -284,9 +289,13 @@ class RynnBrainModel:
         self,
         turns: list[dict[str, Any]],
         generation: dict[str, Any],
+        *,
+        reference_response: str | None = None,
     ) -> MultiturnGeneration:
         """Generate responses and capture the final turn-2 prompt representation."""
-        result = self._generate_multiturn(turns, generation, capture_cop_vector=True)
+        result = self._generate_multiturn(
+            turns, generation, capture_cop_vector=True, reference_response=reference_response
+        )
         if result.cop_vector is None:
             raise RuntimeError("CoP-vector extraction was requested but returned no vector.")
         return result

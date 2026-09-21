@@ -716,8 +716,8 @@ hidden vectors (PCA coordinates are not used). Each vector is L2-normalized and
 centered using training-set statistics. The saved classifier contains only one
 weight per hidden feature, an intercept, preprocessing values, and metadata.
 
-First generate a representative training set containing multiple nominal and
-failure bags with identical RynnBrain settings. Store the fixed training split
+Choose a representative training set containing multiple nominal and
+failure bags. Store the fixed training split
 in `pipeline_config.json`; this avoids rebuilding the classifier during normal
 testing:
 
@@ -751,12 +751,55 @@ Run the dedicated service once:
 docker compose run --build --rm cop-classifier-train
 ```
 
-This is the only command that trains or overwrites the classifier. Benchmark
-and single-bag RynnBrain runs only load the saved model. The trainer uses only
+With `--config` (including the Docker service default), this command now prepares
+its selected training vectors before fitting the classifier. It loads the VLM
+once and generates the nominal reference response to check the full feature
+signature. Compatible saved vectors are reused; missing, invalid, or stale
+selected vectors are extracted into the existing `training.input_dir`, then the
+classifier is fitted. It does **not** score every saved benchmark bag or update
+benchmark summaries. Extraction uses the configured model and LoRA adapter, if
+enabled. It may extract classifier training features from LoRA training bags;
+the reference demonstration cannot be a supervised training sample.
+
+For your `source: "rosbag"`, `input_mode: "raw"` setup, no preliminary benchmark
+or DINO run is required. Heatmap/generated-video modes still need the existing
+per-bag videos under `training.input_dir/<bag_name>/`. Global video overrides
+cannot identify separate training bags and are rejected during preparation.
+
+To prepare the classifier and benchmark in **one command**, use:
+
+```bash
+docker compose run --rm --build benchmark --config /config/pipeline_config.json --skip-dino --prepare-classifier
+```
+
+`--skip-dino` is suitable for raw ROS inputs when only VLM results are needed;
+omit it if DINO analysis is also required. The explicit `--prepare-classifier`
+option prepares only the configured training bags, fits the classifier, then
+evaluates each test bag once with probabilities already available. One VLM
+instance serves both phases. It enables vectors and classifier scoring for that
+run without editing the config. Training output paths must match `model_paths`.
+Classifier-training bags (including those recorded in the saved classifier)
+are excluded from benchmark test results, even with `--include-nominal-bags`.
+The clean table includes `failure_probability`; statistics include a separate
+`classifier` section alongside the VLM's decision statistics. Without this
+option, benchmarks continue to load the saved classifier rather than train it.
+
+To re-extract selected training vectors when bag/video contents changed without
+their paths changing, run:
+
+```bash
+docker compose run --rm cop-classifier-train --config /config/pipeline_config.json --refresh-vectors
+```
+
+To retain the old saved-vectors-only behavior with no VLM loading, use
+`--config /config/pipeline_config.json --saved-vectors-only`. This also supports
+intentional `training.allow_all_labeled` runs. Automatic preparation requires
+explicit bags and deterministic generation (`do_sample: false`).
+
+The trainer uses only
 the names in `training.normal_bags` and `training.failure_bags`; these lists
 explicitly override recorded labels. Empty lists are rejected to prevent an
-accidental train-on-everything run. Set `training.allow_all_labeled` to `true`
-only when that behavior is intentional. Command-line options remain available
+accidental train-on-everything run. Command-line options remain available
 as explicit overrides. The trainer rejects mixed model/prompt/
 reference/camera/frame settings, duplicate bags, unknown labels, and datasets
 with fewer than two bags per class. Several dozen diverse bags per class are

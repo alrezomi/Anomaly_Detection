@@ -171,6 +171,47 @@ class ModelInferenceTests(unittest.TestCase):
                         self.assertEqual(saved["visual_evidence_source"], "base_model_separate_pass")
                         self.assertIsNone(saved["visual_evidence_error"])
 
+    def test_prepared_reference_skips_generation_and_preserves_execution_vector(self):
+        torch = self.torch
+        wrapper = self.wrapper_class.__new__(self.wrapper_class)
+        wrapper.input_device = torch.device("cpu")
+        wrapper.adapter_identity = None
+        wrapper.max_image_size = 640
+        norm = torch.nn.Identity()
+        calls = []
+        conversations = []
+
+        class Inputs(dict):
+            def to(self, device):
+                return self
+
+        class Processor:
+            def apply_chat_template(self, conversation, **kwargs):
+                conversations.append(list(conversation))
+                return Inputs(input_ids=torch.tensor([[1, 2]]))
+
+            def decode(self, *args, **kwargs):
+                return "reference response" if len(calls) == 1 else "Decision: success"
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            norm(torch.ones((1, 2, 4)))
+            return torch.tensor([[1, 2, 3]])
+
+        wrapper.processor = Processor()
+        wrapper.model = SimpleNamespace(generate=generate, config=SimpleNamespace(text_config=SimpleNamespace(hidden_size=4)))
+        turns = [{"role": "user", "text": "Reference", "images": []},
+                 {"role": "user", "text": "Execution", "images": []}]
+        with patch.object(wrapper, "_final_language_norm", return_value=norm):
+            original = wrapper.generate_multiturn_with_cop_vector(turns, {})
+            self.assertEqual(len(calls), 2)
+            cached = wrapper.generate_multiturn_with_cop_vector(turns, {}, reference_response=original.nominal_response)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(cached.nominal_response, original.nominal_response)
+        self.assertEqual(cached.evaluation_response, original.evaluation_response)
+        torch.testing.assert_close(cached.cop_vector, original.cop_vector)
+        self.assertEqual(conversations[-1][1]["content"][0]["text"], original.nominal_response)
+
 
 if __name__ == "__main__":
     unittest.main()

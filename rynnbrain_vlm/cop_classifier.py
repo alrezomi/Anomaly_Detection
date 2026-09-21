@@ -348,6 +348,7 @@ def _training_record_keys(record: SavedCoPVector) -> set[str]:
     bag_name = _normalize_bag_selector(record.metadata.get("bag_name", ""))
     test_bag = _normalize_bag_selector(record.metadata.get("test_bag", ""))
     keys = {value for value in (bag_name, test_bag) if value}
+    keys.update(_normalize_bag_selector(value) for value in record.metadata.get("selection_aliases", []))
     if test_bag.startswith("/data/"):
         keys.add(test_bag[len("/data/"):])
     return keys
@@ -402,9 +403,10 @@ def train_from_saved_vectors(
     c_value: float = 1.0,
     threshold: float = 0.5,
     class_weight: str = "balanced",
+    metadata_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     records = _select_training_records(
-        discover_saved_vectors(input_directory), input_mode, bag_names or []
+        discover_saved_vectors(input_directory, metadata_paths), input_mode, bag_names or []
     )
     if not records:
         raise ValueError(f"No labeled {input_mode!r} vectors were found.")
@@ -554,6 +556,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--regularization-c", type=float)
     parser.add_argument("--threshold", type=float)
     parser.add_argument("--class-weight", choices=("balanced", "none"))
+    parser.add_argument("--saved-vectors-only", action="store_true", help="Train from saved vectors without loading the VLM or extracting bags.")
+    parser.add_argument("--refresh-vectors", action="store_true", help="Re-extract selected training bags, even if their settings match (e.g. bag contents changed).")
+    parser.add_argument("--data-root", type=Path, default=Path("/data"))
     return parser.parse_args()
 
 
@@ -632,9 +637,137 @@ def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]
     }
 
 
+def configured_training_settings(config_path: Path, input_mode: str | None = None) -> dict[str, Any]:
+    """Use the same config resolution for standalone training and benchmarks."""
+    return _resolved_training_settings(argparse.Namespace(
+        config=config_path, input_mode=input_mode, input_dir=None, output_file=None,
+        bag=None, normal_bag=None, failure_bag=None,
+        regularization_c=None, threshold=None, class_weight=None,
+    ))
+
+
+def prepare_training_vectors(
+    config: dict[str, Any], settings: dict[str, Any], *, model=None,
+    data_root: Path = Path("/data"), refresh: bool = False,
+) -> tuple[list[Path], str]:
+    """Reuse compatible selected vectors; extract only missing/stale training bags.
+
+    Never scores a benchmark or changes its summary. A reference generation
+    verifies the full signature and is shared with any new extractions.
+    """
+    from .model import RynnBrainModel
+    from .prompts import task_context_prompt
+    from .run import _raw_inputs, cop_comparison_signature, evaluate_multiturn
+
+    vlm = dict(config["rynnbrain"])
+    generation = dict(vlm.get("generation", {}))
+    if vlm.get("raw_video_paths") or vlm.get("heatmap_video_paths"):
+        raise ValueError("Training vector extraction uses per-bag inputs; remove global video-path overrides or use --saved-vectors-only.")
+    if generation.get("do_sample", False):
+        raise ValueError("Classifier vector preparation requires generation.do_sample=false for a consistent reference.")
+    selectors = [_normalize_bag_selector(value) for value in settings["bag_names"]]
+    names = [value.rsplit("/", 1)[-1] for value in selectors]
+    if not selectors or len(set(names)) != len(names):
+        raise ValueError("Vector preparation needs explicit training bags with unique bag names; use --saved-vectors-only for legacy all-vector training.")
+    reference_bags = list(vlm.get("reference_bags", []))
+    if not reference_bags or set(names) & {Path(value).name for value in reference_bags}:
+        raise ValueError("Select reference_bags separately from classifier training bags.")
+    root, mode = Path(settings["input_directory"]), settings["input_mode"]
+    overrides = {_normalize_bag_selector(key): value for key, value in settings["label_overrides"].items()}
+    candidates = []
+    for path in sorted(root.glob("**/cop_vectors/*.json")):
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        if metadata.get("input_mode") == mode:
+            candidates.append(SavedCoPVector(path.parent / Path(metadata.get("vector_file", "")).name,
+                                             path, np.empty(0), metadata))
+    selected = []
+    labels = []
+    for selector, name in zip(selectors, names):
+        matches = [record for record in candidates if selector in _training_record_keys(record)]
+        if len(matches) > 1:
+            raise ValueError(f"Multiple training vectors found for {selector}; keep one vector per bag and mode in training.input_dir.")
+        record = matches[0] if matches else None
+        keys = _training_record_keys(record) if record else {selector}
+        explicit = {overrides[key] for key in keys if key in overrides}
+        if len(explicit) > 1:
+            raise ValueError(f"Conflicting training labels for {selector}.")
+        label = next(iter(explicit)) if explicit else (record.metadata.get("ground_truth_label") if record else None)
+        if label not in LABEL_TO_TARGET:
+            raise ValueError(f"Set an explicit normal_bags/failure_bags label for {selector} before extracting its vector.")
+        labels.append(LABEL_TO_TARGET[label])
+        selected.append((selector, name, record, label))
+    if min(labels.count(0), labels.count(1)) < 2:
+        raise ValueError("Training requires at least two normal and two failure bags.")
+
+    if model is None:
+        model = RynnBrainModel(vlm["model"])
+    count = int(vlm.get("num_frames", 4))
+    topics = vlm.get("memory_camera_topics", vlm.get("camera_topics", config.get("camera_topics", [])))
+    nominal_images = []
+    for bag in reference_bags:
+        images, _ = _raw_inputs(Path(bag), list(topics), count)
+        nominal_images.extend(images)
+    if not nominal_images:
+        raise ValueError("No nominal reference images were loaded.")
+    reference_response = model.generate_nominal({
+        "role": "user", "images": nominal_images,
+        "text": task_context_prompt(vlm.get("task_description", "Robot manipulation task")),
+    }, generation)
+    expected = cop_comparison_signature(model, config, vlm, mode, reference_response, count, generation)
+    paths = []
+    for selector, name, record, label in selected:
+        if not refresh and record is not None and record.metadata.get("comparison_signature") == expected:
+            try:
+                loaded = discover_saved_vectors(root, [record.metadata_path])[0]
+                if loaded.vector.size != expected["hidden_size"] or loaded.metadata.get("representation_id") != expected["representation_id"]:
+                    raise ValueError("Vector representation changed")
+                paths.append(record.metadata_path)
+                print(f"Reusing classifier training vector: {name} ({mode})")
+                continue
+            except (ValueError, OSError, EOFError):
+                pass  # Regenerate a missing/corrupt selected vector.
+        bag_path = Path(selector)
+        if not bag_path.is_absolute():
+            bag_path = data_root / bag_path
+        if not (bag_path / "metadata.yaml").is_file() and "/" not in selector:
+            matches = [path.parent for path in data_root.glob("**/metadata.yaml") if path.parent.name == name]
+            if len(matches) != 1:
+                raise ValueError(f"Cannot uniquely locate ROS bag {selector}; use its full path in the training list.")
+            bag_path = matches[0]
+        if not (bag_path / "metadata.yaml").is_file():
+            raise FileNotFoundError(f"Training bag not found: {bag_path}")
+        destination = record.metadata_path.parent.parent if record else root / name / "rynnbrain_multiturn"
+        bag_config = {**config, "test_bag": str(bag_path), "output_dir": str(root / name)}
+        bag_vlm = {**vlm, "input_modes": [mode], "ground_truth_label": label}
+        print(f"Extracting classifier training vector: {name} ({mode})")
+        rows, _, _, _ = evaluate_multiturn(
+            model, bag_config, bag_vlm, count, generation, destination,
+            training_vectors_only=True, reference_response=reference_response,
+        )
+        path = Path(rows[0]["cop_metadata_path"])
+        loaded = discover_saved_vectors(root, [path])[0]
+        if loaded.metadata.get("comparison_signature") != expected:
+            raise ValueError(f"Extracted vector settings changed unexpectedly for {name}.")
+        if selector not in _training_record_keys(loaded):
+            loaded.metadata["selection_aliases"] = [selector]
+            path.write_text(json.dumps(loaded.metadata, indent=2) + "\n", encoding="utf-8")
+        paths.append(path)
+    return paths, reference_response
+
+
 def main() -> None:
     arguments = parse_arguments()
     settings = _resolved_training_settings(arguments)
+    if arguments.refresh_vectors and arguments.saved_vectors_only:
+        raise ValueError("--refresh-vectors cannot be combined with --saved-vectors-only.")
+    if arguments.refresh_vectors and arguments.config is None:
+        raise ValueError("--refresh-vectors needs --config to extract using the current model settings.")
+    if arguments.config is not None and not arguments.saved_vectors_only:
+        config = json.loads(arguments.config.read_text(encoding="utf-8"))
+        paths, _ = prepare_training_vectors(
+            config, settings, data_root=arguments.data_root, refresh=arguments.refresh_vectors
+        )
+        settings["metadata_paths"] = paths
     metadata = train_from_saved_vectors(**settings)
     print(json.dumps(metadata, indent=2))
 

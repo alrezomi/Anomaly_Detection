@@ -192,6 +192,36 @@ def _common_config(arguments: argparse.Namespace) -> tuple[dict, dict, int, dict
     return config, vlm, frame_count, generation
 
 
+def cop_comparison_signature(model, config, vlm, mode, nominal_response, frame_count, generation):
+    """Shared cache identity for classifier preparation and evaluation."""
+    task = vlm.get("task_description", "Robot manipulation task")
+    topics = list(vlm.get("camera_topics", config.get("camera_topics", [])))
+    signature = {
+        "representation_id": COP_REPRESENTATION_ID,
+        "model_id": model.model_id,
+        "model_revision": getattr(model.model.config, "_commit_hash", None),
+        "model_config": {key: value for key, value in vlm.get("model", {}).items()
+                         if key != "lora_adapter_path" or value},
+        "task_description": task,
+        "nominal_response": nominal_response,
+        "source": vlm.get("source", "generated_videos"),
+        "reference_bags": [str(value) for value in vlm.get("reference_bags", [])],
+        "test_camera_topics": topics,
+        "memory_camera_topics": list(vlm.get("memory_camera_topics", topics)),
+        "input_mode": mode,
+        "num_frames": frame_count,
+        "sampling_start_sec": float(vlm.get("sampling_start_sec", 0.0)),
+        "sampling_end_sec": float(vlm["sampling_end_sec"]) if vlm.get("sampling_end_sec") is not None else None,
+        "enable_thinking": bool(generation.get("enable_thinking", False)),
+        "hidden_size": getattr(getattr(model.model.config, "text_config", None), "hidden_size", None),
+        "turn1_prompt": task_context_prompt(task),
+        "turn2_prompt": evaluation_prompt_multiturn(task, mode),
+    }
+    if getattr(model, "adapter_identity", None):
+        signature["lora_adapter_sha256"] = model.adapter_identity
+    return signature
+
+
 def evaluate_multiturn(
     model: RynnBrainModel,
     config: dict[str, Any],
@@ -199,6 +229,9 @@ def evaluate_multiturn(
     frame_count: int,
     generation: dict[str, Any],
     output_directory: Path,
+    *,
+    training_vectors_only: bool = False,
+    reference_response: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
     """Evaluate one test bag/video set with an already-loaded RynnBrain model.
 
@@ -208,7 +241,7 @@ def evaluate_multiturn(
     """
     task_description = vlm.get("task_description", "Robot manipulation task")
 
-    if Path(config["test_bag"]).name in getattr(model, "adapter_training_bags", set()):
+    if not training_vectors_only and Path(config["test_bag"]).name in getattr(model, "adapter_training_bags", set()):
         raise ValueError("This bag was used to train the loaded LoRA adapter; select a held-out evaluation bag.")
 
     print("[MULTI-TURN MODE] Nominal reference followed by execution evaluation")
@@ -223,12 +256,12 @@ def evaluate_multiturn(
     end_value = vlm.get("sampling_end_sec")
     sampling_end_sec = float(end_value) if end_value is not None else None
     cop_config = dict(vlm.get("cop_vectors", {}))
-    capture_cop_vectors = bool(cop_config.get("enabled", True))
+    capture_cop_vectors = training_vectors_only or bool(cop_config.get("enabled", True))
 
     source = vlm.get("source", "generated_videos")
     input_modes = list(vlm.get("input_modes", ["raw"]))
     classifier_config = dict(vlm.get("cop_classifier", {}))
-    classifier_enabled = bool(classifier_config.get("enabled", False))
+    classifier_enabled = not training_vectors_only and bool(classifier_config.get("enabled", False))
     classifiers: dict[str, CoPLogisticClassifier] = {}
     if classifier_enabled:
         if not capture_cop_vectors:
@@ -353,7 +386,8 @@ def evaluate_multiturn(
         # decoder state from the turn-2 prompt prefill without an extra forward pass.
         cop_vector = None
         if capture_cop_vectors:
-            generated = model.generate_multiturn_with_cop_vector(turns, generation)
+            options = {"reference_response": reference_response} if reference_response is not None else {}
+            generated = model.generate_multiturn_with_cop_vector(turns, generation, **options)
             nominal_response = generated.nominal_response
             response = generated.evaluation_response
             cop_vector = generated.cop_vector
@@ -377,31 +411,9 @@ def evaluate_multiturn(
         if cop_vector is not None:
             text_config = getattr(model.model.config, "text_config", None)
             model_revision = getattr(model.model.config, "_commit_hash", None)
-            comparison_signature = {
-                "representation_id": COP_REPRESENTATION_ID,
-                "model_id": model.model_id,
-                "model_revision": model_revision,
-                "model_config": {
-                    key: value for key, value in vlm.get("model", {}).items()
-                    if key != "lora_adapter_path" or value
-                },
-                "task_description": task_description,
-                "nominal_response": nominal_response,
-                "source": source,
-                "reference_bags": [str(value) for value in reference_bags],
-                "test_camera_topics": topics,
-                "memory_camera_topics": memory_topics,
-                "input_mode": mode,
-                "num_frames": frame_count,
-                "sampling_start_sec": sampling_start_sec,
-                "sampling_end_sec": sampling_end_sec,
-                "enable_thinking": bool(generation.get("enable_thinking", False)),
-                "hidden_size": getattr(text_config, "hidden_size", None),
-                "turn1_prompt": turn1_text,
-                "turn2_prompt": turn2_text,
-            }
-            if getattr(model, "adapter_identity", None):
-                comparison_signature["lora_adapter_sha256"] = model.adapter_identity
+            comparison_signature = cop_comparison_signature(
+                model, config, vlm, mode, nominal_response, frame_count, generation
+            )
             if classifier_enabled:
                 classifier = classifiers[mode]
                 if classifier.representation_id != COP_REPRESENTATION_ID:
@@ -455,7 +467,7 @@ def evaluate_multiturn(
         evidence_error = None
         evidence_prompt = None
         evidence_source = None
-        if generation.get("explain_decision", False):
+        if not training_vectors_only and generation.get("explain_decision", False):
             evidence_prompt = visual_evidence_prompt(task_description, mode)
             evidence_source = "base_model_separate_pass"
             try:
