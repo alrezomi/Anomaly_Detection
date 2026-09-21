@@ -716,8 +716,8 @@ hidden vectors (PCA coordinates are not used). Each vector is L2-normalized and
 centered using training-set statistics. The saved classifier contains only one
 weight per hidden feature, an intercept, preprocessing values, and metadata.
 
-First generate a representative training set containing multiple nominal and
-failure bags with identical RynnBrain settings. Store the fixed training split
+Choose a representative training set containing multiple nominal and
+failure bags. Store the fixed training split
 in `pipeline_config.json`; this avoids rebuilding the classifier during normal
 testing:
 
@@ -751,12 +751,75 @@ Run the dedicated service once:
 docker compose run --build --rm cop-classifier-train
 ```
 
-This is the only command that trains or overwrites the classifier. Benchmark
-and single-bag RynnBrain runs only load the saved model. The trainer uses only
+With `--config` (including the Docker service default), this command now prepares
+its selected training vectors before fitting the classifier. It loads the VLM
+once and generates the nominal reference response to check the full feature
+signature. Compatible saved vectors are reused; missing, invalid, or stale
+selected vectors are extracted into the existing `training.input_dir`, then the
+classifier is fitted. It does **not** score every saved benchmark bag or update
+benchmark summaries. Extraction uses the configured model and LoRA adapter, if
+enabled. It may extract classifier training features from LoRA training bags;
+the reference demonstration cannot be a supervised training sample.
+
+For your `source: "rosbag"`, `input_mode: "raw"` setup, no preliminary benchmark
+or DINO run is required. Heatmap/generated-video modes still need the existing
+per-bag videos under `training.input_dir/<bag_name>/`. Global video overrides
+cannot identify separate training bags and are rejected during preparation.
+
+With `rynnbrain.cop_classifier.enabled: true` and your existing explicit
+classifier training lists, the **normal benchmark command** now prepares the
+classifier automatically:
+
+```bash
+docker compose run --rm --build benchmark
+```
+
+The benchmark prepares only the configured training bags, fits the classifier, then
+evaluates each test bag once with probabilities already available. One VLM
+instance serves both phases. Compatible training vectors are reused; missing or
+stale vectors are refreshed. It enables vector capture for classifier scoring
+without editing the config. Training output paths must match `model_paths`.
+The small logistic classifier is fitted on each run; the VLM/LoRA is not retrained.
+Setting `cop_classifier.enabled: false` disables automatic classifier preparation
+and scoring. The older `--prepare-classifier` flag remains an optional way to
+enable them for one run. `--skip-vlm` does not prepare a classifier. The normal
+command continues to run DINO as before; `--skip-dino` remains optional for
+raw ROS inputs if only VLM results are wanted.
+Classifier-training bags (including those recorded in the saved classifier)
+are excluded from benchmark test results, even with `--include-nominal-bags`.
+The clean table includes `failure_probability`; statistics include a separate
+`classifier` section alongside the VLM's decision statistics. Single-bag
+RynnBrain evaluation continues to load the saved classifier without training.
+
+Each benchmark also creates `benchmark_failure_probability_<mode>.png`, a
+boxplot of classifier failure probabilities (0–100%) for ground-truth successful
+and failed executions. Groups use the recorded/manual ground truth, not the
+VLM or classifier decision. Boxes show the middle 50%, the line is the median,
+whiskers extend to observations within 1.5 IQR, and dots show individual bags.
+Input modes are plotted separately. `benchmark_failure_probability_summary.csv`
+and the `failure_probability` section in `benchmark_statistics.json` contain
+counts, mean, median, quartiles, minimum, and maximum in percent. Missing or
+invalid probabilities and unknown labels are excluded and counted. An absent
+class is shown as having no scored bags; a mode with no valid scores has no
+plot (and its previous plot is removed). These remain classifier estimates,
+not a guarantee of calibrated real-world failure frequency.
+
+To re-extract selected training vectors when bag/video contents changed without
+their paths changing, run:
+
+```bash
+docker compose run --rm cop-classifier-train --config /config/pipeline_config.json --refresh-vectors
+```
+
+To retain the old saved-vectors-only behavior with no VLM loading, use
+`--config /config/pipeline_config.json --saved-vectors-only`. This also supports
+intentional `training.allow_all_labeled` runs. Automatic preparation requires
+explicit bags and deterministic generation (`do_sample: false`).
+
+The trainer uses only
 the names in `training.normal_bags` and `training.failure_bags`; these lists
 explicitly override recorded labels. Empty lists are rejected to prevent an
-accidental train-on-everything run. Set `training.allow_all_labeled` to `true`
-only when that behavior is intentional. Command-line options remain available
+accidental train-on-everything run. Command-line options remain available
 as explicit overrides. The trainer rejects mixed model/prompt/
 reference/camera/frame settings, duplicate bags, unknown labels, and datasets
 with fewer than two bags per class. Several dozen diverse bags per class are
@@ -842,6 +905,44 @@ run but are excluded from the printed accuracy numbers. The RynnBrain model is
 loaded once for the whole run rather than once per bag. Pass `--limit N` to
 smoke-test on a handful of bags, or `--skip-dino`/`--skip-vlm` to rerun only
 one stage.
+
+### CoP probability ROC and AUROC by failure category
+
+With `rynnbrain.cop_classifier.enabled: true`, the usual benchmark command also
+produces probability-based ROC/AUROC reports automatically, using the scores
+already computed for test bags. No extra model calls or second benchmark run
+are needed. These reports live in `benchmark_probability_roc/` inside the
+existing benchmark output directory:
+
+- `roc_<input_mode>.png`: ROC curves for all failures and each failure category
+  versus nominal bags, with AUROC values in the legend.
+- `auroc_<input_mode>.png`: a horizontal AUROC comparison chart.
+- `auroc.csv`: AUROC, scored class counts, score coverage, missing/invalid-score
+  counts, and reasons for skipped comparisons.
+- `roc_points.csv`: every distinct probability threshold and its false/true
+  positive rates. Thresholds use 0–1 probabilities; `inf` is the initial
+  endpoint where no bags are predicted as failures.
+- `roc_summary.json`: report metadata and metrics, also saved under
+  `probability_roc` in `benchmark_statistics.json`.
+
+This report uses `classifier_failure_probability` directly, without converting
+it to a success/failure decision at 0.5 or the configured classifier threshold.
+Failure is the positive class. Tied scores enter together; a constant score
+has AUROC 0.5 when both classes are present. A curve may still have few points
+if only a few distinct probabilities are available.
+
+Each category is compared against the same held-out nominal bags; other failure
+categories are excluded from that category's curve. Input modes are kept
+separate. Both ground-truth classes and finite scores in [0, 1] are required.
+Missing/invalid probabilities and unknown ground truth are excluded and counted;
+an uncertain/unparsed VLM text decision does not exclude a valid classifier
+score. AUROC measures ranking, not probability calibration or VLM text accuracy.
+Classifier-training and LoRA-training bags remain excluded by the benchmark.
+
+The existing report-regeneration command below regenerates both the binary
+and probability reports from `benchmark_summary.csv` without loading the VLM.
+If that CSV has no classifier scores, probability curves are skipped with an
+explicit reason rather than substituting the VLM's binary outputs.
 
 ### VLM decision evaluation and binary ROC by failure category
 

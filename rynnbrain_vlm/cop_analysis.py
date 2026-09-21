@@ -123,6 +123,96 @@ def discover_saved_vectors(
     return records
 
 
+def write_failure_probability_report(
+    rows: list[dict[str, Any]], output_directory: Path, *,
+    input_modes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Summarize held-out classifier probabilities by ground truth, per mode."""
+    output_directory.mkdir(parents=True, exist_ok=True)
+    modes = sorted(set(input_modes or []) | {str(row["input_mode"]) for row in rows if row.get("input_mode")})
+    summary_rows = []
+    mode_reports = []
+    columns = ["input_mode", "ground_truth_label", "count", "mean_percent", "median_percent",
+               "q1_percent", "q3_percent", "min_percent", "max_percent"]
+    for mode in modes:
+        groups: dict[str, list[float]] = {"normal": [], "fail": []}
+        excluded = {"unknown_label": 0, "missing_probability": 0, "invalid_probability": 0}
+        for row in rows:
+            if row.get("input_mode") != mode:
+                continue
+            label = _canonical_label(row.get("ground_truth_label"))
+            if label not in groups:
+                excluded["unknown_label"] += 1
+                continue
+            value = row.get("classifier_failure_probability")
+            if value is None or value == "":
+                excluded["missing_probability"] += 1
+                continue
+            try:
+                probability = float(value)
+            except (TypeError, ValueError):
+                probability = float("nan")
+            if not np.isfinite(probability) or not 0 <= probability <= 1:
+                excluded["invalid_probability"] += 1
+                continue
+            groups[label].append(100.0 * probability)
+        summaries = []
+        for label, values in groups.items():
+            summary = {column: None for column in columns}
+            summary.update(input_mode=mode, ground_truth_label=label, count=len(values))
+            if values:
+                q1, median, q3 = np.quantile(values, [0.25, 0.5, 0.75])
+                summary.update(mean_percent=float(np.mean(values)), median_percent=float(median),
+                               q1_percent=float(q1), q3_percent=float(q3),
+                               min_percent=min(values), max_percent=max(values))
+            summaries.append(summary)
+        summary_rows.extend(summaries)
+        plot_path = output_directory / f"benchmark_failure_probability_{_slug(mode)}.png"
+        valid_count = sum(len(values) for values in groups.values())
+        if valid_count:
+            import matplotlib
+            matplotlib.use("Agg", force=True)
+            import matplotlib.pyplot as plt
+
+            figure, axis = plt.subplots(figsize=(7, 5))
+            try:
+                for position, (label, color) in enumerate((("normal", "#4878cf"), ("fail", "#d65f5f")), start=1):
+                    values = groups[label]
+                    if values:
+                        boxes = axis.boxplot([values], positions=[position], widths=0.42, patch_artist=True,
+                                             showfliers=False, medianprops={"color": "#202020", "linewidth": 2})
+                        boxes["boxes"][0].set(facecolor=color, alpha=0.3)
+                        jitter = np.random.default_rng(42).uniform(-0.09, 0.09, len(values))
+                        axis.scatter(position + jitter, values, s=22, color=color, alpha=0.7, zorder=3)
+                    else:
+                        axis.text(position, 50, "No scored bags", ha="center", color="#666666")
+                axis.set_xticks([1, 2], [f"Successful\n(n={len(groups['normal'])})", f"Failed\n(n={len(groups['fail'])})"])
+                axis.set(xlim=(0.5, 2.5), ylim=(-3, 103), ylabel="Failure probability (%)",
+                         xlabel="Ground-truth execution outcome", title=f"CoP failure probability — {mode}")
+                axis.set_yticks(range(0, 101, 20))
+                axis.grid(axis="y", alpha=0.2)
+                axis.spines[["top", "right"]].set_visible(False)
+                figure.text(0.5, 0.015, "Box: middle 50% · Line: median · Whiskers: 1.5×IQR · Dots: individual bags",
+                            ha="center", fontsize=8, color="#555555")
+                figure.tight_layout(rect=(0, 0.04, 1, 1))
+                figure.savefig(plot_path, dpi=180)
+            finally:
+                plt.close(figure)
+        else:
+            # Do not leave a previous run's plot masquerading as this result.
+            plot_path.unlink(missing_ok=True)
+        mode_reports.append({"input_mode": mode, "status": "created" if valid_count else "skipped",
+                             "reason": None if valid_count else "No valid probabilities with known ground truth.",
+                             "plot_file": str(plot_path) if valid_count else None,
+                             "scored_rows": valid_count, "excluded_rows": excluded, "groups": summaries})
+    csv_path = output_directory / "benchmark_failure_probability_summary.csv"
+    pd.DataFrame(summary_rows, columns=columns).to_csv(csv_path, index=False)
+    return {"grouping": "ground_truth_label", "units": "percent",
+            "note": "Classifier estimates; groups are actual outcomes, not predicted decisions. Input modes are kept separate.",
+            "unassigned_mode_rows": sum(not bool(row.get("input_mode")) for row in rows),
+            "summary_csv": str(csv_path), "modes": mode_reports}
+
+
 def pca_2d(
     vectors: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

@@ -30,8 +30,8 @@ from typing import Any
 import pandas as pd
 
 from build_dataset_manifest import discover_bags, infer_bag_record
-from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report
-from rynnbrain_vlm.cop_analysis import analyze_saved_vectors
+from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report, write_probability_roc_report
+from rynnbrain_vlm.cop_analysis import analyze_saved_vectors, write_failure_probability_report
 from rynnbrain_vlm.model import RynnBrainModel
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
 
@@ -105,6 +105,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--skip-dino", action="store_true", help="Reuse already-generated per-bag videos/CSVs.")
     parser.add_argument("--skip-vlm", action="store_true", help="Only run the DINO stage.")
+    parser.add_argument("--prepare-classifier", action="store_true", help="Enable classifier preparation/scoring for this run even if disabled in config; otherwise preparation is automatic when cop_classifier.enabled=true.")
     return parser.parse_args()
 
 
@@ -120,6 +121,15 @@ def _excluded_bag_names(
         names |= adapter_training_bag_names(adapter_path)
     if not include_nominal_bags:
         names |= {Path(bag).name for bag in config.get("nominal_bags", [])}
+    classifier = rynnbrain.get("cop_classifier", {})
+    if classifier.get("enabled", False):
+        training = classifier.get("training", {})
+        for key in ("bags", "normal_bags", "failure_bags"):
+            names |= {str(bag).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] for bag in training.get(key, [])}
+        for path in classifier.get("model_paths", {}).values():
+            metadata = Path(path).with_suffix(".json")
+            if metadata.is_file():
+                names |= set(json.loads(metadata.read_text(encoding="utf-8")).get("training_bags", []))
     return names
 
 
@@ -266,7 +276,7 @@ def _select_named_records(
     excluded = sorted(set(requested_names) & excluded_names)
     if excluded:
         raise ValueError(
-            "The following selected bags are nominal/reference memory or LoRA training bags "
+            "The following selected bags are nominal/reference memory, LoRA training or classifier training bags "
             "and cannot be evaluation samples: " + ", ".join(excluded)
         )
 
@@ -317,6 +327,33 @@ def main() -> None:
     benchmark_root = arguments.benchmark_dir or Path(f"{base_vlm_output}_benchmark")
     benchmark_root.mkdir(parents=True, exist_ok=True)
 
+    model: RynnBrainModel | None = None
+    reference_response = None
+    if arguments.prepare_classifier and arguments.skip_vlm:
+        raise ValueError("--prepare-classifier requires VLM evaluation; remove --skip-vlm.")
+    prepare_classifier = not arguments.skip_vlm and (
+        arguments.prepare_classifier or bool(vlm.get("cop_classifier", {}).get("enabled", False))
+    )
+    if prepare_classifier:
+        from rynnbrain_vlm.cop_classifier import (
+            configured_training_settings, prepare_training_vectors, train_from_saved_vectors,
+        )
+        # Enable scoring only in this run; do not rewrite the user's config.
+        vlm["cop_classifier"] = {**vlm.get("cop_classifier", {}), "enabled": True}
+        vlm["cop_vectors"] = {**vlm.get("cop_vectors", {}), "enabled": True}
+        config["rynnbrain"] = vlm
+        settings_by_mode = [configured_training_settings(arguments.config, mode)
+                            for mode in vlm.get("input_modes", ["raw"])]
+        for settings in settings_by_mode:
+            configured_path = vlm["cop_classifier"].get("model_paths", {}).get(settings["input_mode"])
+            if not configured_path or Path(configured_path).resolve() != settings["output_file"].resolve():
+                raise ValueError("Classifier training output_file must match model_paths for benchmark scoring.")
+        print("Loading RynnBrain once for classifier preparation and benchmark evaluation...")
+        model = RynnBrainModel(vlm["model"])
+        for settings in settings_by_mode:
+            paths, reference_response = prepare_training_vectors(config, settings, model=model, data_root=data_root)
+            train_from_saved_vectors(**settings, metadata_paths=paths)
+
     print(f"Scanning bags under: {data_root}")
     all_bags = discover_bags(data_root, recursive=not arguments.no_recursive)
     excluded_names = _excluded_bag_names(config, arguments.include_nominal_bags)
@@ -342,7 +379,7 @@ def main() -> None:
     )
     selection_df = pd.DataFrame(records)
     selection_df.to_csv(benchmark_root / "benchmark_bag_selection.csv", index=False)
-    print(f"Found {len(all_bags)} bag(s), excluding {len(excluded_names)} nominal/reference/LoRA-training bag(s).")
+    print(f"Found {len(all_bags)} bag(s), excluding {len(excluded_names)} nominal/reference/LoRA/classifier-training bag(s).")
     print(f"Benchmarking {len(records)} demonstration(s).")
     selection_columns = ["bag_name", "label"]
     if records and "label_source" in selection_df:
@@ -351,8 +388,7 @@ def main() -> None:
 
     candidates = records[: arguments.limit] if arguments.limit else records
 
-    model: RynnBrainModel | None = None
-    if not arguments.skip_vlm:
+    if not arguments.skip_vlm and model is None:
         print("\nLoading RynnBrain model once for the whole benchmark...")
         model = RynnBrainModel(vlm["model"])
 
@@ -382,7 +418,8 @@ def main() -> None:
             config_bag["output_dir"] = str(bag_output_dir)
             try:
                 rows, frame_metadata, raw_records, task_description = evaluate_multiturn(
-                    model, config_bag, vlm_bag, frame_count, generation, Path(vlm_bag["output_dir"])
+                    model, config_bag, vlm_bag, frame_count, generation, Path(vlm_bag["output_dir"]),
+                    reference_response=reference_response,
                 )
                 write_multiturn_outputs(
                     Path(vlm_bag["output_dir"]), rows, frame_metadata, raw_records, task_description
@@ -449,8 +486,21 @@ def main() -> None:
     clean_report_path = benchmark_root / "benchmark_clean.csv"
     clean_report.to_csv(clean_report_path, index=False)
     statistics = _report_statistics(master_rows)
+    statistics["failure_probability"] = write_failure_probability_report(
+        master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"])
+    )
+    if any(row.get("classifier_decision") is not None for row in master_rows):
+        statistics["classifier"] = _report_statistics([
+            {**{key: row.get(key) for key in ("bag_name", "ground_truth_label", "input_mode")},
+             "decision": row.get("classifier_decision"),
+             "decision_correct": row.get("classifier_decision_correct")}
+            for row in master_rows
+        ])
     roc_report = write_roc_report(master_rows, benchmark_root)
     statistics["roc"] = roc_report
+    statistics["probability_roc"] = write_probability_roc_report(
+        master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"])
+    )
     statistics_path = benchmark_root / "benchmark_statistics.json"
     statistics_path.write_text(
         json.dumps(statistics, indent=2) + "\n", encoding="utf-8"
@@ -478,9 +528,16 @@ def main() -> None:
     print(f"Summary table: {summary_path}")
     print(f"Clean report: {clean_report_path}")
     print(f"Statistics: {statistics_path}")
+    for mode in statistics["failure_probability"]["modes"]:
+        if mode["plot_file"]:
+            print(f"Failure probability boxplot ({mode['input_mode']}): {mode['plot_file']}")
     print(f"VLM decision ROC and per-category metrics: {benchmark_root / 'benchmark_roc'}")
     print("  Binary decision AUROC equals balanced accuracy on decided bags; see abstention counts and coverage.")
     for metric in roc_report["metrics"]:
+        value = f"AUROC={metric['auroc']:.3f}" if metric["status"] == "created" else metric["reason"]
+        print(f"  {metric['input_mode']} / {metric['failure_category']}: {value}")
+    print(f"CoP probability ROC/AUROC: {benchmark_root / 'benchmark_probability_roc'}")
+    for metric in statistics["probability_roc"]["metrics"]:
         value = f"AUROC={metric['auroc']:.3f}" if metric["status"] == "created" else metric["reason"]
         print(f"  {metric['input_mode']} / {metric['failure_category']}: {value}")
     if statistics["scored_rows"]:

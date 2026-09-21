@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from rynnbrain_vlm.benchmark_roc import failure_category, roc_curve, write_roc_report
+from rynnbrain_vlm.benchmark_roc import failure_category, roc_curve, write_roc_report, write_probability_roc_report
 
 
 class BenchmarkRocTests(unittest.TestCase):
@@ -165,6 +165,69 @@ class BenchmarkRocTests(unittest.TestCase):
                 metric = write_roc_report(rows, Path(temporary_directory))["metrics"][0]
                 self.assertEqual(metric["auroc"], 0.5)
                 self.assertEqual(metric["accuracy"], 0.5)
+
+    def test_probability_roc_sweeps_scores_independently_of_decisions_and_keeps_categories_separate(self):
+        specifications = [
+            ("n1", "normal", 0.1, "Failure_1_grasp_miss", "raw"),
+            ("n2", "normal", 0.4, "Failure_1_grasp_miss", "raw"),
+            ("f1", "fail", 0.35, "Failure_1_grasp_miss", "raw"),
+            ("f2", "fail", 0.8, "Failure_1_grasp_miss", "raw"),
+            ("f3", "fail", 0.05, "Failure_2_slip_at_start", "raw"),
+            ("n1", "normal", 0.9, "Failure_1_grasp_miss", "heatmap"),
+            ("f1", "fail", 0.1, "Failure_1_grasp_miss", "heatmap"),
+        ]
+        rows = [{**self._row(name, label, "uncertain", category, mode),
+                 "classifier_failure_probability": probability, "classifier_decision": "success"}
+                for name, label, probability, category, mode in specifications]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = write_probability_roc_report(rows, root)
+            metrics = {(item["input_mode"], item["failure_category"]): item for item in report["metrics"]}
+            self.assertEqual(report["score_column"], "classifier_failure_probability")
+            self.assertEqual(metrics["raw", "Failure_1_grasp_miss"]["auroc"], 0.75)
+            self.assertEqual(metrics["raw", "Failure_2_slip_at_start"]["auroc"], 0.0)
+            self.assertEqual(metrics["raw", "all_failures"]["auroc"], 0.5)
+            self.assertEqual(metrics["heatmap", "all_failures"]["auroc"], 0.0)
+            self.assertEqual(metrics["raw", "Failure_1_grasp_miss"]["failure_count"], 2)
+            self.assertEqual(metrics["raw", "Failure_2_slip_at_start"]["normal_count"], 2)
+            points = pd.read_csv(root / "benchmark_probability_roc/roc_points.csv")
+            selected = points[(points.input_mode == "raw") & (points.failure_category == "Failure_1_grasp_miss")]
+            np.testing.assert_allclose(selected.threshold, [np.inf, 0.8, 0.4, 0.35, 0.1])
+            np.testing.assert_allclose(selected.false_positive_rate, [0, 0, 0.5, 0.5, 1])
+            np.testing.assert_allclose(selected.true_positive_rate, [0, 0.5, 0.5, 1, 1])
+            self.assertEqual(len(report["plot_files"]), 4)
+            for path in report["plot_files"]:
+                self.assertGreater(Path(path).stat().st_size, 0)
+            self.assertEqual(json.loads((root / "benchmark_probability_roc/roc_summary.json").read_text()), report)
+
+    def test_probability_missing_invalid_unknown_and_tied_scores_are_reported(self):
+        rows = [{**self._row("n", "normal", "failure"), "classifier_failure_probability": 0.3},
+                {**self._row("f", "fail", "success"), "classifier_failure_probability": 0.3}]
+        for index, value in enumerate([None, "", "not a number", float("inf"), -0.2, 1.2]):
+            rows.append({**self._row(str(index), "fail", "failure"), "classifier_failure_probability": value})
+        rows.append({**self._row("unknown", "unknown", "failure"), "classifier_failure_probability": 1})
+        rows.append(self._row("failed_run", "fail", None, mode=None))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = write_probability_roc_report(rows, root)
+            metric = report["metrics"][0]
+            self.assertEqual(metric["auroc"], 0.5)
+            self.assertEqual(metric["distinct_score_count"], 1)
+            self.assertEqual(metric["probability_coverage"], 0.25)
+            self.assertEqual(metric["missing_probability_count"], 2)
+            self.assertEqual(metric["invalid_probability_count"], 4)
+            self.assertEqual(metric["unknown_label_count"], 1)
+            self.assertEqual(report["rows_without_input_mode"], 1)
+            # A subsequent run with no scores must not retain the earlier plots.
+            empty = write_probability_roc_report([], root, input_modes=["raw"])
+            self.assertEqual(empty["plot_files"], [])
+            self.assertEqual(empty["metrics"][0]["status"], "skipped")
+            self.assertIsNone(empty["metrics"][0]["auroc"])
+            for path in report["plot_files"]:
+                self.assertFalse(Path(path).exists())
+            missing_class = write_probability_roc_report(rows[:1], root)
+            self.assertEqual(missing_class["plot_files"], [])
+            self.assertIsNone(missing_class["metrics"][0]["auroc"])
 
 
 if __name__ == "__main__":
