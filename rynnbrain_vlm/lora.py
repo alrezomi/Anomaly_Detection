@@ -147,4 +147,21 @@ def load_lora_adapter(model: Any, adapter_path: str | Path, model_id: str) -> tu
         with (root / filename).open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
-    return PeftModel.from_pretrained(model, str(root), is_trainable=False), digest.hexdigest(), training_bags
+    load_kwargs: dict[str, Any] = {}
+    device_map = getattr(model, "hf_device_map", None)
+    if device_map:
+        # PEFT 0.17 redispatches CPU/disk-offloaded models. Its default "auto"
+        # measures free VRAM AFTER the base weights were loaded, and can move
+        # a working GPU placement entirely onto CPU. Reuse the existing map,
+        # with the prefix introduced by PeftModel -> LoraModel -> base model.
+        load_kwargs["device_map"] = {
+            "base_model.model" + (f".{name}" if name else ""): device
+            for name, device in device_map.items()
+        }
+        devices = ", ".join(sorted({str(device) for device in device_map.values()}))
+        print(f"LoRA adapter: preserving base-model placement on [{devices}]")
+    adapted = PeftModel.from_pretrained(
+        model, str(root), config=config, is_trainable=False,
+        torch_device="cpu", **load_kwargs,
+    )
+    return adapted, digest.hexdigest(), training_bags

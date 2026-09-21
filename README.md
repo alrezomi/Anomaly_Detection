@@ -698,6 +698,10 @@ shown to this pass. The decision response and CoP vector remain unchanged;
 `visual_evidence`, its source, and any generation error are saved separately in
 the existing result files. The option defaults to false and needs no retraining.
 
+Adapter loading preserves the base model's device map instead of automatically
+recalculating it after the base weights have already occupied GPU memory.
+Startup prints the preserved placement and input execution device. CPU offload
+may still be necessary when the base model does not fit in available VRAM.
 Inference follows the input embedding's actual execution device after adapter
 loading, including Accelerate offload hooks. A stale `input_device: "cuda"`
 setting no longer sends tokens to CUDA when the model has been placed on CPU.
