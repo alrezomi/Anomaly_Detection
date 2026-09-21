@@ -13,10 +13,57 @@ from rynnbrain_vlm.cop_analysis import (
     discover_saved_vectors,
     pca_2d,
     save_cop_vector,
+    write_failure_probability_report,
 )
 
 
 class CoPAnalysisTests(unittest.TestCase):
+    def test_probability_statistics_use_ground_truth_percentages_and_separate_modes(self):
+        rows = [
+            {"input_mode": "raw", "ground_truth_label": "normal", "decision": "failure", "classifier_failure_probability": value}
+            for value in (0.1, 0.2, 0.3, 0.4)
+        ] + [
+            {"input_mode": "raw", "ground_truth_label": "fail", "decision": "success", "classifier_failure_probability": 0.9},
+            {"input_mode": "heatmap", "ground_truth_label": "normal", "classifier_failure_probability": 0.8},
+            {"input_mode": "raw", "ground_truth_label": "unknown", "classifier_failure_probability": 0.5},
+            {"input_mode": "raw", "ground_truth_label": "fail", "classifier_failure_probability": None},
+            {"input_mode": "raw", "ground_truth_label": "fail", "classifier_failure_probability": float("nan")},
+            {"input_mode": "raw", "ground_truth_label": "fail", "classifier_failure_probability": 1.2},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            report = write_failure_probability_report(rows, Path(directory))
+            modes = {mode["input_mode"]: mode for mode in report["modes"]}
+            raw = modes["raw"]
+            normal, failure = raw["groups"]
+            self.assertEqual(raw["scored_rows"], 5)
+            self.assertEqual(normal["count"], 4)
+            self.assertEqual(normal["mean_percent"], 25.0)
+            self.assertEqual(normal["median_percent"], 25.0)
+            self.assertEqual(normal["q1_percent"], 17.5)
+            self.assertEqual(normal["q3_percent"], 32.5)
+            self.assertEqual(failure["median_percent"], 90.0)
+            self.assertEqual(raw["excluded_rows"], {"unknown_label": 1, "missing_probability": 1, "invalid_probability": 2})
+            self.assertEqual(modes["heatmap"]["groups"][0]["median_percent"], 80.0)
+            self.assertEqual(modes["heatmap"]["groups"][1]["count"], 0)
+            self.assertIsNone(modes["heatmap"]["groups"][1]["median_percent"])
+            for mode in modes.values():
+                self.assertTrue(Path(mode["plot_file"]).is_file())
+            saved = pd.read_csv(report["summary_csv"])
+            self.assertEqual(len(saved), 4)
+            json.dumps(report, allow_nan=False)
+
+    def test_empty_probability_report_removes_stale_plot_without_inventing_zero_scores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stale = root / "benchmark_failure_probability_raw.png"
+            stale.write_bytes(b"old plot")
+            report = write_failure_probability_report([], root, input_modes=["raw"])
+            self.assertFalse(stale.exists())
+            mode = report["modes"][0]
+            self.assertEqual(mode["status"], "skipped")
+            self.assertIsNone(mode["plot_file"])
+            self.assertTrue(all(group["count"] == 0 and group["median_percent"] is None for group in mode["groups"]))
+
     def _save(
         self,
         root: Path,

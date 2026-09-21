@@ -766,23 +766,43 @@ or DINO run is required. Heatmap/generated-video modes still need the existing
 per-bag videos under `training.input_dir/<bag_name>/`. Global video overrides
 cannot identify separate training bags and are rejected during preparation.
 
-To prepare the classifier and benchmark in **one command**, use:
+With `rynnbrain.cop_classifier.enabled: true` and your existing explicit
+classifier training lists, the **normal benchmark command** now prepares the
+classifier automatically:
 
 ```bash
-docker compose run --rm --build benchmark --config /config/pipeline_config.json --skip-dino --prepare-classifier
+docker compose run --rm --build benchmark
 ```
 
-`--skip-dino` is suitable for raw ROS inputs when only VLM results are needed;
-omit it if DINO analysis is also required. The explicit `--prepare-classifier`
-option prepares only the configured training bags, fits the classifier, then
+The benchmark prepares only the configured training bags, fits the classifier, then
 evaluates each test bag once with probabilities already available. One VLM
-instance serves both phases. It enables vectors and classifier scoring for that
-run without editing the config. Training output paths must match `model_paths`.
+instance serves both phases. Compatible training vectors are reused; missing or
+stale vectors are refreshed. It enables vector capture for classifier scoring
+without editing the config. Training output paths must match `model_paths`.
+The small logistic classifier is fitted on each run; the VLM/LoRA is not retrained.
+Setting `cop_classifier.enabled: false` disables automatic classifier preparation
+and scoring. The older `--prepare-classifier` flag remains an optional way to
+enable them for one run. `--skip-vlm` does not prepare a classifier. The normal
+command continues to run DINO as before; `--skip-dino` remains optional for
+raw ROS inputs if only VLM results are wanted.
 Classifier-training bags (including those recorded in the saved classifier)
 are excluded from benchmark test results, even with `--include-nominal-bags`.
 The clean table includes `failure_probability`; statistics include a separate
-`classifier` section alongside the VLM's decision statistics. Without this
-option, benchmarks continue to load the saved classifier rather than train it.
+`classifier` section alongside the VLM's decision statistics. Single-bag
+RynnBrain evaluation continues to load the saved classifier without training.
+
+Each benchmark also creates `benchmark_failure_probability_<mode>.png`, a
+boxplot of classifier failure probabilities (0–100%) for ground-truth successful
+and failed executions. Groups use the recorded/manual ground truth, not the
+VLM or classifier decision. Boxes show the middle 50%, the line is the median,
+whiskers extend to observations within 1.5 IQR, and dots show individual bags.
+Input modes are plotted separately. `benchmark_failure_probability_summary.csv`
+and the `failure_probability` section in `benchmark_statistics.json` contain
+counts, mean, median, quartiles, minimum, and maximum in percent. Missing or
+invalid probabilities and unknown labels are excluded and counted. An absent
+class is shown as having no scored bags; a mode with no valid scores has no
+plot (and its previous plot is removed). These remain classifier estimates,
+not a guarantee of calibrated real-world failure frequency.
 
 To re-extract selected training vectors when bag/video contents changed without
 their paths changing, run:

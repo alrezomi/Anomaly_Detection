@@ -112,7 +112,7 @@ class ClassifierPreparationTests(unittest.TestCase):
         output = self.root / "benchmark"
         all_bags = [self.root / "data" / name for name in self.names + ["normal_test", "failure_test"]]
         argv = ["benchmark", "--config", str(self.config_path), "--data-root", str(self.root / "data"),
-                "--benchmark-dir", str(output), "--skip-dino", "--prepare-classifier"]
+                "--benchmark-dir", str(output)]
         # run_benchmark may have been imported by dependency-light selection tests.
         with patch("sys.argv", argv), patch.object(benchmark, "RynnBrainModel", return_value=self.model) as factory, \
              patch.object(benchmark, "discover_bags", return_value=all_bags), \
@@ -121,17 +121,35 @@ class ClassifierPreparationTests(unittest.TestCase):
                  "label": "fail" if path.name.startswith("failure") else "normal"}), \
              patch.object(benchmark, "evaluate_multiturn", self.run.evaluate_multiturn), \
              patch.object(benchmark, "write_multiturn_outputs", self.run.write_multiturn_outputs), \
+             patch.object(benchmark, "_run_dino_test", return_value=True) as dino, \
              patch.object(benchmark, "analyze_saved_vectors", return_value=None), \
              patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
             benchmark.main()
         factory.assert_called_once()
+        self.assertEqual(dino.call_count, 2)
         self.assertEqual(self.extractions, Counter(self.names + ["normal_test", "failure_test"]))
         clean = pd.read_csv(output / "benchmark_clean.csv")
         self.assertEqual(set(clean.bag_name), {"normal_test", "failure_test"})
         self.assertTrue(clean.failure_probability.notna().all())
         statistics = json.loads((output / "benchmark_statistics.json").read_text())
         self.assertEqual(statistics["classifier"]["scored_rows"], 2)
+        probability_report = statistics["failure_probability"]["modes"][0]
+        self.assertEqual(probability_report["scored_rows"], 2)
+        self.assertTrue(Path(probability_report["plot_file"]).is_file())
         self.assertEqual(json.loads(self.config_path.read_text()), self.config)
+
+    def test_dino_only_benchmark_does_not_load_vlm_or_prepare_enabled_classifier(self):
+        import run_benchmark as benchmark
+        output = self.root / "dino_only"
+        argv = ["benchmark", "--config", str(self.config_path), "--benchmark-dir", str(output), "--skip-vlm"]
+        with patch("sys.argv", argv), patch.object(benchmark, "discover_bags", return_value=[]), \
+             patch.object(benchmark, "RynnBrainModel", side_effect=AssertionError("VLM must not load")) as factory, \
+             patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
+            benchmark.main()
+        factory.assert_not_called()
+        self.assertFalse(self.model_path.exists())
+        statistics = json.loads((output / "benchmark_statistics.json").read_text())
+        self.assertEqual(statistics["failure_probability"]["modes"][0]["status"], "skipped")
 
 
 if __name__ == "__main__":

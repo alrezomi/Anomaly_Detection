@@ -31,7 +31,7 @@ import pandas as pd
 
 from build_dataset_manifest import discover_bags, infer_bag_record
 from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report
-from rynnbrain_vlm.cop_analysis import analyze_saved_vectors
+from rynnbrain_vlm.cop_analysis import analyze_saved_vectors, write_failure_probability_report
 from rynnbrain_vlm.model import RynnBrainModel
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
 
@@ -105,7 +105,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--skip-dino", action="store_true", help="Reuse already-generated per-bag videos/CSVs.")
     parser.add_argument("--skip-vlm", action="store_true", help="Only run the DINO stage.")
-    parser.add_argument("--prepare-classifier", action="store_true", help="Prepare selected CoP training vectors and fit the classifier before evaluating test bags, using one loaded VLM.")
+    parser.add_argument("--prepare-classifier", action="store_true", help="Enable classifier preparation/scoring for this run even if disabled in config; otherwise preparation is automatic when cop_classifier.enabled=true.")
     return parser.parse_args()
 
 
@@ -329,9 +329,12 @@ def main() -> None:
 
     model: RynnBrainModel | None = None
     reference_response = None
-    if arguments.prepare_classifier:
-        if arguments.skip_vlm:
-            raise ValueError("--prepare-classifier requires VLM evaluation; remove --skip-vlm.")
+    if arguments.prepare_classifier and arguments.skip_vlm:
+        raise ValueError("--prepare-classifier requires VLM evaluation; remove --skip-vlm.")
+    prepare_classifier = not arguments.skip_vlm and (
+        arguments.prepare_classifier or bool(vlm.get("cop_classifier", {}).get("enabled", False))
+    )
+    if prepare_classifier:
         from rynnbrain_vlm.cop_classifier import (
             configured_training_settings, prepare_training_vectors, train_from_saved_vectors,
         )
@@ -483,6 +486,9 @@ def main() -> None:
     clean_report_path = benchmark_root / "benchmark_clean.csv"
     clean_report.to_csv(clean_report_path, index=False)
     statistics = _report_statistics(master_rows)
+    statistics["failure_probability"] = write_failure_probability_report(
+        master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"])
+    )
     if any(row.get("classifier_decision") is not None for row in master_rows):
         statistics["classifier"] = _report_statistics([
             {**{key: row.get(key) for key in ("bag_name", "ground_truth_label", "input_mode")},
@@ -519,6 +525,9 @@ def main() -> None:
     print(f"Summary table: {summary_path}")
     print(f"Clean report: {clean_report_path}")
     print(f"Statistics: {statistics_path}")
+    for mode in statistics["failure_probability"]["modes"]:
+        if mode["plot_file"]:
+            print(f"Failure probability boxplot ({mode['input_mode']}): {mode['plot_file']}")
     print(f"VLM decision ROC and per-category metrics: {benchmark_root / 'benchmark_roc'}")
     print("  Binary decision AUROC equals balanced accuracy on decided bags; see abstention counts and coverage.")
     for metric in roc_report["metrics"]:
