@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 from typing import Any
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -240,6 +242,17 @@ def evaluate_multiturn(
     Returns (rows, frame_metadata, raw_records, task_description).
     """
     task_description = vlm.get("task_description", "Robot manipulation task")
+    provenance = {
+        "evaluation_id": str(uuid4()),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "sample_role": "classifier_training" if training_vectors_only else "evaluation",
+        "model_id": model.model_id,
+        "lora_adapter_path": getattr(model, "lora_adapter_path", None),
+        "lora_adapter_sha256": getattr(model, "adapter_identity", None),
+        "nominal_response_source": "base_model",
+        "nominal_response_reused": reference_response is not None,
+        "response_source": "lora_adapted_model" if getattr(model, "adapter_identity", None) else "base_model",
+    }
 
     if not training_vectors_only and Path(config["test_bag"]).name in getattr(model, "adapter_training_bags", set()):
         raise ValueError("This bag was used to train the loaded LoRA adapter; select a held-out evaluation bag.")
@@ -408,6 +421,7 @@ def evaluate_multiturn(
         classifier_decision: str | None = None
         classifier_threshold: float | None = None
         classifier_model_path: str | None = None
+        classifier_error: str | None = None
         if cop_vector is not None:
             text_config = getattr(model.model.config, "text_config", None)
             model_revision = getattr(model.model.config, "_commit_hash", None)
@@ -416,27 +430,30 @@ def evaluate_multiturn(
             )
             if classifier_enabled:
                 classifier = classifiers[mode]
-                if classifier.representation_id != COP_REPRESENTATION_ID:
-                    raise ValueError(
-                        "Classifier representation does not match the captured CoP vector."
-                    )
-                classifier_failure_probability = classifier.predict_failure_probability(
-                    cop_vector.numpy(),
-                    input_mode=mode,
-                    comparison_signature=comparison_signature,
-                )
-                classifier_decision = classifier.predict_label(
-                    classifier_failure_probability
-                )
                 classifier_threshold = classifier.threshold
                 classifier_model_path = str(
                     Path(str(classifier_config["model_paths"][mode])).resolve()
                 )
+                try:
+                    if classifier.representation_id != COP_REPRESENTATION_ID:
+                        raise ValueError("Classifier representation does not match the captured CoP vector.")
+                    classifier_failure_probability = classifier.predict_failure_probability(
+                        cop_vector.numpy(), input_mode=mode,
+                        comparison_signature=comparison_signature,
+                    )
+                    classifier_decision = classifier.predict_label(classifier_failure_probability)
+                except ValueError as error:
+                    # Incompatible scoring must not discard a completed VLM answer.
+                    # Leave the probability empty and report the reason explicitly.
+                    classifier_failure_probability = None
+                    classifier_error = str(error)
+                    print(f"Classifier scoring failed ({mode}); keeping VLM response and vector: {error}")
             vector_path, metadata_path = save_cop_vector(
                 output_directory,
                 mode,
                 cop_vector.numpy(),
                 {
+                    **provenance,
                     "representation_id": COP_REPRESENTATION_ID,
                     "representation_description": (
                         "Post-final-normalization language-decoder state at the "
@@ -454,6 +471,7 @@ def evaluate_multiturn(
                     "classifier_decision": classifier_decision,
                     "classifier_threshold": classifier_threshold,
                     "classifier_model_path": classifier_model_path,
+                    "classifier_error": classifier_error,
                     "comparison_signature": comparison_signature,
                 },
             )
@@ -513,9 +531,12 @@ def evaluate_multiturn(
                 "classifier_decision": classifier_decision,
                 "classifier_threshold": classifier_threshold,
                 "classifier_model_path": classifier_model_path,
+                "classifier_error": classifier_error,
+                **provenance,
             }
         )
         raw_records.append({
+            **provenance,
             "input_mode": mode,
             "evaluation_method": "multiturn",
             "turns": [
@@ -527,10 +548,13 @@ def evaluate_multiturn(
                         for label, image in nominal_images
                     ],
                     "response": nominal_response,
+                    "response_source": "base_model",
                 },
                 {
                     "role": "user",
                     "prompt": turn2_text,
+                    "response": response,
+                    "response_source": provenance["response_source"],
                     "images": [
                         {"label": label, "size": list(image.size)}
                         for label, image in inputs
@@ -558,6 +582,7 @@ def evaluate_multiturn(
             "classifier_decision": classifier_decision,
             "classifier_threshold": classifier_threshold,
             "classifier_model_path": classifier_model_path,
+            "classifier_error": classifier_error,
         })
         print(f"{mode} (multiturn): decision={decision}, confidence={confidence}")
         if classifier_failure_probability is not None:
@@ -576,8 +601,24 @@ def write_multiturn_outputs(
     frame_metadata: list[dict[str, Any]],
     raw_records: list[dict[str, Any]],
     task_description: str,
+    *,
+    merge_modes: bool = False,
 ) -> None:
     """Persist the same CSV/JSON files run_test_multiturn has always written."""
+    if merge_modes:
+        # Classifier preparation extracts one mode at a time in the same folder.
+        # Keep the other modes' responses when updating this mode.
+        modes = {row["input_mode"] for row in rows}
+        try:
+            previous = pd.read_csv(output_directory / "rynnbrain_results_multiturn.csv", keep_default_na=False).to_dict("records")
+            rows = [row for row in previous if row.get("input_mode") not in modes] + rows
+        except (OSError, ValueError):
+            pass
+        try:
+            previous = json.loads((output_directory / "rynnbrain_responses_multiturn.json").read_text(encoding="utf-8"))
+            raw_records = [row for row in previous["results"] if row.get("input_mode") not in modes] + raw_records
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     pd.DataFrame(rows).to_csv(output_directory / "rynnbrain_results_multiturn.csv", index=False)
     pd.DataFrame(frame_metadata).to_csv(
         output_directory / "selected_vlm_frames.csv", index=False
@@ -595,6 +636,25 @@ def write_multiturn_outputs(
         encoding="utf-8",
     )
     print(f"Results saved to: {output_directory}")
+
+
+def multiturn_outputs_match(output_directory: Path, metadata: dict[str, Any]) -> bool:
+    """Only reuse a vector when its original full response was also persisted."""
+    evaluation_id = metadata.get("evaluation_id")
+    if not evaluation_id or not (output_directory / "selected_vlm_frames.csv").is_file():
+        return False
+    try:
+        saved = json.loads((output_directory / "rynnbrain_responses_multiturn.json").read_text(encoding="utf-8"))
+        records = pd.read_csv(output_directory / "rynnbrain_results_multiturn.csv", keep_default_na=False).to_dict("records")
+        mode = metadata["input_mode"]
+        responses = [row for row in saved["results"] if row.get("input_mode") == mode and row.get("evaluation_id") == evaluation_id]
+        rows = [row for row in records if row.get("input_mode") == mode and row.get("evaluation_id") == evaluation_id]
+        return (len(responses) == len(rows) == 1
+                and isinstance(responses[0].get("response"), str)
+                and rows[0].get("response") == responses[0]["response"]
+                and rows[0].get("nominal_response") == responses[0].get("nominal_response"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def run_test_multiturn(arguments: argparse.Namespace) -> None:

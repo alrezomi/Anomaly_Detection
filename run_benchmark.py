@@ -409,6 +409,7 @@ def main() -> None:
         dino_summary = _dino_summary(camera_topics, bag_output_dir) if dino_ok else {}
 
         rows: list[dict[str, Any]] = []
+        evaluation_error = None if dino_ok else "DINO processing failed; VLM evaluation was not run."
         if model is not None and dino_ok:
             vlm_bag = dict(vlm)
             vlm_bag["output_dir"] = str(bag_output_dir / "rynnbrain_multiturn")
@@ -426,6 +427,7 @@ def main() -> None:
                 )
             except Exception as error:
                 print(f"  [VLM FAILED] {bag_name}: {error}")
+                evaluation_error = str(error)
                 rows = []
 
         if not rows:
@@ -438,6 +440,7 @@ def main() -> None:
                 "confidence": None,
                 "decision_correct": None,
                 "response": None,
+                "evaluation_error": evaluation_error,
                 "cop_vector_path": None,
                 "cop_metadata_path": None,
                 "classifier_failure_probability": None,
@@ -460,6 +463,13 @@ def main() -> None:
                 "confidence": row["confidence"],
                 "decision_correct": _decision_correct(ground_truth, row["decision"]),
                 "response": row["response"],
+                "evaluation_error": None,
+                "evaluation_id": row.get("evaluation_id"),
+                "generated_at_utc": row.get("generated_at_utc"),
+                "model_id": row.get("model_id"),
+                "lora_adapter_path": row.get("lora_adapter_path"),
+                "lora_adapter_sha256": row.get("lora_adapter_sha256"),
+                "response_source": row.get("response_source"),
                 "cop_vector_path": row.get("cop_vector_path"),
                 "cop_metadata_path": row.get("cop_metadata_path"),
                 "classifier_failure_probability": row.get(
@@ -474,6 +484,7 @@ def main() -> None:
                 ),
                 "classifier_threshold": row.get("classifier_threshold"),
                 "classifier_model_path": row.get("classifier_model_path"),
+                "classifier_error": row.get("classifier_error"),
                 **dino_summary,
             })
 

@@ -195,6 +195,76 @@ class LoraGradientTests(unittest.TestCase):
                     max_new_tokens=1, do_sample=False, pad_token_id=0,
                 )
 
+    def test_real_lora_cached_reference_matches_single_bag_generation_and_vector(self):
+        from PIL import Image
+        from transformers import BatchFeature
+        from peft.tuners.lora.layer import LoraLayer
+        from rynnbrain_vlm.model import RynnBrainModel
+
+        torch = self.torch
+        wrapper = RynnBrainModel.__new__(RynnBrainModel)
+        wrapper.input_device = torch.device("cpu")
+        wrapper.max_image_size = 640
+        wrapper.adapter_identity = "test-adapter"
+        wrapper.model = attach_lora(self.tiny_model(), {"rank": 2, "alpha": 4, "dropout": 0.0}).eval()
+        with torch.no_grad():
+            for name, parameter in wrapper.model.named_parameters():
+                if "lora_B" in name:
+                    parameter.fill_(0.03)
+        before = {name: value.detach().clone() for name, value in wrapper.model.named_parameters()}
+        prefix, _ = self.sample()
+        conversations = []
+
+        class Processor:
+            def apply_chat_template(self, conversation, **kwargs):
+                conversations.append(conversation.copy())
+                ids, image_count = [], 0
+                for message in conversation:
+                    ids.append(7)
+                    for item in message["content"]:
+                        if item["type"] == "image":
+                            ids.extend([4, 3, 5])
+                            image_count += 1
+                        else:
+                            ids.append(8 + sum(map(ord, item["text"])) % 24)
+                return BatchFeature({
+                    "input_ids": torch.tensor([ids]),
+                    "attention_mask": torch.ones((1, len(ids)), dtype=torch.long),
+                    "pixel_values": prefix["pixel_values"].repeat(image_count, 1),
+                    "image_grid_thw": prefix["image_grid_thw"].repeat(image_count, 1),
+                })
+
+            def decode(self, tokens, **kwargs):
+                return str(tokens.tolist())
+
+        wrapper.processor = Processor()
+        turns = [{"role": "user", "text": text, "images": [(text, Image.new("RGB", (2, 2)))]}
+                 for text in ("Reference", "Execution")]
+        layer = next(module for module in wrapper.model.modules() if isinstance(module, LoraLayer))
+        adapter_states, inputs_seen = [], []
+        generate = wrapper.model.generate
+
+        def tracked_generate(**kwargs):
+            adapter_states.append(not layer.disable_adapters)
+            inputs_seen.append(kwargs["input_ids"].clone())
+            return generate(**kwargs)
+
+        generation = {"max_new_tokens": 1, "do_sample": False}
+        with patch.object(wrapper.model, "generate", side_effect=tracked_generate):
+            single = wrapper.generate_multiturn_with_cop_vector(turns, generation)
+            cached = wrapper.generate_multiturn_with_cop_vector(turns, generation, reference_response=single.nominal_response)
+        self.assertEqual(adapter_states, [False, True, True])
+        self.assertEqual(single.evaluation_response, cached.evaluation_response)
+        torch.testing.assert_close(single.cop_vector, cached.cop_vector, rtol=0, atol=0)
+        torch.testing.assert_close(inputs_seen[1], inputs_seen[2], rtol=0, atol=0)
+        self.assertEqual(conversations[-1][1]["content"][0]["text"], single.nominal_response)
+        self.assertEqual(sum(item["type"] == "image" for message in conversations[-1] for item in message["content"]), 2)
+        self.assertFalse(layer.disable_adapters)
+        self.assertTrue(all(torch.equal(before[name], value) for name, value in wrapper.model.named_parameters()))
+        with wrapper.model.disable_adapter():
+            base = wrapper.generate_multiturn_with_cop_vector(turns, generation, reference_response=single.nominal_response)
+        self.assertFalse(torch.allclose(base.cop_vector, cached.cop_vector))
+
     def test_adapter_keeps_root_and_module_maps_without_recalculating_memory(self):
         for device_map in ({"": "cpu"}, {"model": "cpu", "lm_head": "cpu"}):
             with self.subTest(device_map=device_map):

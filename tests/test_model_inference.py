@@ -54,6 +54,17 @@ class ModelInferenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "meta"):
             self.resolve_device(model)
 
+    def test_configured_adapter_is_loaded_and_its_identity_is_retained(self):
+        model = self.embedding_model()
+        with patch("rynnbrain_vlm.model.AutoProcessor.from_pretrained"), \
+             patch("rynnbrain_vlm.model.AutoModelForImageTextToText.from_pretrained", return_value=model), \
+             patch("rynnbrain_vlm.lora.load_lora_adapter", return_value=(model, "adapter-sha256", {"training-bag"})) as loader:
+            wrapper = self.wrapper_class({"model_id": "test", "lora_adapter_path": "/saved/lora_adapter"})
+        loader.assert_called_once_with(model, "/saved/lora_adapter", "test")
+        self.assertEqual(wrapper.lora_adapter_path, "/saved/lora_adapter")
+        self.assertEqual(wrapper.adapter_identity, "adapter-sha256")
+        self.assertEqual(wrapper.adapter_training_bags, {"training-bag"})
+
     def test_real_accelerate_disk_offload_generation_on_cpu(self):
         try:
             from accelerate import disk_offload
@@ -211,6 +222,46 @@ class ModelInferenceTests(unittest.TestCase):
         self.assertEqual(cached.evaluation_response, original.evaluation_response)
         torch.testing.assert_close(cached.cop_vector, original.cop_vector)
         self.assertEqual(conversations[-1][1]["content"][0]["text"], original.nominal_response)
+
+    def test_full_answer_survives_disabled_explanation_and_classifier_mismatch(self):
+        import json
+        from pathlib import Path
+        import tempfile
+        from unittest.mock import Mock
+        from rynnbrain_vlm.model import COP_REPRESENTATION_ID
+        from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
+
+        answer = "Decision: failure\nVisual evidence: The object remains at the start."
+        model = SimpleNamespace(
+            model_id="test", adapter_identity="adapter", lora_adapter_path="/saved/adapter",
+            model=SimpleNamespace(config=SimpleNamespace(text_config=SimpleNamespace(hidden_size=2))),
+            generate_multiturn_with_cop_vector=Mock(return_value=SimpleNamespace(
+                nominal_response="Nominal description", evaluation_response=answer,
+                cop_vector=self.torch.tensor([1.0, 2.0]),
+            )),
+            generate_visual_evidence=Mock(side_effect=AssertionError("Explanation pass must not run")),
+        )
+        classifier = SimpleNamespace(input_mode="raw", representation_id=COP_REPRESENTATION_ID, threshold=0.5,
+            predict_failure_probability=Mock(side_effect=ValueError("Classifier signature mismatch")))
+        config = {"test_bag": "/data/test", "output_dir": "/outputs/test", "camera_topics": ["camera"]}
+        vlm = {"source": "rosbag", "input_modes": ["raw"], "reference_bags": ["/data/reference"],
+               "cop_classifier": {"enabled": True, "model_paths": {"raw": "/saved/classifier.npz"}}}
+        with tempfile.TemporaryDirectory() as directory, patch("rynnbrain_vlm.run._raw_inputs", return_value=([], [])), \
+             patch("rynnbrain_vlm.run._save_inputs"), patch("builtins.print"), \
+             patch("rynnbrain_vlm.run.load_classifier", return_value=classifier):
+            root = Path(directory)
+            rows, frames, records, task = evaluate_multiturn(model, config, vlm, 8, {"explain_decision": False}, root)
+            write_multiturn_outputs(root, rows, frames, records, task)
+            saved = json.loads((root / "rynnbrain_responses_multiturn.json").read_text())["results"][0]
+            self.assertEqual(saved["response"], answer)
+            self.assertEqual(saved["turns"][1]["response"], answer)
+            self.assertEqual(rows[0]["decision"], "failure")
+            self.assertEqual(saved["classifier_error"], "Classifier signature mismatch")
+            self.assertIsNone(saved["classifier_failure_probability"])
+            self.assertTrue(Path(saved["cop_vector_path"]).is_file())
+            self.assertEqual(saved["lora_adapter_sha256"], "adapter")
+            self.assertEqual(saved["response_source"], "lora_adapted_model")
+            model.generate_visual_evidence.assert_not_called()
 
 
 if __name__ == "__main__":

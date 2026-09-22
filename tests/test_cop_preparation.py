@@ -61,6 +61,7 @@ class ClassifierPreparationTests(unittest.TestCase):
                 cop_vector=torch.tensor([sign, 0.1 if name.endswith("1") else 0.2, 0.3, 0.4]))
         self.model = SimpleNamespace(
             model_id="test", adapter_identity="adapter_v1", adapter_training_bags=set(self.names),
+            lora_adapter_path="/saved/adapter",
             model=SimpleNamespace(config=SimpleNamespace(text_config=SimpleNamespace(hidden_size=4))),
             generate_nominal=Mock(return_value="reference response"),
             generate_multiturn_with_cop_vector=Mock(side_effect=generate),
@@ -105,6 +106,50 @@ class ClassifierPreparationTests(unittest.TestCase):
             prepare_training_vectors(self.config, self.settings, model=self.model)
         self.model.generate_nominal.assert_not_called()
 
+    def test_training_responses_are_saved_and_missing_or_stale_files_are_repaired(self):
+        paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
+        for path in paths:
+            directory = path.parent.parent
+            metadata = json.loads(path.read_text())
+            response = json.loads((directory / "rynnbrain_responses_multiturn.json").read_text())["results"][0]
+            row = pd.read_csv(directory / "rynnbrain_results_multiturn.csv").iloc[0]
+            self.assertTrue((directory / "selected_vlm_frames.csv").is_file())
+            self.assertEqual(response["evaluation_id"], metadata["evaluation_id"])
+            self.assertEqual(row.evaluation_id, metadata["evaluation_id"])
+            self.assertEqual(response["sample_role"], "classifier_training")
+            self.assertEqual(response["lora_adapter_sha256"], "adapter_v1")
+            self.assertEqual(response["lora_adapter_path"], "/saved/adapter")
+            self.assertEqual(response["turns"][0]["response"], "reference response")
+            self.assertEqual(response["turns"][1]["response"], row.response)
+        directory = paths[0].parent.parent
+        for filename in ("rynnbrain_results_multiturn.csv", "rynnbrain_responses_multiturn.json", "selected_vlm_frames.csv"):
+            (directory / filename).unlink()
+            before = self.extractions.copy()
+            prepare_training_vectors(self.config, self.settings, model=self.model)
+            self.assertEqual(self.extractions - before, Counter({"normal_1": 1}))
+        # A response left over from an older run must not validate a newer vector.
+        response_path = directory / "rynnbrain_responses_multiturn.json"
+        stale = json.loads(response_path.read_text())
+        stale["results"][0]["evaluation_id"] = "older-run"
+        response_path.write_text(json.dumps(stale))
+        before = self.extractions.copy()
+        prepare_training_vectors(self.config, self.settings, model=self.model)
+        self.assertEqual(self.extractions - before, Counter({"normal_1": 1}))
+
+    def test_preparation_preserves_other_modes_and_reuses_complete_responses(self):
+        prepare_training_vectors(self.config, self.settings, model=self.model)
+        heatmap_settings = {**self.settings, "input_mode": "heatmap"}
+        with patch("rynnbrain_vlm.run._heatmap_inputs", return_value=([("heatmap", Image.new("RGB", (2, 2)))], [])):
+            prepare_training_vectors(self.config, heatmap_settings, model=self.model)
+            before = self.extractions.copy()
+            prepare_training_vectors(self.config, self.settings, model=self.model)
+            prepare_training_vectors(self.config, heatmap_settings, model=self.model)
+        self.assertEqual(self.extractions, before)
+        directory = self.root / "vectors/normal_1/rynnbrain_multiturn"
+        responses = json.loads((directory / "rynnbrain_responses_multiturn.json").read_text())["results"]
+        self.assertEqual({row["input_mode"] for row in responses}, {"raw", "heatmap"})
+        self.assertEqual(set(pd.read_csv(directory / "rynnbrain_results_multiturn.csv").input_mode), {"raw", "heatmap"})
+
     def test_benchmark_prepares_once_excludes_training_and_populates_reports(self):
         import run_benchmark as benchmark
         # Exercise real preparation, fitting, scoring, and CSV/JSON output; only
@@ -125,12 +170,20 @@ class ClassifierPreparationTests(unittest.TestCase):
              patch.object(benchmark, "analyze_saved_vectors", return_value=None), \
              patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
             benchmark.main()
-        factory.assert_called_once()
+        factory.assert_called_once_with(self.config["rynnbrain"]["model"])
         self.assertEqual(dino.call_count, 2)
         self.assertEqual(self.extractions, Counter(self.names + ["normal_test", "failure_test"]))
         clean = pd.read_csv(output / "benchmark_clean.csv")
         self.assertEqual(set(clean.bag_name), {"normal_test", "failure_test"})
         self.assertTrue(clean.failure_probability.notna().all())
+        summary = pd.read_csv(output / "benchmark_summary.csv")
+        self.assertTrue((summary.lora_adapter_sha256 == "adapter_v1").all())
+        self.assertTrue((summary.response_source == "lora_adapted_model").all())
+        for name in ("normal_test", "failure_test"):
+            response_path = output / name / "rynnbrain_multiturn/rynnbrain_responses_multiturn.json"
+            saved = json.loads(response_path.read_text())["results"][0]
+            self.assertEqual(saved["sample_role"], "evaluation")
+            self.assertEqual(saved["response"], summary.loc[summary.bag_name == name, "response"].iloc[0])
         statistics = json.loads((output / "benchmark_statistics.json").read_text())
         self.assertEqual(statistics["classifier"]["scored_rows"], 2)
         probability_report = statistics["failure_probability"]["modes"][0]
@@ -153,6 +206,25 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.assertFalse(self.model_path.exists())
         statistics = json.loads((output / "benchmark_statistics.json").read_text())
         self.assertEqual(statistics["failure_probability"]["modes"][0]["status"], "skipped")
+
+    def test_benchmark_records_why_a_bag_has_no_response(self):
+        import run_benchmark as benchmark
+        self.config["rynnbrain"]["cop_classifier"]["enabled"] = False
+        self.config_path.write_text(json.dumps(self.config))
+        output = self.root / "failed_benchmark"
+        bag = self.root / "data/normal_test"
+        argv = ["benchmark", "--config", str(self.config_path), "--benchmark-dir", str(output), "--skip-dino"]
+        with patch("sys.argv", argv), patch.object(benchmark, "RynnBrainModel", return_value=self.model), \
+             patch.object(benchmark, "discover_bags", return_value=[bag]), \
+             patch.object(benchmark, "infer_bag_record", return_value={"bag_name": bag.name, "bag_path": str(bag), "label": "normal"}), \
+             patch.object(benchmark, "evaluate_multiturn", side_effect=RuntimeError("test generation failed")), \
+             patch.object(benchmark, "analyze_saved_vectors", return_value=None), \
+             patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
+            benchmark.main()
+        row = pd.read_csv(output / "benchmark_summary.csv").iloc[0]
+        self.assertEqual(row.decision, "failed")
+        self.assertEqual(row.evaluation_error, "test generation failed")
+        self.assertTrue(pd.isna(row.response))
 
 
 if __name__ == "__main__":

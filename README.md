@@ -791,6 +791,30 @@ The clean table includes `failure_probability`; statistics include a separate
 `classifier` section alongside the VLM's decision statistics. Single-bag
 RynnBrain evaluation continues to load the saved classifier without training.
 
+Classifier preparation also saves the complete generated responses in each
+training bag's existing `rynnbrain_multiturn/` folder:
+`rynnbrain_results_multiturn.csv`, `rynnbrain_responses_multiturn.json`, and
+`selected_vlm_frames.csv`, alongside the selected images and CoP vectors.
+These bags are marked `sample_role: classifier_training` and still excluded
+from held-out benchmark statistics. Older preparation runs saved only images
+and vectors; their unsaved answers cannot be recovered from those vectors.
+The next normal preparation/benchmark run regenerates selected training bags
+whose response files are missing or cannot be matched to their vector. This
+includes legacy files without an `evaluation_id`; complete matching outputs
+are then reused. Multiple input modes retain their separate saved responses.
+
+In the response JSON and CSV, `nominal_response` describes the nominal
+reference (turn 1); `response` is the complete execution answer (turn 2).
+`generation.explain_decision: false` disables only the optional separate
+evidence pass. It never removes explanation text generated in the execution
+answer itself. Each new result records its generation time, evaluation ID,
+base model ID, loaded adapter path/SHA256, and response source. The vector
+metadata shares the same evaluation ID so the answer can be traced to its
+vector. Adapter information is also printed at startup and included in
+`benchmark_summary.csv`. A classifier compatibility error leaves probability
+empty and saves `classifier_error`, retaining the VLM answer and vector;
+other benchmark failures are recorded in `evaluation_error` in the summary.
+
 Each benchmark also creates `benchmark_failure_probability_<mode>.png`, a
 boxplot of classifier failure probabilities (0–100%) for ground-truth successful
 and failed executions. Groups use the recorded/manual ground truth, not the
