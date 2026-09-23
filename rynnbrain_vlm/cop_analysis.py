@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import textwrap
 from typing import Any
 
 import numpy as np
@@ -123,6 +124,94 @@ def discover_saved_vectors(
     return records
 
 
+def _probability_category(row: dict[str, Any]) -> str:
+    if _canonical_label(row.get("ground_truth_label")) == "normal":
+        return "Nominal"
+    category = row.get("failure_category")
+    if isinstance(category, str) and category.strip() and category.lower() not in {"nan", "none"}:
+        return category
+    return failure_category(str(row.get("bag_path") or row.get("test_bag") or ""), "fail")
+
+
+def _probability_point_offsets(values: list[float]) -> np.ndarray:
+    """Spread nearby scores horizontally without changing their probabilities."""
+    offsets = np.zeros(len(values))
+    candidates = np.asarray([0] + [sign * step for step in range(1, 6) for sign in (-1, 1)]) * 0.036
+    placed: list[int] = []
+    for index in np.argsort(values, kind="stable"):
+        nearby = [other for other in placed if abs(values[index] - values[other]) < 2.3]
+        # Prefer the centre, then the least crowded available position.
+        crowding = [sum(abs(candidate - offsets[other]) < 0.035 for other in nearby) for candidate in candidates]
+        offsets[index] = candidates[int(np.argmin(crowding))]
+        placed.append(index)
+    return offsets
+
+
+def _write_probability_plot(groups, points, styles, mode, plot_path):
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    categories = {category for entries in points.values() for category, _ in entries}
+    legend_labels = {
+        category: textwrap.fill("Successful execution" if category == "Nominal" else category.replace("_", " "), 35)
+        for category in styles if category in categories
+    }
+    legend_lines = sum(label.count("\n") + 1 for label in legend_labels.values())
+    figure, axis = plt.subplots(figsize=(11.2, max(6.4, 2.4 + legend_lines * 0.26)))
+    try:
+        figure.subplots_adjust(left=0.09, right=0.65, bottom=0.19, top=0.84)
+        figure.text(0.09, 0.94, "Failure probability by outcome", fontsize=20, weight="bold", color="#172b40")
+        figure.text(0.09, 0.89, f"CoP classifier  /  {mode} input  /  one marker per execution", fontsize=10, color="#607080")
+        tick_labels = []
+        for position, (label, color, title) in enumerate((("normal", "#2f78c4", "Successful"), ("fail", "#b75b61", "Failed")), start=1):
+            values = groups[label]
+            detail = f"n = {len(values)}"
+            if values:
+                detail += f"  ·  median {np.median(values):.1f}%"
+                axis.boxplot([values], positions=[position - 0.19], widths=0.23, patch_artist=True,
+                             showfliers=False, manage_ticks=False,
+                             boxprops={"facecolor": color, "alpha": 0.20, "edgecolor": color, "linewidth": 1.4},
+                             medianprops={"color": color, "linewidth": 2.4},
+                             whiskerprops={"color": color, "linewidth": 1.3},
+                             capprops={"color": color, "linewidth": 1.3})
+                offsets = _probability_point_offsets(values)
+                for category, style in styles.items():
+                    indices = [index for index, (name, _) in enumerate(points[label]) if name == category]
+                    if indices:
+                        axis.scatter(position + 0.16 + offsets[indices], np.asarray(values)[indices],
+                                     marker=style["marker"], color=style["color"], s=52,
+                                     edgecolors="white", linewidths=0.55, alpha=0.92, zorder=3)
+            else:
+                axis.text(position, 50, "No scored bags", ha="center", fontsize=10, color="#607080")
+            tick_labels.append(f"{title}\n{detail}")
+        axis.set_xticks([1, 2], tick_labels, fontsize=10)
+        axis.set(xlim=(0.48, 2.57), ylim=(-4, 104), ylabel="Predicted failure probability (%)")
+        axis.yaxis.label.set_size(11)
+        axis.yaxis.label.set_color("#34495e")
+        axis.set_yticks(range(0, 101, 20))
+        axis.tick_params(axis="both", length=0, pad=9, colors="#34495e")
+        axis.grid(axis="y", color="#e7ecf0", linewidth=0.8)
+        axis.set_axisbelow(True)
+        axis.spines[["top", "right", "left"]].set_visible(False)
+        axis.spines["bottom"].set_color("#cbd5df")
+        handles = [Line2D([], [], linestyle="none", marker=styles[category]["marker"],
+                          markerfacecolor=styles[category]["color"], markeredgecolor="white", markersize=8,
+                          label=label) for category, label in legend_labels.items()]
+        legend = axis.legend(handles=handles, title="Execution category", loc="upper left",
+                             bbox_to_anchor=(1.06, 1.01), frameon=False, fontsize=9,
+                             title_fontsize=11, labelspacing=1.05, handletextpad=0.7, borderaxespad=0)
+        legend.get_title().set_weight("bold")
+        figure.text(0.09, 0.065, "Groups show actual outcomes. Marker shape and colour identify the execution category.",
+                    fontsize=9, color="#607080")
+        figure.text(0.09, 0.032, "Box: middle 50%  ·  Line: median  ·  Whiskers: 1.5 × IQR  ·  Horizontal spread improves visibility only",
+                    fontsize=8, color="#607080")
+        figure.savefig(plot_path, dpi=220, facecolor="white", bbox_inches="tight")
+    finally:
+        plt.close(figure)
+
+
 def write_failure_probability_report(
     rows: list[dict[str, Any]], output_directory: Path, *,
     input_modes: list[str] | None = None,
@@ -132,10 +221,13 @@ def write_failure_probability_report(
     modes = sorted(set(input_modes or []) | {str(row["input_mode"]) for row in rows if row.get("input_mode")})
     summary_rows = []
     mode_reports = []
+    styles = _pca_category_styles({_probability_category(row) for row in rows
+                                   if _canonical_label(row.get("ground_truth_label")) in PCA_LABELS})
     columns = ["input_mode", "ground_truth_label", "count", "mean_percent", "median_percent",
                "q1_percent", "q3_percent", "min_percent", "max_percent"]
     for mode in modes:
         groups: dict[str, list[float]] = {"normal": [], "fail": []}
+        points: dict[str, list[tuple[str, float]]] = {"normal": [], "fail": []}
         excluded = {"unknown_label": 0, "missing_probability": 0, "invalid_probability": 0}
         for row in rows:
             if row.get("input_mode") != mode:
@@ -156,6 +248,7 @@ def write_failure_probability_report(
                 excluded["invalid_probability"] += 1
                 continue
             groups[label].append(100.0 * probability)
+            points[label].append((_probability_category(row), 100.0 * probability))
         summaries = []
         for label, values in groups.items():
             summary = {column: None for column in columns}
@@ -170,34 +263,7 @@ def write_failure_probability_report(
         plot_path = output_directory / f"benchmark_failure_probability_{_slug(mode)}.png"
         valid_count = sum(len(values) for values in groups.values())
         if valid_count:
-            import matplotlib
-            matplotlib.use("Agg", force=True)
-            import matplotlib.pyplot as plt
-
-            figure, axis = plt.subplots(figsize=(7, 5))
-            try:
-                for position, (label, color) in enumerate((("normal", "#4878cf"), ("fail", "#d65f5f")), start=1):
-                    values = groups[label]
-                    if values:
-                        boxes = axis.boxplot([values], positions=[position], widths=0.42, patch_artist=True,
-                                             showfliers=False, medianprops={"color": "#202020", "linewidth": 2})
-                        boxes["boxes"][0].set(facecolor=color, alpha=0.3)
-                        jitter = np.random.default_rng(42).uniform(-0.09, 0.09, len(values))
-                        axis.scatter(position + jitter, values, s=22, color=color, alpha=0.7, zorder=3)
-                    else:
-                        axis.text(position, 50, "No scored bags", ha="center", color="#666666")
-                axis.set_xticks([1, 2], [f"Successful\n(n={len(groups['normal'])})", f"Failed\n(n={len(groups['fail'])})"])
-                axis.set(xlim=(0.5, 2.5), ylim=(-3, 103), ylabel="Failure probability (%)",
-                         xlabel="Ground-truth execution outcome", title=f"CoP failure probability — {mode}")
-                axis.set_yticks(range(0, 101, 20))
-                axis.grid(axis="y", alpha=0.2)
-                axis.spines[["top", "right"]].set_visible(False)
-                figure.text(0.5, 0.015, "Box: middle 50% · Line: median · Whiskers: 1.5×IQR · Dots: individual bags",
-                            ha="center", fontsize=8, color="#555555")
-                figure.tight_layout(rect=(0, 0.04, 1, 1))
-                figure.savefig(plot_path, dpi=180)
-            finally:
-                plt.close(figure)
+            _write_probability_plot(groups, points, styles, mode, plot_path)
         else:
             # Do not leave a previous run's plot masquerading as this result.
             plot_path.unlink(missing_ok=True)

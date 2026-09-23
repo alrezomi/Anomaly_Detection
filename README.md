@@ -820,6 +820,13 @@ boxplot of classifier failure probabilities (0–100%) for ground-truth successf
 and failed executions. Groups use the recorded/manual ground truth, not the
 VLM or classifier decision. Boxes show the middle 50%, the line is the median,
 whiskers extend to observations within 1.5 IQR, and dots show individual bags.
+Boxes and individual markers are drawn side by side to keep dense clusters
+readable. Successful executions use circles; each failure category has its own
+marker shape and colour, with a separate legend using the same category styles
+as PCA. Categories come from `failure_category` or the existing bag folder path;
+missing categories are shown as uncategorized failures. Only horizontal marker
+positions are spread for readability; probabilities remain unchanged. Group
+labels show the number of bags and median probability.
 Input modes are plotted separately. `benchmark_failure_probability_summary.csv`
 and the `failure_probability` section in `benchmark_statistics.json` contain
 counts, mean, median, quartiles, minimum, and maximum in percent. Missing or
@@ -964,7 +971,8 @@ score. AUROC measures ranking, not probability calibration or VLM text accuracy.
 Classifier-training and LoRA-training bags remain excluded by the benchmark.
 
 The existing report-regeneration command below regenerates both the binary
-and probability reports from `benchmark_summary.csv` without loading the VLM.
+and probability ROC reports, plus the probability boxplots, from
+`benchmark_summary.csv` without loading the VLM.
 If that CSV has no classifier scores, probability curves are skipped with an
 explicit reason rather than substituting the VLM's binary outputs.
 

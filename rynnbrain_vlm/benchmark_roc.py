@@ -344,8 +344,11 @@ def main() -> None:
         raise ValueError("Benchmark summary is missing columns: " + ", ".join(sorted(missing)))
     write_roc_report(dataframe.to_dict("records"), arguments.summary.parent)
     write_probability_roc_report(dataframe.to_dict("records"), arguments.summary.parent)
+    from .cop_analysis import write_failure_probability_report
+    write_failure_probability_report(dataframe.to_dict("records"), arguments.summary.parent)
     print(f"ROC report: {arguments.summary.parent / 'benchmark_roc'}")
     print(f"Probability ROC report: {arguments.summary.parent / 'benchmark_probability_roc'}")
+    print(f"Failure-probability boxplots: {arguments.summary.parent}")
 
 
 if __name__ == "__main__":
