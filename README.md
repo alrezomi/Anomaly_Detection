@@ -962,6 +962,25 @@ Failure is the positive class. Tied scores enter together; a constant score
 has AUROC 0.5 when both classes are present. A curve may still have few points
 if only a few distinct probabilities are available.
 
+All distinct score thresholds are already tested; no intermediate ROC points
+are dropped. Testing additional thresholds between adjacent scores cannot
+change a prediction and therefore cannot add ROC detail. False-positive rates
+change in multiples of `1 / normal_count`, and recalls in multiples of
+`1 / failure_count`; several such changes can lie on the same straight segment.
+Several perfect-ranking categories can also overlap on the same curve.
+
+The plots show each comparison's sample counts. ROC dots mark observed score
+thresholds; diamonds mark the saved `classifier_threshold`, with recall and
+false-alarm rate in the legend. The common threshold must be present and valid
+for every scored bag in that comparison; missing, invalid or mixed thresholds
+are reported instead of assuming 0.5. `auroc.csv` and `roc_summary.json` also
+save the configured threshold and TP/FP/TN/FN counts and rates at that threshold.
+These additions do not change AUROC or tune the classifier on test bags.
+AUROC 1 means perfect ranking on the evaluated bags, not necessarily perfect
+classification at the configured threshold. More independent test executions,
+particularly in small categories, provide stronger evidence than a denser
+threshold grid. Select any new threshold on separate validation data.
+
 Each category is compared against the same held-out nominal bags; other failure
 categories are excluded from that category's curve. Input modes are kept
 separate. Both ground-truth classes and finite scores in [0, 1] are required.

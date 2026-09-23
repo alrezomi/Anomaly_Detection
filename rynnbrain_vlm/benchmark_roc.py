@@ -211,6 +211,36 @@ def write_roc_report(master_rows: list[dict[str, Any]], benchmark_root: Path) ->
     return report
 
 
+OPERATING_POINT_COLUMNS = [
+    "configured_threshold", "threshold_status", "true_positive_at_threshold",
+    "false_positive_at_threshold", "true_negative_at_threshold", "false_negative_at_threshold",
+    "recall_at_threshold", "false_positive_rate_at_threshold",
+]
+
+
+def _configured_operating_point(valid: pd.DataFrame) -> dict[str, Any]:
+    """Evaluate the saved threshold, without choosing one using test labels."""
+    result = dict.fromkeys(OPERATING_POINT_COLUMNS)
+    thresholds = pd.to_numeric(valid["classifier_threshold"], errors="coerce")
+    if valid.empty or not (np.isfinite(thresholds) & thresholds.between(0, 1)).all():
+        result["threshold_status"] = "missing_or_invalid_saved_threshold"
+        return result
+    if thresholds.nunique() != 1:
+        result["threshold_status"] = "mixed_saved_thresholds"
+        return result
+    threshold = float(thresholds.iloc[0])
+    positive = valid["score"] >= threshold
+    failure = valid["ground_truth_label"] == "fail"
+    tp, fp = int((positive & failure).sum()), int((positive & ~failure).sum())
+    tn, fn = int((~positive & ~failure).sum()), int((~positive & failure).sum())
+    result.update(configured_threshold=threshold, threshold_status="available",
+                  true_positive_at_threshold=tp, false_positive_at_threshold=fp,
+                  true_negative_at_threshold=tn, false_negative_at_threshold=fn,
+                  recall_at_threshold=tp / (tp + fn) if tp + fn else None,
+                  false_positive_rate_at_threshold=fp / (fp + tn) if fp + tn else None)
+    return result
+
+
 def write_probability_roc_report(
     master_rows: list[dict[str, Any]], benchmark_root: Path, *,
     input_modes: list[str] | None = None,
@@ -218,7 +248,7 @@ def write_probability_roc_report(
     """Sweep continuous classifier scores, independent of the VLM's decision."""
     score_column = "classifier_failure_probability"
     dataframe = pd.DataFrame(master_rows).reindex(columns=[
-        "bag_name", "bag_path", "ground_truth_label", "input_mode", score_column,
+        "bag_name", "bag_path", "ground_truth_label", "input_mode", score_column, "classifier_threshold",
     ])
     dataframe["failure_category"] = [failure_category(path, label)
                                      for path, label in zip(dataframe["bag_path"], dataframe["ground_truth_label"])]
@@ -250,6 +280,7 @@ def write_probability_roc_report(
                 "probability_coverage": len(valid) / len(selected) if len(selected) else None,
                 "distinct_score_count": int(valid["score"].nunique()),
                 "auroc": None, "status": "skipped", "reason": "",
+                **_configured_operating_point(valid),
             }
             metrics.append(result)
             if not normal_count or not failure_count:
@@ -260,7 +291,7 @@ def write_probability_roc_report(
                 valid["score"].to_numpy(dtype=float),
             )
             result.update(auroc=auroc, status="created")
-            curves.append((result["failure_category"], fpr, tpr, auroc))
+            curves.append((result, fpr, tpr, auroc))
             points.extend({
                 "input_mode": mode, "failure_category": result["failure_category"],
                 "threshold": float(threshold), "false_positive_rate": float(x), "true_positive_rate": float(y),
@@ -276,7 +307,7 @@ def write_probability_roc_report(
     pd.DataFrame(metrics, columns=[
         "input_mode", "failure_category", "normal_count", "failure_count", "missing_probability_count",
         "invalid_probability_count", "excluded_probability_count", "unknown_label_count", "probability_coverage",
-        "distinct_score_count", "auroc", "status", "reason",
+        "distinct_score_count", "auroc", "status", "reason", *OPERATING_POINT_COLUMNS,
     ]).to_csv(output_dir / "auroc.csv", index=False)
     pd.DataFrame(points, columns=[
         "input_mode", "failure_category", "threshold", "false_positive_rate", "true_positive_rate",
@@ -285,6 +316,7 @@ def write_probability_roc_report(
         "score_column": score_column, "positive_class": "fail",
         "threshold_rule": "Predict failure when probability >= threshold; scores and thresholds use [0, 1], with inf as the no-positive endpoint.",
         "roc_interpretation": "ROC sweeps distinct CoP failure probabilities, grouping ties. AUROC measures failure-vs-normal ranking, not calibration or VLM decision accuracy.",
+        "operating_point_policy": "Use the common saved classifier_threshold for scored bags in each comparison. Missing/invalid/mixed thresholds are reported, never replaced by 0.5 or optimized on test labels.",
         "exclusion_policy": "Missing/nonfinite/out-of-range scores and unknown ground truth are excluded and counted. VLM uncertain/unparsed decisions do not exclude valid classifier scores.",
         "comparison": "Each failure category versus normal; other failures excluded. Input modes are separate.",
         "rows_without_input_mode": int(dataframe["input_mode"].isna().sum()),
@@ -300,17 +332,33 @@ def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path) 
     import matplotlib.pyplot as plt
 
     colors = ["#222222"] + [plt.get_cmap("tab10")(index % 10) for index in range(len(curves) - 1)]
-    labels = [textwrap.fill(category.replace("_", " "), width=45) for category, *_ in curves]
-    figure, axis = plt.subplots(figsize=(7, 6))
+    labels = [textwrap.fill(result["failure_category"].replace("_", " "), width=42)
+              + f"\n{result['normal_count']} normal · {result['failure_count']} failure bags" for result, *_ in curves]
+    figure, axis = plt.subplots(figsize=(7.2, max(6.4, 0.85 * len(curves))))
     try:
-        for (category, fpr, tpr, auroc), color, label in zip(curves, colors, labels):
-            axis.plot(fpr, tpr, color=color, linewidth=2.4 if category == "all_failures" else 1.5,
-                      label=f"{label}\nAUROC = {auroc:.3f}")
+        for (result, fpr, tpr, auroc), color, label in zip(curves, colors, labels):
+            threshold_detail = ""
+            if result["threshold_status"] == "available":
+                threshold_detail = (f"\nAt {100 * result['configured_threshold']:g}%: recall {100 * result['recall_at_threshold']:.1f}%, "
+                                    f"false alarms {100 * result['false_positive_rate_at_threshold']:.1f}%")
+                axis.scatter(result["false_positive_rate_at_threshold"], result["recall_at_threshold"],
+                             marker="D", s=55, color=color, edgecolors="white", linewidths=0.7, zorder=5)
+            else:
+                threshold_detail = "\nSaved threshold unavailable or mixed"
+            axis.plot(fpr, tpr, color=color, linewidth=2.4 if result["failure_category"] == "all_failures" else 1.5,
+                      marker=".", markersize=3.5, label=f"{label}\nAUROC = {auroc:.3f}{threshold_detail}")
         axis.plot([0, 1], [0, 1], "--", color="#999999", label="Chance (AUROC = 0.5)")
         axis.set(xlabel="False positive rate (normal bags)", ylabel="True positive rate (failure bags)",
-                 title=f"CoP probability ROC — {mode}", xlim=(0, 1), ylim=(0, 1.02))
-        axis.grid(alpha=0.2)
-        axis.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
+                 title=f"CoP probability ROC — {mode}", xlim=(-0.015, 1.015), ylim=(-0.015, 1.025))
+        axis.set_xticks(np.linspace(0, 1, 6))
+        axis.set_yticks(np.linspace(0, 1, 6))
+        axis.grid(color="#e7ecf0", linewidth=0.8)
+        axis.spines[["top", "right"]].set_visible(False)
+        axis.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=False, labelspacing=1.1)
+        figure.subplots_adjust(bottom=0.18)
+        figure.text(0.125, 0.045, "Dots: observed score thresholds · Diamonds: saved classifier threshold\n"
+                    "Overlapping curves share ROC coordinates. More thresholds between scores add no new points.",
+                    fontsize=8, color="#607080")
         figure.savefig(roc_path, dpi=180, bbox_inches="tight")
     finally:
         plt.close(figure)
@@ -320,7 +368,7 @@ def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path) 
         bars = axis.barh(range(len(curves)), values, color=colors, height=0.6)
         axis.set_yticks(range(len(curves)), labels)
         axis.invert_yaxis()
-        axis.set(xlim=(0, 1.12), xlabel="AUROC", title=f"CoP probability AUROC — {mode}")
+        axis.set(xlim=(0, 1.12), xlabel="AUROC · ranking across all thresholds", title=f"CoP probability AUROC — {mode}")
         axis.set_xticks(np.linspace(0, 1, 6))
         axis.axvline(0.5, color="#777777", linestyle="--", linewidth=1, label="Chance (0.5)")
         for bar, value in zip(bars, values):
@@ -328,6 +376,11 @@ def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path) 
         axis.grid(axis="x", alpha=0.2)
         axis.set_axisbelow(True)
         axis.legend(loc="lower right", fontsize=8)
+        axis.spines[["top", "right"]].set_visible(False)
+        figure.subplots_adjust(bottom=0.19)
+        figure.text(0.125, 0.025, "AUROC = 1 means perfect ranking on these bags, not necessarily perfect decisions at the saved threshold.\n"
+                    "Small category samples give limited evidence; more independent test bags improve the evaluation.",
+                    fontsize=8, color="#607080")
         figure.savefig(auc_path, dpi=180, bbox_inches="tight")
     finally:
         plt.close(figure)
