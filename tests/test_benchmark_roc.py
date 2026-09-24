@@ -229,6 +229,56 @@ class BenchmarkRocTests(unittest.TestCase):
             self.assertEqual(missing_class["plot_files"], [])
             self.assertIsNone(missing_class["metrics"][0]["auroc"])
 
+    def test_perfect_ranking_can_miss_failures_at_the_saved_threshold(self):
+        rows = [{**self._row(str(i), label, "uncertain"),
+                 "classifier_failure_probability": score, "classifier_threshold": 0.5}
+                for i, (label, score) in enumerate([("normal", 0.1), ("normal", 0.2), ("fail", 0.3), ("fail", 0.4)])]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metric = write_probability_roc_report(rows, root)["metrics"][0]
+            self.assertEqual(metric["auroc"], 1.0)
+            self.assertEqual(metric["configured_threshold"], 0.5)
+            self.assertEqual(metric["threshold_status"], "available")
+            self.assertEqual(metric["recall_at_threshold"], 0.0)
+            self.assertEqual(metric["false_positive_rate_at_threshold"], 0.0)
+            self.assertEqual(metric["true_negative_at_threshold"], 2)
+            self.assertEqual(metric["false_negative_at_threshold"], 2)
+            saved = pd.read_csv(root / "benchmark_probability_roc/auroc.csv").iloc[0]
+            self.assertEqual(saved.false_negative_at_threshold, 2)
+            # Equality must count as positive, matching the classifier itself.
+            for row in rows:
+                row["classifier_threshold"] = 0.3
+            metric = write_probability_roc_report(rows, root)["metrics"][0]
+            self.assertEqual(metric["true_positive_at_threshold"], 2)
+            self.assertEqual(metric["false_positive_at_threshold"], 0)
+            self.assertEqual(metric["recall_at_threshold"], 1.0)
+
+    def test_missing_invalid_or_mixed_saved_thresholds_are_not_guessed(self):
+        for thresholds, expected in [([None, None], "missing_or_invalid_saved_threshold"),
+                                     ([0.5, float("nan")], "missing_or_invalid_saved_threshold"),
+                                     ([-0.1, 0.5], "missing_or_invalid_saved_threshold"),
+                                     ([0.3, 0.5], "mixed_saved_thresholds")]:
+            with self.subTest(thresholds=thresholds), tempfile.TemporaryDirectory() as directory:
+                rows = [{**self._row(str(i), label, "uncertain"),
+                         "classifier_failure_probability": score, "classifier_threshold": threshold}
+                        for i, (label, score, threshold) in enumerate(zip(["normal", "fail"], [0.1, 0.9], thresholds))]
+                metric = write_probability_roc_report(rows, Path(directory))["metrics"][0]
+                self.assertEqual(metric["auroc"], 1.0)
+                self.assertEqual(metric["threshold_status"], expected)
+                self.assertIsNone(metric["configured_threshold"])
+                self.assertIsNone(metric["recall_at_threshold"])
+
+    def test_dense_threshold_grid_cannot_add_new_empirical_roc_points(self):
+        targets = np.array([0, 1, 0, 1, 1])
+        scores = np.array([0.02, 0.07, 0.07, 0.56, 0.98])
+        fpr, tpr, thresholds, _ = roc_curve(targets, scores)
+        self.assertEqual(len(thresholds), len(np.unique(scores)) + 1)
+        observed = set(zip(fpr, tpr))
+        for threshold in np.linspace(0, 1, 1001):
+            predicted = scores >= threshold
+            point = (np.sum(predicted & (targets == 0)) / 2, np.sum(predicted & (targets == 1)) / 3)
+            self.assertIn(point, observed)
+
 
 if __name__ == "__main__":
     unittest.main()

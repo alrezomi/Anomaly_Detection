@@ -657,7 +657,10 @@ def prepare_training_vectors(
     """
     from .model import RynnBrainModel
     from .prompts import task_context_prompt
-    from .run import _raw_inputs, cop_comparison_signature, evaluate_multiturn
+    from .run import (
+        _raw_inputs, cop_comparison_signature, evaluate_multiturn,
+        multiturn_outputs_match, write_multiturn_outputs,
+    )
 
     vlm = dict(config["rynnbrain"])
     generation = dict(vlm.get("generation", {}))
@@ -721,11 +724,13 @@ def prepare_training_vectors(
                 loaded = discover_saved_vectors(root, [record.metadata_path])[0]
                 if loaded.vector.size != expected["hidden_size"] or loaded.metadata.get("representation_id") != expected["representation_id"]:
                     raise ValueError("Vector representation changed")
+                if not multiturn_outputs_match(record.metadata_path.parent.parent, loaded.metadata):
+                    raise ValueError("Full response files are missing or do not match this vector")
                 paths.append(record.metadata_path)
                 print(f"Reusing classifier training vector: {name} ({mode})")
                 continue
             except (ValueError, OSError, EOFError):
-                pass  # Regenerate a missing/corrupt selected vector.
+                pass  # Regenerate a missing/corrupt vector or incomplete response files.
         bag_path = Path(selector)
         if not bag_path.is_absolute():
             bag_path = data_root / bag_path
@@ -740,10 +745,11 @@ def prepare_training_vectors(
         bag_config = {**config, "test_bag": str(bag_path), "output_dir": str(root / name)}
         bag_vlm = {**vlm, "input_modes": [mode], "ground_truth_label": label}
         print(f"Extracting classifier training vector: {name} ({mode})")
-        rows, _, _, _ = evaluate_multiturn(
+        rows, frames, responses, task = evaluate_multiturn(
             model, bag_config, bag_vlm, count, generation, destination,
             training_vectors_only=True, reference_response=reference_response,
         )
+        write_multiturn_outputs(destination, rows, frames, responses, task, merge_modes=True)
         path = Path(rows[0]["cop_metadata_path"])
         loaded = discover_saved_vectors(root, [path])[0]
         if loaded.metadata.get("comparison_signature") != expected:

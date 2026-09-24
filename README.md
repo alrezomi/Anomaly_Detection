@@ -791,11 +791,42 @@ The clean table includes `failure_probability`; statistics include a separate
 `classifier` section alongside the VLM's decision statistics. Single-bag
 RynnBrain evaluation continues to load the saved classifier without training.
 
+Classifier preparation also saves the complete generated responses in each
+training bag's existing `rynnbrain_multiturn/` folder:
+`rynnbrain_results_multiturn.csv`, `rynnbrain_responses_multiturn.json`, and
+`selected_vlm_frames.csv`, alongside the selected images and CoP vectors.
+These bags are marked `sample_role: classifier_training` and still excluded
+from held-out benchmark statistics. Older preparation runs saved only images
+and vectors; their unsaved answers cannot be recovered from those vectors.
+The next normal preparation/benchmark run regenerates selected training bags
+whose response files are missing or cannot be matched to their vector. This
+includes legacy files without an `evaluation_id`; complete matching outputs
+are then reused. Multiple input modes retain their separate saved responses.
+
+In the response JSON and CSV, `nominal_response` describes the nominal
+reference (turn 1); `response` is the complete execution answer (turn 2).
+`generation.explain_decision: false` disables only the optional separate
+evidence pass. It never removes explanation text generated in the execution
+answer itself. Each new result records its generation time, evaluation ID,
+base model ID, loaded adapter path/SHA256, and response source. The vector
+metadata shares the same evaluation ID so the answer can be traced to its
+vector. Adapter information is also printed at startup and included in
+`benchmark_summary.csv`. A classifier compatibility error leaves probability
+empty and saves `classifier_error`, retaining the VLM answer and vector;
+other benchmark failures are recorded in `evaluation_error` in the summary.
+
 Each benchmark also creates `benchmark_failure_probability_<mode>.png`, a
 boxplot of classifier failure probabilities (0–100%) for ground-truth successful
 and failed executions. Groups use the recorded/manual ground truth, not the
 VLM or classifier decision. Boxes show the middle 50%, the line is the median,
 whiskers extend to observations within 1.5 IQR, and dots show individual bags.
+Boxes and individual markers are drawn side by side to keep dense clusters
+readable. Successful executions use circles; each failure category has its own
+marker shape and colour, with a separate legend using the same category styles
+as PCA. Categories come from `failure_category` or the existing bag folder path;
+missing categories are shown as uncategorized failures. Only horizontal marker
+positions are spread for readability; probabilities remain unchanged. Group
+labels show the number of bags and median probability.
 Input modes are plotted separately. `benchmark_failure_probability_summary.csv`
 and the `failure_probability` section in `benchmark_statistics.json` contain
 counts, mean, median, quartiles, minimum, and maximum in percent. Missing or
@@ -931,6 +962,25 @@ Failure is the positive class. Tied scores enter together; a constant score
 has AUROC 0.5 when both classes are present. A curve may still have few points
 if only a few distinct probabilities are available.
 
+All distinct score thresholds are already tested; no intermediate ROC points
+are dropped. Testing additional thresholds between adjacent scores cannot
+change a prediction and therefore cannot add ROC detail. False-positive rates
+change in multiples of `1 / normal_count`, and recalls in multiples of
+`1 / failure_count`; several such changes can lie on the same straight segment.
+Several perfect-ranking categories can also overlap on the same curve.
+
+The plots show each comparison's sample counts. ROC dots mark observed score
+thresholds; diamonds mark the saved `classifier_threshold`, with recall and
+false-alarm rate in the legend. The common threshold must be present and valid
+for every scored bag in that comparison; missing, invalid or mixed thresholds
+are reported instead of assuming 0.5. `auroc.csv` and `roc_summary.json` also
+save the configured threshold and TP/FP/TN/FN counts and rates at that threshold.
+These additions do not change AUROC or tune the classifier on test bags.
+AUROC 1 means perfect ranking on the evaluated bags, not necessarily perfect
+classification at the configured threshold. More independent test executions,
+particularly in small categories, provide stronger evidence than a denser
+threshold grid. Select any new threshold on separate validation data.
+
 Each category is compared against the same held-out nominal bags; other failure
 categories are excluded from that category's curve. Input modes are kept
 separate. Both ground-truth classes and finite scores in [0, 1] are required.
@@ -940,7 +990,8 @@ score. AUROC measures ranking, not probability calibration or VLM text accuracy.
 Classifier-training and LoRA-training bags remain excluded by the benchmark.
 
 The existing report-regeneration command below regenerates both the binary
-and probability reports from `benchmark_summary.csv` without loading the VLM.
+and probability ROC reports, plus the probability boxplots, from
+`benchmark_summary.csv` without loading the VLM.
 If that CSV has no classifier scores, probability curves are skipped with an
 explicit reason rather than substituting the VLM's binary outputs.
 

@@ -79,6 +79,7 @@ class RynnBrainModel:
             self.model_id, **kwargs
         )
         self.adapter_identity = None
+        self.lora_adapter_path = config.get("lora_adapter_path")
         self.adapter_training_bags: set[str] = set()
         if config.get("lora_adapter_path"):
             from .lora import load_lora_adapter
@@ -87,6 +88,11 @@ class RynnBrainModel:
                 self.model, config["lora_adapter_path"], self.model_id
             )
         self.model.eval()
+        if self.adapter_identity:
+            print(f"Execution model: {self.model_id} + LoRA {self.lora_adapter_path}")
+            print(f"LoRA adapter SHA256: {self.adapter_identity}")
+        else:
+            print(f"Execution model: {self.model_id} (base model; no LoRA adapter)")
         # PEFT can redispatch an automatically placed model during adapter load.
         # Resolve after loading; the configured preference may now be stale.
         self.input_device = _input_execution_device(self.model)
