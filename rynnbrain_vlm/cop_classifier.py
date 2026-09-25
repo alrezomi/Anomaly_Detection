@@ -1,4 +1,4 @@
-"""Train and apply a logistic classifier to frozen RynnBrain-CoP vectors."""
+"""Train and apply nominal kNN or supervised logistic CoP classifiers."""
 
 from __future__ import annotations
 
@@ -17,6 +17,29 @@ from .cop_analysis import SavedCoPVector, discover_saved_vectors
 
 CLASSIFIER_SCHEMA_VERSION = 1
 LABEL_TO_TARGET = {"normal": 0, "nominal": 0, "fail": 1, "failure": 1}
+
+
+def classifier_method(config: dict[str, Any]) -> str:
+    method = str(config.get("method", "logistic"))
+    if method not in {"logistic", "knn"}:
+        raise ValueError("cop_classifier.method must be 'logistic' or 'knn'.")
+    return method
+
+
+def _method_model_path(value: Any, method: str) -> Path:
+    path = Path(str(value))
+    if method == "knn" and not path.stem.endswith("_knn"):
+        # Keep the existing logistic file available when switching methods.
+        path = path.with_name(path.stem.removesuffix("_logistic") + "_knn" + path.suffix)
+    return path
+
+
+def classifier_model_paths(config: dict[str, Any]) -> dict[str, str]:
+    method = classifier_method(config)
+    paths = config.get("model_paths", {})
+    if not isinstance(paths, dict):
+        raise ValueError("cop_classifier.model_paths must be an object.")
+    return {mode: str(_method_model_path(value, method)) for mode, value in paths.items() if value}
 
 
 def _canonical_json(value: Any) -> str:
@@ -299,7 +322,7 @@ def save_classifier(
 
 
 @lru_cache(maxsize=16)
-def load_classifier(model_file: Path) -> CoPLogisticClassifier:
+def load_classifier(model_file: Path):
     model_path = model_file.resolve()
     metadata_path = model_path.with_suffix(".json")
     if not model_path.is_file() or not metadata_path.is_file():
@@ -309,6 +332,9 @@ def load_classifier(model_file: Path) -> CoPLogisticClassifier:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     if metadata.get("schema_version") != CLASSIFIER_SCHEMA_VERSION:
         raise ValueError(f"Unsupported classifier schema in {metadata_path}.")
+    from .cop_knn import KNN_TYPE, load_knn
+    if metadata.get("classifier_type") == KNN_TYPE:
+        return load_knn(model_path, metadata)
     with np.load(model_path, allow_pickle=False) as archive:
         weights = np.asarray(archive["weights"], dtype=np.float64)
         feature_mean = np.asarray(archive["feature_mean"], dtype=np.float64)
@@ -404,7 +430,12 @@ def train_from_saved_vectors(
     threshold: float = 0.5,
     class_weight: str = "balanced",
     metadata_paths: list[Path] | None = None,
+    method: str = "logistic",
+    knn_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    classifier_method({"method": method})
+    if method == "knn" and not bag_names:
+        raise ValueError("Nominal kNN requires an explicit normal_bags selection; never train on all benchmark vectors.")
     records = _select_training_records(
         discover_saved_vectors(input_directory, metadata_paths), input_mode, bag_names or []
     )
@@ -449,7 +480,9 @@ def train_from_saved_vectors(
         dtype=np.int64,
     )
     counts = {"normal": int(np.sum(targets == 0)), "fail": int(np.sum(targets == 1))}
-    if min(counts.values()) < 2:
+    if method == "knn" and counts["fail"]:
+        raise ValueError("Nominal kNN cannot use failure training bags.")
+    if method == "logistic" and min(counts.values()) < 2:
         raise ValueError("Training requires at least two normal and two failure bags.")
     dimensions = {record.vector.size for record in records}
     if len(dimensions) != 1:
@@ -464,6 +497,11 @@ def train_from_saved_vectors(
         raise ValueError("Training vectors use different or missing representation definitions.")
 
     matrix = np.stack([record.vector for record in records])
+    if method == "knn":
+        from .cop_knn import train_knn
+        metadata = train_knn(records, output_file, **(knn_options or {}))
+        load_classifier.cache_clear()
+        return metadata
     cv_probabilities, fold_count = _cross_validated_probabilities(
         matrix, targets, c_value, class_weight
     )
@@ -537,6 +575,7 @@ def train_from_saved_vectors(
         metadata=metadata,
     )
     save_classifier(model_path, classifier)
+    load_classifier.cache_clear()
     return metadata
 
 
@@ -572,7 +611,8 @@ def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]
 
     input_mode = arguments.input_mode or training_config.get("input_mode", "raw")
     input_directory = arguments.input_dir or training_config.get("input_dir")
-    model_paths = classifier_config.get("model_paths", {})
+    method = classifier_method(classifier_config)
+    model_paths = classifier_model_paths(classifier_config)
     configured_model = model_paths.get(input_mode) if isinstance(model_paths, dict) else None
     output_file = (
         arguments.output_file
@@ -587,6 +627,7 @@ def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]
         raise ValueError(
             "Set --output-file, training.output_file, or model_paths for the input mode."
         )
+    output_file = _method_model_path(output_file, method)
     cli_selection_supplied = any(
         value is not None
         for value in (arguments.bag, arguments.normal_bag, arguments.failure_bag)
@@ -599,6 +640,14 @@ def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]
         generic_bags = list(training_config.get("bags", []))
         normal_bags = list(training_config.get("normal_bags", []))
         failure_bags = list(training_config.get("failure_bags", []))
+    if method == "knn":
+        if cli_selection_supplied and (generic_bags or failure_bags):
+            raise ValueError("Nominal kNN accepts only --normal-bag selections.")
+        generic_bags, failure_bags = [], []
+        if not normal_bags:
+            raise ValueError("Nominal kNN requires an explicit training.normal_bags selection.")
+        from .cop_knn import validate_knn_settings
+        validate_knn_settings(len(normal_bags), **classifier_config.get("knn", {}))
     selected_bags = generic_bags + normal_bags + failure_bags
     if (
         not selected_bags
@@ -615,6 +664,8 @@ def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]
     }
 
     return {
+        "method": method,
+        "knn_options": dict(classifier_config.get("knn", {})),
         "input_directory": Path(str(input_directory)),
         "output_file": Path(str(output_file)),
         "input_mode": str(input_mode),
@@ -699,7 +750,12 @@ def prepare_training_vectors(
             raise ValueError(f"Set an explicit normal_bags/failure_bags label for {selector} before extracting its vector.")
         labels.append(LABEL_TO_TARGET[label])
         selected.append((selector, name, record, label))
-    if min(labels.count(0), labels.count(1)) < 2:
+    if settings.get("method", "logistic") == "knn":
+        if any(labels) or len(labels) < 2:
+            raise ValueError("Nominal kNN preparation requires only nominal training bags (at least two).")
+        from .cop_knn import validate_knn_settings
+        validate_knn_settings(len(labels), **settings.get("knn_options", {}))
+    elif min(labels.count(0), labels.count(1)) < 2:
         raise ValueError("Training requires at least two normal and two failure bags.")
 
     if model is None:

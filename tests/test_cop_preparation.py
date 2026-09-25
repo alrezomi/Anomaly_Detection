@@ -151,6 +151,31 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.assertEqual(set(pd.read_csv(directory / "rynnbrain_results_multiturn.csv").input_mode), {"raw", "heatmap"})
 
     def test_benchmark_prepares_once_excludes_training_and_populates_reports(self):
+        self._check_benchmark_workflow()
+
+    def test_knn_benchmark_uses_only_nominals_and_preserves_responses_and_scores(self):
+        classifier = self.config["rynnbrain"]["cop_classifier"]
+        classifier.update(method="knn", knn={"n_neighbors": 1, "threshold_quantile": 0.95})
+        classifier["training"]["failure_bags"] = ["/missing/unused_failure_bag"]
+        self.config_path.write_text(json.dumps(self.config))
+        self.settings = configured_training_settings(self.config_path)
+        self.model.adapter_training_bags = set(self.names[:2])
+        self._check_benchmark_workflow(knn=True)
+        # The failure list is ignored even when its bags are unavailable. Only
+        # nominal training responses/vectors are prepared and later reused.
+        self.assertFalse((self.root / "vectors/failure_1").exists())
+        before = self.extractions.copy()
+        paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(self.extractions, before)
+        metadata = json.loads(self.settings["output_file"].with_suffix(".json").read_text())
+        self.assertEqual(metadata["training_bags"], self.names[:2])
+        for path in paths:
+            saved = json.loads((path.parent.parent / "rynnbrain_responses_multiturn.json").read_text())["results"][0]
+            self.assertEqual(saved["sample_role"], "classifier_training")
+            self.assertEqual(saved["lora_adapter_sha256"], "adapter_v1")
+
+    def _check_benchmark_workflow(self, knn=False):
         import run_benchmark as benchmark
         # Exercise real preparation, fitting, scoring, and CSV/JSON output; only
         # the expensive VLM/ROS reads and unrelated PCA/ROC rendering are mocked.
@@ -171,27 +196,37 @@ class ClassifierPreparationTests(unittest.TestCase):
              patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
             benchmark.main()
         factory.assert_called_once_with(self.config["rynnbrain"]["model"])
-        self.assertEqual(dino.call_count, 2)
+        test_names = ["normal_test", "failure_test"] + (self.names[2:] if knn else [])
+        self.assertEqual(dino.call_count, len(test_names))
         self.assertEqual(self.extractions, Counter(self.names + ["normal_test", "failure_test"]))
         clean = pd.read_csv(output / "benchmark_clean.csv")
-        self.assertEqual(set(clean.bag_name), {"normal_test", "failure_test"})
-        self.assertTrue(clean.failure_probability.notna().all())
+        self.assertEqual(set(clean.bag_name), set(test_names))
+        if knn:
+            self.assertTrue(clean.failure_probability.isna().all())
+            self.assertTrue(clean.anomaly_score.notna().all())
+            self.assertTrue((clean.anomaly_threshold > 0).all())
+            self.assertTrue(clean.classifier_decision.isin(["success", "failure"]).all())
+        else:
+            self.assertTrue(clean.failure_probability.notna().all())
         summary = pd.read_csv(output / "benchmark_summary.csv")
         self.assertTrue((summary.lora_adapter_sha256 == "adapter_v1").all())
         self.assertTrue((summary.response_source == "lora_adapted_model").all())
-        for name in ("normal_test", "failure_test"):
+        for name in test_names:
             response_path = output / name / "rynnbrain_multiturn/rynnbrain_responses_multiturn.json"
             saved = json.loads(response_path.read_text())["results"][0]
             self.assertEqual(saved["sample_role"], "evaluation")
             self.assertEqual(saved["response"], summary.loc[summary.bag_name == name, "response"].iloc[0])
         statistics = json.loads((output / "benchmark_statistics.json").read_text())
-        self.assertEqual(statistics["classifier"]["scored_rows"], 2)
-        probability_report = statistics["failure_probability"]["modes"][0]
-        self.assertEqual(probability_report["scored_rows"], 2)
-        self.assertTrue(Path(probability_report["plot_file"]).is_file())
-        self.assertEqual(statistics["probability_roc"]["score_column"], "classifier_failure_probability")
-        self.assertEqual(statistics["probability_roc"]["metrics"][0]["status"], "created")
-        self.assertTrue(all(Path(path).is_file() for path in statistics["probability_roc"]["plot_files"]))
+        self.assertEqual(statistics["classifier"]["scored_rows"], len(test_names))
+        score_report = statistics["anomaly_score" if knn else "failure_probability"]["modes"][0]
+        self.assertEqual(score_report["scored_rows"], len(test_names))
+        self.assertTrue(Path(score_report["plot_file"]).is_file())
+        roc = statistics["anomaly_roc" if knn else "probability_roc"]
+        self.assertEqual(roc["score_column"], "classifier_anomaly_score" if knn else "classifier_failure_probability")
+        self.assertEqual(roc["metrics"][0]["status"], "created")
+        self.assertTrue(all(Path(path).is_file() for path in roc["plot_files"]))
+        if knn:
+            self.assertEqual(statistics["probability_roc"]["metrics"][0]["status"], "skipped")
         self.assertEqual(json.loads(self.config_path.read_text()), self.config)
 
     def test_dino_only_benchmark_does_not_load_vlm_or_prepare_enabled_classifier(self):

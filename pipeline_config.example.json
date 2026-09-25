@@ -82,6 +82,11 @@
       "enabled": true
     },
     "cop_classifier": {
+      "method": "knn",
+      "knn": {
+        "n_neighbors": 3,
+        "threshold_quantile": 0.95
+      },
       "enabled": false,
       "model_paths": {
         "raw": "/outputs/experiment_01/cop_classifier/raw_logistic.npz"

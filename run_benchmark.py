@@ -30,9 +30,10 @@ from typing import Any
 import pandas as pd
 
 from build_dataset_manifest import discover_bags, infer_bag_record
-from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report, write_probability_roc_report
-from rynnbrain_vlm.cop_analysis import analyze_saved_vectors, write_failure_probability_report
+from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report, write_probability_roc_report, write_anomaly_roc_report
+from rynnbrain_vlm.cop_analysis import analyze_saved_vectors, write_failure_probability_report, write_anomaly_score_report
 from rynnbrain_vlm.model import RynnBrainModel
+from rynnbrain_vlm.cop_classifier import classifier_method, classifier_model_paths
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -124,9 +125,10 @@ def _excluded_bag_names(
     classifier = rynnbrain.get("cop_classifier", {})
     if classifier.get("enabled", False):
         training = classifier.get("training", {})
-        for key in ("bags", "normal_bags", "failure_bags"):
+        keys = ("normal_bags",) if classifier_method(classifier) == "knn" else ("bags", "normal_bags", "failure_bags")
+        for key in keys:
             names |= {str(bag).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] for bag in training.get(key, [])}
-        for path in classifier.get("model_paths", {}).values():
+        for path in classifier_model_paths(classifier).values():
             metadata = Path(path).with_suffix(".json")
             if metadata.is_file():
                 names |= set(json.loads(metadata.read_text(encoding="utf-8")).get("training_bags", []))
@@ -197,6 +199,9 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
         "correct",
         "failure_probability",
     ]
+    knn = any(row.get("classifier_score_kind") == "knn_distance" for row in master_rows)
+    if knn:
+        columns += ["anomaly_score", "anomaly_threshold", "classifier_decision"]
     return pd.DataFrame(
         [
             {
@@ -205,6 +210,9 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
                 "model_decision": row.get("decision"),
                 "correct": row.get("decision_correct"),
                 "failure_probability": row.get("classifier_failure_probability"),
+                **({"anomaly_score": row.get("classifier_anomaly_score"),
+                    "anomaly_threshold": row.get("classifier_threshold") if row.get("classifier_score_kind") == "knn_distance" else None,
+                    "classifier_decision": row.get("classifier_decision")} if knn else {}),
             }
             for row in master_rows
         ],
@@ -345,14 +353,15 @@ def main() -> None:
         settings_by_mode = [configured_training_settings(arguments.config, mode)
                             for mode in vlm.get("input_modes", ["raw"])]
         for settings in settings_by_mode:
-            configured_path = vlm["cop_classifier"].get("model_paths", {}).get(settings["input_mode"])
+            configured_path = classifier_model_paths(vlm["cop_classifier"]).get(settings["input_mode"])
             if not configured_path or Path(configured_path).resolve() != settings["output_file"].resolve():
                 raise ValueError("Classifier training output_file must match model_paths for benchmark scoring.")
         print("Loading RynnBrain once for classifier preparation and benchmark evaluation...")
         model = RynnBrainModel(vlm["model"])
         for settings in settings_by_mode:
             paths, reference_response = prepare_training_vectors(config, settings, model=model, data_root=data_root)
-            train_from_saved_vectors(**settings, metadata_paths=paths)
+            classifier_metadata = train_from_saved_vectors(**settings, metadata_paths=paths)
+            print(f"Prepared {settings['method']} classifier: {classifier_metadata['model_file']}")
 
     print(f"Scanning bags under: {data_root}")
     all_bags = discover_bags(data_root, recursive=not arguments.no_recursive)
@@ -485,6 +494,8 @@ def main() -> None:
                 "classifier_threshold": row.get("classifier_threshold"),
                 "classifier_model_path": row.get("classifier_model_path"),
                 "classifier_error": row.get("classifier_error"),
+                "classifier_anomaly_score": row.get("classifier_anomaly_score"),
+                "classifier_score_kind": row.get("classifier_score_kind"),
                 **dino_summary,
             })
 
@@ -512,6 +523,9 @@ def main() -> None:
     statistics["probability_roc"] = write_probability_roc_report(
         master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"])
     )
+    if classifier_method(vlm.get("cop_classifier", {})) == "knn" or (benchmark_root / "benchmark_anomaly_roc").exists():
+        statistics["anomaly_score"] = write_anomaly_score_report(master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"]))
+        statistics["anomaly_roc"] = write_anomaly_roc_report(master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"]))
     statistics_path = benchmark_root / "benchmark_statistics.json"
     statistics_path.write_text(
         json.dumps(statistics, indent=2) + "\n", encoding="utf-8"
@@ -539,6 +553,9 @@ def main() -> None:
     print(f"Summary table: {summary_path}")
     print(f"Clean report: {clean_report_path}")
     print(f"Statistics: {statistics_path}")
+    if "anomaly_score" in statistics:
+        print(f"Nominal kNN distance boxplots: {benchmark_root}")
+        print(f"Anomaly-distance ROC/AUROC: {benchmark_root / 'benchmark_anomaly_roc'}")
     for mode in statistics["failure_probability"]["modes"]:
         if mode["plot_file"]:
             print(f"Failure probability boxplot ({mode['input_mode']}): {mode['plot_file']}")

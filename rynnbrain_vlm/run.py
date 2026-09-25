@@ -16,7 +16,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
-from .cop_classifier import CoPLogisticClassifier, load_classifier
+from .cop_classifier import classifier_method, classifier_model_paths, load_classifier
 from .cop_analysis import save_cop_vector
 from .model import COP_REPRESENTATION_ID, RynnBrainModel
 from .prompts import task_context_prompt, evaluation_prompt_multiturn, visual_evidence_prompt
@@ -275,13 +275,13 @@ def evaluate_multiturn(
     input_modes = list(vlm.get("input_modes", ["raw"]))
     classifier_config = dict(vlm.get("cop_classifier", {}))
     classifier_enabled = not training_vectors_only and bool(classifier_config.get("enabled", False))
-    classifiers: dict[str, CoPLogisticClassifier] = {}
+    classifiers: dict[str, Any] = {}
     if classifier_enabled:
         if not capture_cop_vectors:
             raise ValueError(
                 "rynnbrain.cop_classifier requires rynnbrain.cop_vectors.enabled=true."
             )
-        model_paths = classifier_config.get("model_paths", {})
+        model_paths = classifier_model_paths(classifier_config)
         if not isinstance(model_paths, dict):
             raise ValueError("rynnbrain.cop_classifier.model_paths must be an object.")
         missing_models = [mode for mode in input_modes if not model_paths.get(mode)]
@@ -293,6 +293,9 @@ def evaluate_multiturn(
         classifiers = {
             mode: load_classifier(Path(str(model_paths[mode]))) for mode in input_modes
         }
+        from .cop_knn import CoPKNNDetector
+        if any(isinstance(classifier, CoPKNNDetector) != (classifier_method(classifier_config) == "knn") for classifier in classifiers.values()):
+            raise ValueError("Saved classifier type does not match cop_classifier.method; train the selected method first.")
         incompatible_modes = [
             mode for mode, classifier in classifiers.items()
             if classifier.input_mode != mode
@@ -422,6 +425,8 @@ def evaluate_multiturn(
         classifier_threshold: float | None = None
         classifier_model_path: str | None = None
         classifier_error: str | None = None
+        classifier_anomaly_score: float | None = None
+        score_kind = "knn_distance" if classifier_enabled and classifier_method(classifier_config) == "knn" else "failure_probability"
         if cop_vector is not None:
             text_config = getattr(model.model.config, "text_config", None)
             model_revision = getattr(model.model.config, "_commit_hash", None)
@@ -432,20 +437,26 @@ def evaluate_multiturn(
                 classifier = classifiers[mode]
                 classifier_threshold = classifier.threshold
                 classifier_model_path = str(
-                    Path(str(classifier_config["model_paths"][mode])).resolve()
+                    Path(str(model_paths[mode])).resolve()
                 )
                 try:
                     if classifier.representation_id != COP_REPRESENTATION_ID:
                         raise ValueError("Classifier representation does not match the captured CoP vector.")
-                    classifier_failure_probability = classifier.predict_failure_probability(
-                        cop_vector.numpy(), input_mode=mode,
-                        comparison_signature=comparison_signature,
-                    )
-                    classifier_decision = classifier.predict_label(classifier_failure_probability)
+                    if score_kind == "knn_distance":
+                        classifier_anomaly_score = classifier.predict_anomaly_score(
+                            cop_vector.numpy(), input_mode=mode, comparison_signature=comparison_signature,
+                        )
+                        classifier_decision = classifier.predict_label(classifier_anomaly_score)
+                    else:
+                        classifier_failure_probability = classifier.predict_failure_probability(
+                            cop_vector.numpy(), input_mode=mode, comparison_signature=comparison_signature,
+                        )
+                        classifier_decision = classifier.predict_label(classifier_failure_probability)
                 except ValueError as error:
                     # Incompatible scoring must not discard a completed VLM answer.
                     # Leave the probability empty and report the reason explicitly.
                     classifier_failure_probability = None
+                    classifier_anomaly_score = None
                     classifier_error = str(error)
                     print(f"Classifier scoring failed ({mode}); keeping VLM response and vector: {error}")
             vector_path, metadata_path = save_cop_vector(
@@ -472,6 +483,8 @@ def evaluate_multiturn(
                     "classifier_threshold": classifier_threshold,
                     "classifier_model_path": classifier_model_path,
                     "classifier_error": classifier_error,
+                    "classifier_anomaly_score": classifier_anomaly_score,
+                    "classifier_score_kind": score_kind if classifier_enabled else None,
                     "comparison_signature": comparison_signature,
                 },
             )
@@ -532,6 +545,8 @@ def evaluate_multiturn(
                 "classifier_threshold": classifier_threshold,
                 "classifier_model_path": classifier_model_path,
                 "classifier_error": classifier_error,
+                "classifier_anomaly_score": classifier_anomaly_score,
+                "classifier_score_kind": score_kind if classifier_enabled else None,
                 **provenance,
             }
         )
@@ -583,6 +598,8 @@ def evaluate_multiturn(
             "classifier_threshold": classifier_threshold,
             "classifier_model_path": classifier_model_path,
             "classifier_error": classifier_error,
+            "classifier_anomaly_score": classifier_anomaly_score,
+            "classifier_score_kind": score_kind if classifier_enabled else None,
         })
         print(f"{mode} (multiturn): decision={decision}, confidence={confidence}")
         if classifier_failure_probability is not None:
@@ -591,6 +608,9 @@ def evaluate_multiturn(
                 f"failure={classifier_failure_probability * 100.0:.2f}%, "
                 f"decision={classifier_decision}"
             )
+        if classifier_anomaly_score is not None:
+            print(f"{mode} (nominal kNN): anomaly distance={classifier_anomaly_score:.6g}, "
+                  f"threshold={classifier_threshold:.6g}, decision={classifier_decision} (not a probability)")
 
     return rows, frame_metadata, raw_records, task_description
 

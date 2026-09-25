@@ -40,6 +40,17 @@ for _name, _previous in _previous_modules.items():
 
 
 class BenchmarkSelectionTests(unittest.TestCase):
+    def test_knn_ignores_old_failure_selection_but_preserves_lora_exclusions(self) -> None:
+        config = {
+            "nominal_bags": ["/data/dino_memory"],
+            "rynnbrain": {"reference_bags": ["/data/reference"], "model": {"lora_adapter_path": "/saved/adapter"},
+                "cop_classifier": {"enabled": True, "method": "knn", "training": {
+                    "normal_bags": ["/data/normal_train"], "failure_bags": ["/data/failure_cop_old"]}}},
+        }
+        with patch("rynnbrain_vlm.lora.adapter_training_bag_names", return_value={"failure_lora_train"}):
+            self.assertEqual(_excluded_bag_names(config, include_nominal_bags=True),
+                             {"reference", "normal_train", "failure_lora_train"})
+
     def test_lora_training_bags_stay_excluded_with_nominal_override(self) -> None:
         config = {
             "nominal_bags": ["/data/dino_memory"],

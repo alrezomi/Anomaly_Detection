@@ -218,11 +218,12 @@ OPERATING_POINT_COLUMNS = [
 ]
 
 
-def _configured_operating_point(valid: pd.DataFrame) -> dict[str, Any]:
+def _configured_operating_point(valid: pd.DataFrame, *, anomaly: bool = False) -> dict[str, Any]:
     """Evaluate the saved threshold, without choosing one using test labels."""
     result = dict.fromkeys(OPERATING_POINT_COLUMNS)
     thresholds = pd.to_numeric(valid["classifier_threshold"], errors="coerce")
-    if valid.empty or not (np.isfinite(thresholds) & thresholds.between(0, 1)).all():
+    allowed = np.isfinite(thresholds) & (thresholds >= 0) & (True if anomaly else thresholds <= 1)
+    if valid.empty or not allowed.all():
         result["threshold_status"] = "missing_or_invalid_saved_threshold"
         return result
     if thresholds.nunique() != 1:
@@ -241,12 +242,14 @@ def _configured_operating_point(valid: pd.DataFrame) -> dict[str, Any]:
     return result
 
 
-def write_probability_roc_report(
+def _write_score_roc_report(
     master_rows: list[dict[str, Any]], benchmark_root: Path, *,
     input_modes: list[str] | None = None,
+    anomaly: bool = False,
 ) -> dict[str, Any]:
     """Sweep continuous classifier scores, independent of the VLM's decision."""
-    score_column = "classifier_failure_probability"
+    score_column = "classifier_anomaly_score" if anomaly else "classifier_failure_probability"
+    score_name = "anomaly_score" if anomaly else "probability"
     dataframe = pd.DataFrame(master_rows).reindex(columns=[
         "bag_name", "bag_path", "ground_truth_label", "input_mode", score_column, "classifier_threshold",
     ])
@@ -254,8 +257,8 @@ def write_probability_roc_report(
                                      for path, label in zip(dataframe["bag_path"], dataframe["ground_truth_label"])]
     dataframe["missing_score"] = dataframe[score_column].isna() | dataframe[score_column].astype(str).str.strip().eq("")
     dataframe["score"] = pd.to_numeric(dataframe[score_column], errors="coerce")
-    dataframe["valid_score"] = np.isfinite(dataframe["score"]) & dataframe["score"].between(0, 1)
-    output_dir = Path(benchmark_root) / "benchmark_probability_roc"
+    dataframe["valid_score"] = np.isfinite(dataframe["score"]) & (dataframe["score"] >= 0) & (True if anomaly else dataframe["score"] <= 1)
+    output_dir = Path(benchmark_root) / ("benchmark_anomaly_roc" if anomaly else "benchmark_probability_roc")
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics, points, plot_files = [], [], []
     modes = sorted(set(input_modes or []) | set(dataframe["input_mode"].dropna().astype(str)))
@@ -273,18 +276,18 @@ def write_probability_roc_report(
             result = {
                 "input_mode": mode, "failure_category": category or "all_failures",
                 "normal_count": normal_count, "failure_count": failure_count,
-                "missing_probability_count": int(selected["missing_score"].sum()),
-                "invalid_probability_count": int((~selected["valid_score"] & ~selected["missing_score"]).sum()),
-                "excluded_probability_count": int((~selected["valid_score"]).sum()),
+                f"missing_{score_name}_count": int(selected["missing_score"].sum()),
+                f"invalid_{score_name}_count": int((~selected["valid_score"] & ~selected["missing_score"]).sum()),
+                f"excluded_{score_name}_count": int((~selected["valid_score"]).sum()),
                 "unknown_label_count": int((~group["ground_truth_label"].isin(["normal", "fail"])).sum()),
-                "probability_coverage": len(valid) / len(selected) if len(selected) else None,
+                f"{score_name}_coverage": len(valid) / len(selected) if len(selected) else None,
                 "distinct_score_count": int(valid["score"].nunique()),
                 "auroc": None, "status": "skipped", "reason": "",
-                **_configured_operating_point(valid),
+                **_configured_operating_point(valid, anomaly=anomaly),
             }
             metrics.append(result)
             if not normal_count or not failure_count:
-                result["reason"] = "ROC requires both normal and failure bags with finite probabilities in [0, 1]."
+                result["reason"] = "ROC requires both normal and failure bags with valid scores (nonnegative distances)." if anomaly else "ROC requires both normal and failure bags with finite probabilities in [0, 1]."
                 continue
             fpr, tpr, thresholds, auroc = roc_curve(
                 (valid["ground_truth_label"] == "fail").to_numpy(dtype=int),
@@ -299,14 +302,14 @@ def write_probability_roc_report(
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", mode).strip("_").lower()
         roc_path, auc_path = output_dir / f"roc_{slug}.png", output_dir / f"auroc_{slug}.png"
         if curves:
-            _plot_probability_curves(curves, mode, roc_path, auc_path)
+            _plot_probability_curves(curves, mode, roc_path, auc_path, anomaly=anomaly)
             plot_files.extend([str(roc_path), str(auc_path)])
         else:
             roc_path.unlink(missing_ok=True)
             auc_path.unlink(missing_ok=True)
     pd.DataFrame(metrics, columns=[
-        "input_mode", "failure_category", "normal_count", "failure_count", "missing_probability_count",
-        "invalid_probability_count", "excluded_probability_count", "unknown_label_count", "probability_coverage",
+        "input_mode", "failure_category", "normal_count", "failure_count", f"missing_{score_name}_count",
+        f"invalid_{score_name}_count", f"excluded_{score_name}_count", "unknown_label_count", f"{score_name}_coverage",
         "distinct_score_count", "auroc", "status", "reason", *OPERATING_POINT_COLUMNS,
     ]).to_csv(output_dir / "auroc.csv", index=False)
     pd.DataFrame(points, columns=[
@@ -314,8 +317,9 @@ def write_probability_roc_report(
     ]).to_csv(output_dir / "roc_points.csv", index=False)
     report = {
         "score_column": score_column, "positive_class": "fail",
-        "threshold_rule": "Predict failure when probability >= threshold; scores and thresholds use [0, 1], with inf as the no-positive endpoint.",
-        "roc_interpretation": "ROC sweeps distinct CoP failure probabilities, grouping ties. AUROC measures failure-vs-normal ranking, not calibration or VLM decision accuracy.",
+        "threshold_rule": "Predict failure when score >= threshold; inf is the no-positive endpoint.",
+        "score_units": "nominal kNN distance (not a probability)" if anomaly else "failure probability in [0, 1]",
+        "roc_interpretation": "ROC sweeps distinct classifier scores, grouping ties. AUROC measures failure-vs-normal ranking, not calibration or VLM decision accuracy.",
         "operating_point_policy": "Use the common saved classifier_threshold for scored bags in each comparison. Missing/invalid/mixed thresholds are reported, never replaced by 0.5 or optimized on test labels.",
         "exclusion_policy": "Missing/nonfinite/out-of-range scores and unknown ground truth are excluded and counted. VLM uncertain/unparsed decisions do not exclude valid classifier scores.",
         "comparison": "Each failure category versus normal; other failures excluded. Input modes are separate.",
@@ -326,10 +330,19 @@ def write_probability_roc_report(
     return report
 
 
-def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path) -> None:
+def write_probability_roc_report(master_rows, benchmark_root, *, input_modes=None):
+    return _write_score_roc_report(master_rows, benchmark_root, input_modes=input_modes)
+
+
+def write_anomaly_roc_report(master_rows, benchmark_root, *, input_modes=None):
+    return _write_score_roc_report(master_rows, benchmark_root, input_modes=input_modes, anomaly=True)
+
+
+def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path, *, anomaly: bool = False) -> None:
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
+    score_title = "CoP nominal kNN" if anomaly else "CoP probability"
 
     colors = ["#222222"] + [plt.get_cmap("tab10")(index % 10) for index in range(len(curves) - 1)]
     labels = [textwrap.fill(result["failure_category"].replace("_", " "), width=42)
@@ -339,7 +352,8 @@ def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path) 
         for (result, fpr, tpr, auroc), color, label in zip(curves, colors, labels):
             threshold_detail = ""
             if result["threshold_status"] == "available":
-                threshold_detail = (f"\nAt {100 * result['configured_threshold']:g}%: recall {100 * result['recall_at_threshold']:.1f}%, "
+                threshold_label = f"distance {result['configured_threshold']:.4g}" if anomaly else f"{100 * result['configured_threshold']:g}%"
+                threshold_detail = (f"\nAt {threshold_label}: recall {100 * result['recall_at_threshold']:.1f}%, "
                                     f"false alarms {100 * result['false_positive_rate_at_threshold']:.1f}%")
                 axis.scatter(result["false_positive_rate_at_threshold"], result["recall_at_threshold"],
                              marker="D", s=55, color=color, edgecolors="white", linewidths=0.7, zorder=5)
@@ -349,7 +363,7 @@ def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path) 
                       marker=".", markersize=3.5, label=f"{label}\nAUROC = {auroc:.3f}{threshold_detail}")
         axis.plot([0, 1], [0, 1], "--", color="#999999", label="Chance (AUROC = 0.5)")
         axis.set(xlabel="False positive rate (normal bags)", ylabel="True positive rate (failure bags)",
-                 title=f"CoP probability ROC — {mode}", xlim=(-0.015, 1.015), ylim=(-0.015, 1.025))
+                 title=f"{score_title} ROC — {mode}", xlim=(-0.015, 1.015), ylim=(-0.015, 1.025))
         axis.set_xticks(np.linspace(0, 1, 6))
         axis.set_yticks(np.linspace(0, 1, 6))
         axis.grid(color="#e7ecf0", linewidth=0.8)
@@ -368,7 +382,7 @@ def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path) 
         bars = axis.barh(range(len(curves)), values, color=colors, height=0.6)
         axis.set_yticks(range(len(curves)), labels)
         axis.invert_yaxis()
-        axis.set(xlim=(0, 1.12), xlabel="AUROC · ranking across all thresholds", title=f"CoP probability AUROC — {mode}")
+        axis.set(xlim=(0, 1.12), xlabel="AUROC · ranking across all thresholds", title=f"{score_title} AUROC — {mode}")
         axis.set_xticks(np.linspace(0, 1, 6))
         axis.axvline(0.5, color="#777777", linestyle="--", linewidth=1, label="Chance (0.5)")
         for bar, value in zip(bars, values):
@@ -397,8 +411,13 @@ def main() -> None:
         raise ValueError("Benchmark summary is missing columns: " + ", ".join(sorted(missing)))
     write_roc_report(dataframe.to_dict("records"), arguments.summary.parent)
     write_probability_roc_report(dataframe.to_dict("records"), arguments.summary.parent)
-    from .cop_analysis import write_failure_probability_report
+    from .cop_analysis import write_failure_probability_report, write_anomaly_score_report
     write_failure_probability_report(dataframe.to_dict("records"), arguments.summary.parent)
+    has_anomaly_scores = "classifier_anomaly_score" in dataframe and dataframe["classifier_anomaly_score"].notna().any()
+    if has_anomaly_scores or (arguments.summary.parent / "benchmark_anomaly_roc").exists():
+        write_anomaly_roc_report(dataframe.to_dict("records"), arguments.summary.parent)
+        write_anomaly_score_report(dataframe.to_dict("records"), arguments.summary.parent)
+        print(f"Anomaly-distance reports: {arguments.summary.parent / 'benchmark_anomaly_roc'}")
     print(f"ROC report: {arguments.summary.parent / 'benchmark_roc'}")
     print(f"Probability ROC report: {arguments.summary.parent / 'benchmark_probability_roc'}")
     print(f"Failure-probability boxplots: {arguments.summary.parent}")

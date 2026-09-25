@@ -133,13 +133,13 @@ def _probability_category(row: dict[str, Any]) -> str:
     return failure_category(str(row.get("bag_path") or row.get("test_bag") or ""), "fail")
 
 
-def _probability_point_offsets(values: list[float]) -> np.ndarray:
+def _probability_point_offsets(values: list[float], separation: float = 2.3) -> np.ndarray:
     """Spread nearby scores horizontally without changing their probabilities."""
     offsets = np.zeros(len(values))
     candidates = np.asarray([0] + [sign * step for step in range(1, 6) for sign in (-1, 1)]) * 0.036
     placed: list[int] = []
     for index in np.argsort(values, kind="stable"):
-        nearby = [other for other in placed if abs(values[index] - values[other]) < 2.3]
+        nearby = [other for other in placed if abs(values[index] - values[other]) < separation]
         # Prefer the centre, then the least crowded available position.
         crowding = [sum(abs(candidate - offsets[other]) < 0.035 for other in nearby) for candidate in candidates]
         offsets[index] = candidates[int(np.argmin(crowding))]
@@ -147,7 +147,7 @@ def _probability_point_offsets(values: list[float]) -> np.ndarray:
     return offsets
 
 
-def _write_probability_plot(groups, points, styles, mode, plot_path):
+def _write_probability_plot(groups, points, styles, mode, plot_path, *, anomaly: bool = False):
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
@@ -159,24 +159,25 @@ def _write_probability_plot(groups, points, styles, mode, plot_path):
         for category in styles if category in categories
     }
     legend_lines = sum(label.count("\n") + 1 for label in legend_labels.values())
+    upper = max(max((value for values in groups.values() for value in values), default=0), 1e-6) if anomaly else 100
     figure, axis = plt.subplots(figsize=(11.2, max(6.4, 2.4 + legend_lines * 0.26)))
     try:
         figure.subplots_adjust(left=0.09, right=0.65, bottom=0.19, top=0.84)
-        figure.text(0.09, 0.94, "Failure probability by outcome", fontsize=20, weight="bold", color="#172b40")
+        figure.text(0.09, 0.94, "Nominal kNN distance by outcome" if anomaly else "Failure probability by outcome", fontsize=20, weight="bold", color="#172b40")
         figure.text(0.09, 0.89, f"CoP classifier  /  {mode} input  /  one marker per execution", fontsize=10, color="#607080")
         tick_labels = []
         for position, (label, color, title) in enumerate((("normal", "#2f78c4", "Successful"), ("fail", "#b75b61", "Failed")), start=1):
             values = groups[label]
             detail = f"n = {len(values)}"
             if values:
-                detail += f"  ·  median {np.median(values):.1f}%"
+                detail += f"  ·  median {np.median(values):.4g}" if anomaly else f"  ·  median {np.median(values):.1f}%"
                 axis.boxplot([values], positions=[position - 0.19], widths=0.23, patch_artist=True,
                              showfliers=False, manage_ticks=False,
                              boxprops={"facecolor": color, "alpha": 0.20, "edgecolor": color, "linewidth": 1.4},
                              medianprops={"color": color, "linewidth": 2.4},
                              whiskerprops={"color": color, "linewidth": 1.3},
                              capprops={"color": color, "linewidth": 1.3})
-                offsets = _probability_point_offsets(values)
+                offsets = _probability_point_offsets(values, 0.023 * upper)
                 for category, style in styles.items():
                     indices = [index for index, (name, _) in enumerate(points[label]) if name == category]
                     if indices:
@@ -184,13 +185,15 @@ def _write_probability_plot(groups, points, styles, mode, plot_path):
                                      marker=style["marker"], color=style["color"], s=52,
                                      edgecolors="white", linewidths=0.55, alpha=0.92, zorder=3)
             else:
-                axis.text(position, 50, "No scored bags", ha="center", fontsize=10, color="#607080")
+                axis.text(position, upper / 2, "No scored bags", ha="center", fontsize=10, color="#607080")
             tick_labels.append(f"{title}\n{detail}")
         axis.set_xticks([1, 2], tick_labels, fontsize=10)
-        axis.set(xlim=(0.48, 2.57), ylim=(-4, 104), ylabel="Predicted failure probability (%)")
+        axis.set(xlim=(0.48, 2.57), ylim=(-0.04 * upper, 1.04 * upper),
+                 ylabel="Anomaly distance (larger = farther from nominal)" if anomaly else "Predicted failure probability (%)")
         axis.yaxis.label.set_size(11)
         axis.yaxis.label.set_color("#34495e")
-        axis.set_yticks(range(0, 101, 20))
+        if not anomaly:
+            axis.set_yticks(range(0, 101, 20))
         axis.tick_params(axis="both", length=0, pad=9, colors="#34495e")
         axis.grid(axis="y", color="#e7ecf0", linewidth=0.8)
         axis.set_axisbelow(True)
@@ -212,23 +215,27 @@ def _write_probability_plot(groups, points, styles, mode, plot_path):
         plt.close(figure)
 
 
-def write_failure_probability_report(
+def _write_score_report(
     rows: list[dict[str, Any]], output_directory: Path, *,
     input_modes: list[str] | None = None,
+    anomaly: bool = False,
 ) -> dict[str, Any]:
-    """Summarize held-out classifier probabilities by ground truth, per mode."""
+    """Summarize held-out classifier scores by ground truth, per mode."""
     output_directory.mkdir(parents=True, exist_ok=True)
     modes = sorted(set(input_modes or []) | {str(row["input_mode"]) for row in rows if row.get("input_mode")})
     summary_rows = []
     mode_reports = []
     styles = _pca_category_styles({_probability_category(row) for row in rows
                                    if _canonical_label(row.get("ground_truth_label")) in PCA_LABELS})
-    columns = ["input_mode", "ground_truth_label", "count", "mean_percent", "median_percent",
-               "q1_percent", "q3_percent", "min_percent", "max_percent"]
+    suffix = "score" if anomaly else "percent"
+    score_name = "anomaly_score" if anomaly else "probability"
+    score_column = "classifier_anomaly_score" if anomaly else "classifier_failure_probability"
+    file_prefix = "benchmark_anomaly_score" if anomaly else "benchmark_failure_probability"
+    columns = ["input_mode", "ground_truth_label", "count"] + [f"{key}_{suffix}" for key in ("mean", "median", "q1", "q3", "min", "max")]
     for mode in modes:
         groups: dict[str, list[float]] = {"normal": [], "fail": []}
         points: dict[str, list[tuple[str, float]]] = {"normal": [], "fail": []}
-        excluded = {"unknown_label": 0, "missing_probability": 0, "invalid_probability": 0}
+        excluded = {"unknown_label": 0, f"missing_{score_name}": 0, f"invalid_{score_name}": 0}
         for row in rows:
             if row.get("input_mode") != mode:
                 continue
@@ -236,47 +243,56 @@ def write_failure_probability_report(
             if label not in groups:
                 excluded["unknown_label"] += 1
                 continue
-            value = row.get("classifier_failure_probability")
+            value = row.get(score_column)
             if value is None or value == "":
-                excluded["missing_probability"] += 1
+                excluded[f"missing_{score_name}"] += 1
                 continue
             try:
-                probability = float(value)
+                score = float(value)
             except (TypeError, ValueError):
-                probability = float("nan")
-            if not np.isfinite(probability) or not 0 <= probability <= 1:
-                excluded["invalid_probability"] += 1
+                score = float("nan")
+            if not np.isfinite(score) or score < 0 or (not anomaly and score > 1):
+                excluded[f"invalid_{score_name}"] += 1
                 continue
-            groups[label].append(100.0 * probability)
-            points[label].append((_probability_category(row), 100.0 * probability))
+            score = score if anomaly else 100.0 * score
+            groups[label].append(score)
+            points[label].append((_probability_category(row), score))
         summaries = []
         for label, values in groups.items():
             summary = {column: None for column in columns}
             summary.update(input_mode=mode, ground_truth_label=label, count=len(values))
             if values:
                 q1, median, q3 = np.quantile(values, [0.25, 0.5, 0.75])
-                summary.update(mean_percent=float(np.mean(values)), median_percent=float(median),
-                               q1_percent=float(q1), q3_percent=float(q3),
-                               min_percent=min(values), max_percent=max(values))
+                summary.update({f"{key}_{suffix}": float(value) for key, value in
+                                zip(("mean", "median", "q1", "q3", "min", "max"),
+                                    (np.mean(values), median, q1, q3, min(values), max(values)))})
             summaries.append(summary)
         summary_rows.extend(summaries)
-        plot_path = output_directory / f"benchmark_failure_probability_{_slug(mode)}.png"
+        plot_path = output_directory / f"{file_prefix}_{_slug(mode)}.png"
         valid_count = sum(len(values) for values in groups.values())
         if valid_count:
-            _write_probability_plot(groups, points, styles, mode, plot_path)
+            _write_probability_plot(groups, points, styles, mode, plot_path, anomaly=anomaly)
         else:
             # Do not leave a previous run's plot masquerading as this result.
             plot_path.unlink(missing_ok=True)
         mode_reports.append({"input_mode": mode, "status": "created" if valid_count else "skipped",
-                             "reason": None if valid_count else "No valid probabilities with known ground truth.",
+                             "reason": None if valid_count else "No valid scores with known ground truth.",
                              "plot_file": str(plot_path) if valid_count else None,
                              "scored_rows": valid_count, "excluded_rows": excluded, "groups": summaries})
-    csv_path = output_directory / "benchmark_failure_probability_summary.csv"
+    csv_path = output_directory / f"{file_prefix}_summary.csv"
     pd.DataFrame(summary_rows, columns=columns).to_csv(csv_path, index=False)
-    return {"grouping": "ground_truth_label", "units": "percent",
+    return {"grouping": "ground_truth_label", "units": "distance" if anomaly else "percent",
             "note": "Classifier estimates; groups are actual outcomes, not predicted decisions. Input modes are kept separate.",
             "unassigned_mode_rows": sum(not bool(row.get("input_mode")) for row in rows),
             "summary_csv": str(csv_path), "modes": mode_reports}
+
+
+def write_failure_probability_report(rows, output_directory, *, input_modes=None):
+    return _write_score_report(rows, output_directory, input_modes=input_modes)
+
+
+def write_anomaly_score_report(rows, output_directory, *, input_modes=None):
+    return _write_score_report(rows, output_directory, input_modes=input_modes, anomaly=True)
 
 
 def pca_2d(

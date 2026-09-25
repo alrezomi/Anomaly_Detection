@@ -708,6 +708,94 @@ setting no longer sends tokens to CUDA when the model has been placed on CPU.
 The resolved device is printed at startup. If it reports CPU unexpectedly,
 check `nvidia-smi` on the lab PC for available GPU memory; CPU inference is slow.
 
+### Nominal-only kNN detector
+
+The checked-in config selects `rynnbrain.cop_classifier.method: "knn"`.
+This detector uses only the existing `cop_classifier.training.normal_bags`
+list. It ignores `training.failure_bags` and `training.bags`; those lists remain
+available if you switch back to logistic regression. No failure examples are
+needed to fit the kNN detector or its decision threshold.
+
+Set these fields **inside your existing `cop_classifier` object**, keeping
+your current paths and bag lists:
+
+```json
+"enabled": true,
+"method": "knn",
+"knn": {
+  "n_neighbors": 3,
+  "threshold_quantile": 0.95
+}
+```
+
+The detector stores the full L2-normalized nominal CoP vectors. For a new bag,
+its anomaly score is the mean Euclidean distance to the `n_neighbors` nearest
+nominal vectors. Larger distance means less similar to the nominal examples.
+PCA is only for visualization; its two coordinates are not classifier inputs.
+This is nearest-neighbour novelty detection, not k-means clustering.
+
+The cutoff comes from nominal training distances calculated with each bag
+left out of its own neighbours. A new score above their configured quantile
+is classified as failure. With the default `n_neighbors: 3`, at least four
+nominal bags are required. Use diverse nominal executions and assess false
+alarms on separate, unseen nominal bags: a 95th-percentile training cutoff
+does not guarantee a 5% false-alarm rate on new data. The saved threshold
+implements this strict cutoff with the same `score >= threshold` rule used
+by the reports. No test labels select the threshold.
+
+Run the same benchmark command:
+
+```bash
+docker compose run --rm --build benchmark
+```
+
+It prepares only the selected nominal training vectors, fits kNN, then
+evaluates each eligible test bag once. Compatible saved training vectors and
+responses are reused. Missing or stale ones are extracted with the configured
+VLM and LoRA adapter. `--include-nominal-bags --skip-dino` still supports a
+VLM-only benchmark including DINO-memory bags; reference, LoRA-training, and
+kNN-training bags remain excluded. An old logistic failure-training list
+alone does not exclude bags while kNN is active.
+
+The existing `model_paths.raw` may stay `.../raw_logistic.npz`. kNN derives
+`.../raw_knn.npz` in that same directory, preserving the logistic model.
+Other configured filenames similarly receive `_knn`; a name already ending
+in `_knn` is used as-is. Training and inference resolve this path identically.
+The sibling JSON records the training bag names, feature signature, and cutoff
+settings; `raw_knn_training_predictions.csv` contains leave-one-out training
+distances, not held-out accuracy estimates. Single-bag inference uses the
+saved detector via the usual `rynnbrain-test-multiturn` service. Standalone
+`cop-classifier-train` also supports kNN and only prepares/fits the selected
+nominal bags; it does not score the entire benchmark.
+
+For kNN, `benchmark_clean.csv` contains `anomaly_score`, `anomaly_threshold`,
+and `classifier_decision` alongside the original VLM decision and correctness.
+`failure_probability` stays empty: distance is not a calibrated probability.
+The detailed outputs use `classifier_anomaly_score` and
+`classifier_score_kind: "knn_distance"`. Reports include:
+
+- `benchmark_anomaly_score_raw.png`: distance boxplots with category markers.
+- `benchmark_anomaly_score_summary.csv`: distance statistics by actual outcome.
+- `benchmark_anomaly_roc/`: ROC/AUROC per failure category and overall, using
+  continuous distances, with the saved cutoff's recall and false-alarm rate.
+
+PCA, VLM decision ROC, response JSON/CSV files, selected frames, and classifier
+decision statistics continue to be produced. Failure labels are still used
+for **evaluation**, although kNN training needs only nominal data.
+
+To return to the supervised classifier, set `method: "logistic"`; it uses
+the original model path, nominal/failure lists, probability columns, and
+probability plots. Old configs without `method` retain logistic behavior.
+`training.threshold`, `regularization_c`, and `class_weight` apply only to
+logistic regression; kNN uses its own settings above.
+
+The VLM/LoRA weights are not changed by classifier training. If the loaded
+LoRA adapter was trained with failures, the **classifier** is nominal-only,
+but the complete pipeline has still seen failure supervision. For an
+experiment without that task-specific supervision, evaluate the base model
+with `lora_adapter_path: null`; changed feature signatures trigger preparation
+of matching training vectors.
+
 ### Frozen-vector logistic failure classifier
 
 RynnBrain remains fully frozen. After collecting labeled vectors, a small
@@ -724,6 +812,7 @@ testing:
 ```json
 "cop_classifier": {
   "enabled": false,
+  "method": "logistic",
   "model_paths": {
     "raw": "/outputs/experiments/example/cop_classifier/raw_logistic.npz"
   },
@@ -779,7 +868,7 @@ evaluates each test bag once with probabilities already available. One VLM
 instance serves both phases. Compatible training vectors are reused; missing or
 stale vectors are refreshed. It enables vector capture for classifier scoring
 without editing the config. Training output paths must match `model_paths`.
-The small logistic classifier is fitted on each run; the VLM/LoRA is not retrained.
+The selected classifier is fitted on each run; the VLM/LoRA is not retrained.
 Setting `cop_classifier.enabled: false` disables automatic classifier preparation
 and scoring. The older `--prepare-classifier` flag remains an optional way to
 enable them for one run. `--skip-vlm` does not prepare a classifier. The normal
@@ -882,6 +971,7 @@ After that one training run, enable the saved head for future tests:
 ```json
 "cop_classifier": {
   "enabled": true,
+  "method": "logistic",
   "model_paths": {
     "raw": "/outputs/experiments/example/cop_classifier/raw_logistic.npz"
   }
@@ -939,7 +1029,7 @@ one stage.
 
 ### CoP probability ROC and AUROC by failure category
 
-With `rynnbrain.cop_classifier.enabled: true`, the usual benchmark command also
+With `rynnbrain.cop_classifier.enabled: true` and `method: "logistic"`, the usual benchmark command also
 produces probability-based ROC/AUROC reports automatically, using the scores
 already computed for test bags. No extra model calls or second benchmark run
 are needed. These reports live in `benchmark_probability_roc/` inside the

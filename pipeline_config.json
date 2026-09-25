@@ -95,6 +95,11 @@
     },
     "cop_classifier": {
       "enabled": true,
+      "method": "knn",
+      "knn": {
+        "n_neighbors": 3,
+        "threshold_quantile": 0.95
+      },
       "model_paths": {
         "raw": "/outputs/experiments/pick_place_dino728_v102/cop_classifier/raw_logistic.npz"
       },
