@@ -106,7 +106,7 @@ class NominalKNNTests(unittest.TestCase):
         self.assertEqual(restored.threshold, detector.threshold)
 
     def test_configuration_keeps_logistic_path_and_uses_only_normal_selection(self):
-        config = {"model_paths": {"raw": str(self.root / "raw_logistic.npz")}, "method": "knn",
+        config = {"model_paths": {"raw": str(self.root / "raw_logistic.npz")}, "method": "knn", "plot_timeline": False,
                   "knn": {"n_neighbors": 2}, "training": {"normal_bags": self.names,
                   "failure_bags": ["missing_failure_bag"], "input_dir": str(self.root)}}
         path = self.root / "config.json"

@@ -722,6 +722,7 @@ your current paths and bag lists:
 ```json
 "enabled": true,
 "method": "knn",
+"plot_timeline": true,
 "knn": {
   "n_neighbors": 3,
   "threshold_quantile": 0.95
@@ -750,7 +751,7 @@ docker compose run --rm --build benchmark
 ```
 
 It prepares only the selected nominal training vectors, fits kNN, then
-evaluates each eligible test bag once. Compatible saved training vectors and
+generates each eligible test bag's full response once. Compatible saved training vectors and
 responses are reused. Missing or stale ones are extracted with the configured
 VLM and LoRA adapter. `--include-nominal-bags --skip-dino` still supports a
 VLM-only benchmark including DINO-memory bags; reference, LoRA-training, and
@@ -795,6 +796,63 @@ but the complete pipeline has still seen failure supervision. For an
 experiment without that task-specific supervision, evaluate the base model
 with `lora_adapter_path: null`; changed feature signatures trigger preparation
 of matching training vectors.
+
+#### Anomaly score and threshold over time
+
+With kNN, `cop_classifier.plot_timeline` defaults to `true`. The normal
+benchmark automatically prepares **progress-matched nominal-prefix detectors**
+and saves two files per evaluated bag and input mode in its existing
+`rynnbrain_multiturn/` directory:
+
+- `knn_timeline_raw.png`: anomaly distance and the matched nominal threshold
+  against actual seconds from the start of the bag/video. Red dots exceed the
+  threshold; thresholds can change as the execution progresses.
+- `knn_timeline_raw.csv`: timestamps, scores, thresholds, sampled progress,
+  image indices, errors, evaluation ID, and adapter identity for each snapshot.
+
+For `num_frames: 8`, snapshot 1 uses the first selected execution timestep,
+snapshot 2 uses the first two, and so on. Every snapshot uses the same nominal
+reference and configured base model/LoRA. It receives no execution images from
+later timesteps. For multiple cameras, a timestep includes that sample from
+each camera; its plotted time is the latest included timestamp.
+
+Training uses the existing `training.normal_bags` only. It creates a separate
+nominal vector memory for each prefix length and estimates that prefix's
+threshold from leave-one-bag-out nominal distances, using the same k and
+quantile as the complete-execution detector. No failure or test labels choose
+the thresholds. A healthy unfinished task is thus compared with nominal
+executions observed up to the same sampled progress, rather than only with
+finished executions.
+
+The last point reuses the existing full-execution vector, and its score and
+threshold match the bag's summary exactly. VLM answers, overall benchmark
+statistics, ROC/AUROC, and PCA still use the full-execution results. Prefix
+scores are kept separate from those results.
+
+The prefix detector is saved beside the complete detector as
+`raw_knn_timeline.npz` plus a JSON sidecar. Nominal prefix vectors are cached
+under each training bag's `rynnbrain_multiturn/cop_timeline/` directory, outside
+the full-vector/PCA input files. They are reused only when their full-vector
+evaluation ID, model/adapter/prompt signature, and sampling protocol match.
+Missing or stale prefix caches are refreshed without regenerating compatible
+full responses. `--refresh-vectors` also refreshes prefix vectors.
+
+This adds inference work: eight timesteps require seven extra short vector
+extractions per training bag on the first run, and per evaluated bag. They
+reuse the reference response and do not generate full text answers. Set
+`plot_timeline: false` to keep only the original whole-execution evaluation.
+No new benchmark command or separate LoRA training is required. For a single
+bag, first run the usual benchmark or `cop-classifier-train` once to prepare
+the prefix detector, then use `rynnbrain-test-multiturn` normally.
+
+These are **offline sampled-progress timelines**: the nominal and test bags
+are aligned by sample index across their respective recordings, not by exact
+robot stage or a shared duration. Different execution speeds can affect this
+alignment. The lines connect evaluated snapshots; they do not establish an
+exact failure-onset time between samples. A recording with too few sampled
+timesteps cannot produce a matching timeline. Snapshot failures appear as
+gaps with errors in the CSV. A timeline failure is recorded in
+`knn_timeline_error` and does not discard the VLM response or final score.
 
 ### Frozen-vector logistic failure classifier
 

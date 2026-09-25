@@ -36,6 +36,18 @@ def validate_knn_settings(count: int, *, n_neighbors: int = 3, threshold_quantil
         raise ValueError("kNN threshold_quantile must be strictly between zero and one.")
 
 
+def fit_nominal_memory(vectors, *, n_neighbors=3, threshold_quantile=0.95):
+    """Shared nominal-only fitting for complete executions and progress prefixes."""
+    validate_knn_settings(len(vectors), n_neighbors=n_neighbors, threshold_quantile=threshold_quantile)
+    memory = _unit_rows(vectors)
+    loo = np.asarray([_distance(row, np.delete(memory, index, axis=0), n_neighbors)
+                      for index, row in enumerate(memory)])
+    cutoff = float(np.quantile(loo, threshold_quantile, method="higher"))
+    # Keep >= as the shared decision rule, without flagging scores exactly
+    # equal to the nominal quantile (including identical zero-distance bags).
+    return memory, float(np.nextafter(cutoff, np.inf)), loo, cutoff
+
+
 @dataclass(frozen=True)
 class CoPKNNDetector:
     nominal_vectors: np.ndarray
@@ -63,15 +75,11 @@ class CoPKNNDetector:
 
 def train_knn(records, output_file: Path, *, n_neighbors: int = 3, threshold_quantile: float = 0.95) -> dict[str, Any]:
     """Fit a nominal memory and estimate a cutoff without using failure labels."""
-    validate_knn_settings(len(records), n_neighbors=n_neighbors, threshold_quantile=threshold_quantile)
+    memory, threshold, loo, cutoff = fit_nominal_memory(
+        np.stack([record.vector for record in records]),
+        n_neighbors=n_neighbors, threshold_quantile=threshold_quantile,
+    )
     n_neighbors = int(n_neighbors)
-    memory = _unit_rows(np.stack([record.vector for record in records]))
-    loo = np.asarray([_distance(row, np.delete(memory, index, axis=0), n_neighbors)
-                      for index, row in enumerate(memory)])
-    cutoff = float(np.quantile(loo, threshold_quantile, method="higher"))
-    # Use the shared >= decision rule, but do not flag scores equal to the
-    # nominal quantile (notably identical nominal vectors with distance zero).
-    threshold = float(np.nextafter(cutoff, np.inf))
     path = output_file.resolve()
     if path.suffix.lower() != ".npz":
         raise ValueError("kNN output file must use the .npz extension.")

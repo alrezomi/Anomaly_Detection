@@ -496,6 +496,7 @@ def main() -> None:
                 "classifier_error": row.get("classifier_error"),
                 "classifier_anomaly_score": row.get("classifier_anomaly_score"),
                 "classifier_score_kind": row.get("classifier_score_kind"),
+                **{key: row.get(key) for key in ("knn_timeline_status", "knn_timeline_csv", "knn_timeline_plot", "knn_timeline_error")},
                 **dino_summary,
             })
 

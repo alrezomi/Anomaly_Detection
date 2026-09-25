@@ -40,7 +40,7 @@ class ClassifierPreparationTests(unittest.TestCase):
                 "reference_bags": [str(self.root / "data/reference")],
                 "model": {"model_id": "test"}, "generation": {"do_sample": False},
                 "cop_vectors": {"enabled": False},
-                "cop_classifier": {"enabled": True, "model_paths": {"raw": str(self.model_path)},
+                "cop_classifier": {"enabled": True, "plot_timeline": False, "model_paths": {"raw": str(self.model_path)},
                     "training": {"input_dir": str(self.root / "vectors"), "input_mode": "raw",
                         "normal_bags": [str(self.root / "data" / name) for name in self.names[:2]],
                         "failure_bags": [str(self.root / "data" / name) for name in self.names[2:]],
@@ -228,6 +228,55 @@ class ClassifierPreparationTests(unittest.TestCase):
         if knn:
             self.assertEqual(statistics["probability_roc"]["metrics"][0]["status"], "skipped")
         self.assertEqual(json.loads(self.config_path.read_text()), self.config)
+
+    def test_knn_benchmark_trains_progress_prefixes_and_writes_each_case_timeline(self):
+        vlm = self.config["rynnbrain"]
+        vlm["num_frames"] = 3
+        vlm["cop_classifier"].update(method="knn", plot_timeline=True, knn={"n_neighbors": 1})
+        self.model.adapter_training_bags = set(self.names[:2])
+        self.model.extract_multiturn_cop_vector = Mock(side_effect=lambda turns, *args, **kwargs:
+            self.torch.tensor([1.0, len(turns[1]["images"]) * 0.2, 0.3, 0.4]))
+        self.config_path.write_text(json.dumps(self.config))
+        self.settings = configured_training_settings(self.config_path)
+        frames = [{"timestamp_sec": time, "sample_index": i} for i, time in enumerate((4.5, 9.2, 20.0))]
+        def inputs(path, *args):
+            return [(path.name, Image.new("RGB", (2, 2))) for _ in frames], frames
+        with patch("rynnbrain_vlm.run._raw_inputs", side_effect=inputs):
+            self._check_benchmark_workflow(knn=True)
+            summary = pd.read_csv(self.root / "benchmark/benchmark_summary.csv")
+            self.assertTrue((summary.knn_timeline_status == "created").all())
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, 12)
+            for _, row in summary.iterrows():
+                timeline = pd.read_csv(row.knn_timeline_csv)
+                self.assertTrue(Path(row.knn_timeline_plot).is_file())
+                self.assertEqual(timeline.timestamp_sec.tolist(), [4.5, 9.2, 20.0])
+                self.assertAlmostEqual(timeline.anomaly_score.iloc[-1], row.classifier_anomaly_score)
+                self.assertAlmostEqual(timeline.threshold.iloc[-1], row.classifier_threshold)
+            before = self.model.extract_multiturn_cop_vector.call_count
+            prepare_training_vectors(self.config, self.settings, model=self.model)
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, before)
+            # An optional plotting failure must still save the complete VLM
+            # response/vector and score. Disabling plotting clears stale graphs
+            # and performs no prefix passes.
+            bag_config = {**self.config, "test_bag": str(self.root / "data/normal_test")}
+            bag_vlm = {**vlm, "cop_vectors": {"enabled": True}}
+            output = self.root / "single"
+            with patch("rynnbrain_vlm.cop_timeline.write_knn_timeline", side_effect=RuntimeError("plot unavailable")):
+                rows, frames_out, responses, task = self.run.evaluate_multiturn(
+                    self.model, bag_config, bag_vlm, 3, {}, output, reference_response="reference response")
+                self.run.write_multiturn_outputs(output, rows, frames_out, responses, task)
+            self.assertEqual(rows[0]["knn_timeline_error"], "plot unavailable")
+            self.assertEqual(rows[0]["response"], "Decision: success")
+            self.assertIsNotNone(rows[0]["classifier_anomaly_score"])
+            self.assertTrue((output / "rynnbrain_responses_multiturn.json").is_file())
+            self.assertTrue(Path(rows[0]["cop_vector_path"]).is_file())
+            (output / "knn_timeline_raw.png").write_bytes(b"stale plot")
+            bag_vlm["cop_classifier"] = {**vlm["cop_classifier"], "plot_timeline": False}
+            rows, *_ = self.run.evaluate_multiturn(
+                self.model, bag_config, bag_vlm, 3, {}, output, reference_response="reference response")
+            self.assertEqual(rows[0]["knn_timeline_status"], "disabled")
+            self.assertFalse((output / "knn_timeline_raw.png").exists())
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, before)
 
     def test_dino_only_benchmark_does_not_load_vlm_or_prepare_enabled_classifier(self):
         import run_benchmark as benchmark
