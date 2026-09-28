@@ -16,7 +16,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
-from .cop_classifier import CoPLogisticClassifier, load_classifier
+from .cop_classifier import classifier_method, classifier_model_paths, load_classifier
 from .cop_analysis import save_cop_vector
 from .model import COP_REPRESENTATION_ID, RynnBrainModel
 from .prompts import task_context_prompt, evaluation_prompt_multiturn, visual_evidence_prompt
@@ -86,7 +86,7 @@ def _raw_inputs(
             label = f"Time {time_index + 1}, camera {_slug(topic)}:"
             inputs.append((label, image))
             metadata.append(
-                {"topic": topic, "frame_id": frame_id, "timestamp_sec": timestamp}
+                {"topic": topic, "frame_id": frame_id, "timestamp_sec": timestamp, "sample_index": time_index}
             )
     return inputs, metadata
 
@@ -113,7 +113,7 @@ def _heatmap_inputs(
                 output.append(
                     (f"Time {time_index + 1}, heatmap {_slug(topic)}:", frames[time_index])
                 )
-                metadata.append({"topic": topic, **topic_metadata[time_index]})
+                metadata.append({"topic": topic, "sample_index": time_index, **topic_metadata[time_index]})
     return output, metadata
 
 
@@ -128,6 +128,51 @@ def _parse_response(response: str) -> tuple[str, str]:
         decision_match.group(1).lower() if decision_match else "not_parsed",
         confidence_match.group(1).lower() if confidence_match else "not_parsed",
     )
+
+
+def _execution_inputs(config, vlm, frame_count, input_modes):
+    """Load the same selected images/timestamps for evaluation and prefix training."""
+    topics = list(vlm.get("camera_topics", config["camera_topics"]))
+    directory = Path(config["output_dir"])
+    start = float(vlm.get("sampling_start_sec", 0.0))
+    end = float(vlm["sampling_end_sec"]) if vlm.get("sampling_end_sec") is not None else None
+    raw_paths = {topic: str(directory / f"{_slug(topic)}_raw_original.mp4") for topic in topics}
+    heatmap_paths = {topic: str(directory / f"{_slug(topic)}_heatmap.mp4") for topic in topics}
+    raw_paths.update(vlm.get("raw_video_paths", {}))
+    heatmap_paths.update(vlm.get("heatmap_video_paths", {}))
+    source = vlm.get("source", "generated_videos")
+    raw_inputs, raw_metadata = [], []
+    if source == "generated_videos":
+        if any(mode in {"raw", "raw_heatmap"} for mode in input_modes):
+            missing = [topic for topic in topics if not Path(raw_paths[topic]).is_file()]
+            if missing:
+                expected = "\n  - ".join(raw_paths[topic] for topic in missing)
+                raise FileNotFoundError(
+                    "Original-resolution raw video(s) are missing; refusing to mix them with "
+                    f"square DINO model-input videos. Expected:\n  - {expected}\n"
+                    "Run vision-test again with original-video export enabled, or explicitly set "
+                    "rynnbrain.raw_video_paths."
+                )
+            raw_inputs, raw_metadata = _heatmap_inputs(raw_paths, topics, frame_count, start, end)
+            raw_inputs = [(label.replace("heatmap", "raw frame"), image) for label, image in raw_inputs]
+    elif source == "rosbag":
+        raw_inputs, raw_metadata = _raw_inputs(Path(config["test_bag"]), topics, frame_count)
+    else:
+        raise ValueError("rynnbrain.source must be 'generated_videos' or 'rosbag'")
+    selected = {}
+    for mode in input_modes:
+        if mode == "raw":
+            selected[mode] = raw_inputs, raw_metadata
+        elif mode in {"heatmap", "raw_heatmap"}:
+            heatmaps, metadata = _heatmap_inputs(heatmap_paths, topics, frame_count, start, end)
+            if mode == "heatmap":
+                selected[mode] = heatmaps, metadata
+            else:
+                selected[mode] = ([item for pair in zip(raw_inputs, heatmaps) for item in pair],
+                                  [item for pair in zip(raw_metadata, metadata) for item in pair])
+        else:
+            raise ValueError(f"Unsupported input mode: {mode}")
+    return selected, raw_metadata
 
 
 def _save_inputs(
@@ -261,27 +306,22 @@ def evaluate_multiturn(
     print(f"Task: {task_description}\n")
 
     output_directory.mkdir(parents=True, exist_ok=True)
-    vision_output_directory = Path(config["output_dir"])
     topics = list(vlm.get("camera_topics", config["camera_topics"]))
     if not topics:
         raise ValueError("rynnbrain.camera_topics must contain at least one topic")
-    sampling_start_sec = float(vlm.get("sampling_start_sec", 0.0))
-    end_value = vlm.get("sampling_end_sec")
-    sampling_end_sec = float(end_value) if end_value is not None else None
     cop_config = dict(vlm.get("cop_vectors", {}))
     capture_cop_vectors = training_vectors_only or bool(cop_config.get("enabled", True))
 
-    source = vlm.get("source", "generated_videos")
     input_modes = list(vlm.get("input_modes", ["raw"]))
     classifier_config = dict(vlm.get("cop_classifier", {}))
     classifier_enabled = not training_vectors_only and bool(classifier_config.get("enabled", False))
-    classifiers: dict[str, CoPLogisticClassifier] = {}
+    classifiers: dict[str, Any] = {}
     if classifier_enabled:
         if not capture_cop_vectors:
             raise ValueError(
                 "rynnbrain.cop_classifier requires rynnbrain.cop_vectors.enabled=true."
             )
-        model_paths = classifier_config.get("model_paths", {})
+        model_paths = classifier_model_paths(classifier_config)
         if not isinstance(model_paths, dict):
             raise ValueError("rynnbrain.cop_classifier.model_paths must be an object.")
         missing_models = [mode for mode in input_modes if not model_paths.get(mode)]
@@ -293,6 +333,9 @@ def evaluate_multiturn(
         classifiers = {
             mode: load_classifier(Path(str(model_paths[mode]))) for mode in input_modes
         }
+        from .cop_knn import CoPKNNDetector
+        if any(isinstance(classifier, CoPKNNDetector) != (classifier_method(classifier_config) == "knn") for classifier in classifiers.values()):
+            raise ValueError("Saved classifier type does not match cop_classifier.method; train the selected method first.")
         incompatible_modes = [
             mode for mode, classifier in classifiers.items()
             if classifier.input_mode != mode
@@ -302,42 +345,7 @@ def evaluate_multiturn(
                 "Classifier file input mode does not match configured mode(s): "
                 + ", ".join(incompatible_modes)
             )
-    raw_video_paths = {
-        topic: str(vision_output_directory / f"{_slug(topic)}_raw_original.mp4")
-        for topic in topics
-    }
-    heatmap_paths = {
-        topic: str(vision_output_directory / f"{_slug(topic)}_heatmap.mp4")
-        for topic in topics
-    }
-    raw_video_paths.update(vlm.get("raw_video_paths", {}))
-    heatmap_paths.update(vlm.get("heatmap_video_paths", {}))
-    if source == "generated_videos":
-        raw_inputs = []
-        frame_metadata = []
-        if any(mode in {"raw", "raw_heatmap"} for mode in input_modes):
-            missing_raw = [topic for topic in topics if not Path(raw_video_paths[topic]).is_file()]
-            if missing_raw:
-                expected = "\n  - ".join(raw_video_paths[topic] for topic in missing_raw)
-                raise FileNotFoundError(
-                    "Original-resolution raw video(s) are missing; refusing to mix them with "
-                    f"square DINO model-input videos. Expected:\n  - {expected}\n"
-                    "Run vision-test again with original-video export enabled, or explicitly set "
-                    "rynnbrain.raw_video_paths."
-                )
-            raw_inputs, frame_metadata = _heatmap_inputs(
-                raw_video_paths, topics, frame_count, sampling_start_sec, sampling_end_sec
-            )
-            raw_inputs = [
-                (label.replace("heatmap", "raw frame"), image)
-                for label, image in raw_inputs
-            ]
-    elif source == "rosbag":
-        raw_inputs, frame_metadata = _raw_inputs(
-            Path(config["test_bag"]), topics, frame_count
-        )
-    else:
-        raise ValueError("rynnbrain.source must be 'generated_videos' or 'rosbag'")
+    selected_inputs, frame_metadata = _execution_inputs(config, vlm, frame_count, input_modes)
 
     reference_bags = list(vlm.get("reference_bags", []))
     if not reference_bags:
@@ -356,19 +364,7 @@ def evaluate_multiturn(
     raw_records = []
 
     for mode in input_modes:
-        if mode == "raw":
-            inputs = raw_inputs
-        elif mode == "heatmap":
-            inputs, _ = _heatmap_inputs(
-                heatmap_paths, topics, frame_count, sampling_start_sec, sampling_end_sec
-            )
-        elif mode == "raw_heatmap":
-            heatmaps, _ = _heatmap_inputs(
-                heatmap_paths, topics, frame_count, sampling_start_sec, sampling_end_sec
-            )
-            inputs = [item for pair in zip(raw_inputs, heatmaps) for item in pair]
-        else:
-            raise ValueError(f"Unsupported input mode: {mode}")
+        inputs, mode_frame_metadata = selected_inputs[mode]
 
         _save_inputs(output_directory, mode, inputs)
 
@@ -422,6 +418,8 @@ def evaluate_multiturn(
         classifier_threshold: float | None = None
         classifier_model_path: str | None = None
         classifier_error: str | None = None
+        classifier_anomaly_score: float | None = None
+        score_kind = "knn_distance" if classifier_enabled and classifier_method(classifier_config) == "knn" else "failure_probability"
         if cop_vector is not None:
             text_config = getattr(model.model.config, "text_config", None)
             model_revision = getattr(model.model.config, "_commit_hash", None)
@@ -432,20 +430,26 @@ def evaluate_multiturn(
                 classifier = classifiers[mode]
                 classifier_threshold = classifier.threshold
                 classifier_model_path = str(
-                    Path(str(classifier_config["model_paths"][mode])).resolve()
+                    Path(str(model_paths[mode])).resolve()
                 )
                 try:
                     if classifier.representation_id != COP_REPRESENTATION_ID:
                         raise ValueError("Classifier representation does not match the captured CoP vector.")
-                    classifier_failure_probability = classifier.predict_failure_probability(
-                        cop_vector.numpy(), input_mode=mode,
-                        comparison_signature=comparison_signature,
-                    )
-                    classifier_decision = classifier.predict_label(classifier_failure_probability)
+                    if score_kind == "knn_distance":
+                        classifier_anomaly_score = classifier.predict_anomaly_score(
+                            cop_vector.numpy(), input_mode=mode, comparison_signature=comparison_signature,
+                        )
+                        classifier_decision = classifier.predict_label(classifier_anomaly_score)
+                    else:
+                        classifier_failure_probability = classifier.predict_failure_probability(
+                            cop_vector.numpy(), input_mode=mode, comparison_signature=comparison_signature,
+                        )
+                        classifier_decision = classifier.predict_label(classifier_failure_probability)
                 except ValueError as error:
                     # Incompatible scoring must not discard a completed VLM answer.
                     # Leave the probability empty and report the reason explicitly.
                     classifier_failure_probability = None
+                    classifier_anomaly_score = None
                     classifier_error = str(error)
                     print(f"Classifier scoring failed ({mode}); keeping VLM response and vector: {error}")
             vector_path, metadata_path = save_cop_vector(
@@ -472,6 +476,8 @@ def evaluate_multiturn(
                     "classifier_threshold": classifier_threshold,
                     "classifier_model_path": classifier_model_path,
                     "classifier_error": classifier_error,
+                    "classifier_anomaly_score": classifier_anomaly_score,
+                    "classifier_score_kind": score_kind if classifier_enabled else None,
                     "comparison_signature": comparison_signature,
                 },
             )
@@ -501,6 +507,39 @@ def evaluate_multiturn(
                 # and vector already produced (e.g. if this pass runs out of VRAM).
                 evidence_error = str(error)
                 print(f"Visual evidence unavailable; keeping the evaluation: {error}")
+        timeline = {"status": "not_applicable", "csv": None, "plot": None, "error": None}
+        if not training_vectors_only:
+            from .cop_timeline import timeline_paths, write_knn_timeline
+
+            csv_path, plot_path = timeline_paths(output_directory, mode)
+            try:
+                # Also clear a stale kNN graph when rerunning with another
+                # classifier or with timeline plotting disabled.
+                csv_path.unlink(missing_ok=True)
+                plot_path.unlink(missing_ok=True)
+                if classifier_enabled and score_kind == "knn_distance":
+                    if not classifier_config.get("plot_timeline", True):
+                        timeline["status"] = "disabled"
+                    elif classifier_error or cop_vector is None:
+                        raise ValueError(classifier_error or "No CoP vector is available for the timeline.")
+                    else:
+                        timeline.update(write_knn_timeline(
+                            model=model, classifier=classifiers[mode], turns=turns, generation=generation,
+                            nominal_response=nominal_response, frame_metadata=mode_frame_metadata,
+                            final_vector=cop_vector, comparison_signature=comparison_signature,
+                            output_directory=output_directory, mode=mode,
+                            bag_name=Path(config["test_bag"]).name, provenance=provenance,
+                            classifier_model_path=classifier_model_path,
+                        ))
+                        print(f"Saved kNN timeline: {timeline['plot']}")
+            except Exception as error:
+                # This optional diagnostic must never discard the original
+                # VLM response, final vector, or full-execution classifier score.
+                timeline.update(status="failed", error=str(error),
+                                csv=str(csv_path) if csv_path.exists() else None,
+                                plot=None)
+                print(f"kNN timeline unavailable; keeping the full evaluation: {error}")
+        timeline_fields = {f"knn_timeline_{key}": timeline.get(key) for key in ("status", "csv", "plot", "error")}
         rows.append(
             {
                 "test_bag": config["test_bag"],
@@ -532,6 +571,9 @@ def evaluate_multiturn(
                 "classifier_threshold": classifier_threshold,
                 "classifier_model_path": classifier_model_path,
                 "classifier_error": classifier_error,
+                "classifier_anomaly_score": classifier_anomaly_score,
+                "classifier_score_kind": score_kind if classifier_enabled else None,
+                **timeline_fields,
                 **provenance,
             }
         )
@@ -583,6 +625,10 @@ def evaluate_multiturn(
             "classifier_threshold": classifier_threshold,
             "classifier_model_path": classifier_model_path,
             "classifier_error": classifier_error,
+            "classifier_anomaly_score": classifier_anomaly_score,
+            "classifier_score_kind": score_kind if classifier_enabled else None,
+            **timeline_fields,
+            "knn_timeline": timeline,
         })
         print(f"{mode} (multiturn): decision={decision}, confidence={confidence}")
         if classifier_failure_probability is not None:
@@ -591,6 +637,9 @@ def evaluate_multiturn(
                 f"failure={classifier_failure_probability * 100.0:.2f}%, "
                 f"decision={classifier_decision}"
             )
+        if classifier_anomaly_score is not None:
+            print(f"{mode} (nominal kNN): anomaly distance={classifier_anomaly_score:.6g}, "
+                  f"threshold={classifier_threshold:.6g}, decision={classifier_decision} (not a probability)")
 
     return rows, frame_metadata, raw_records, task_description
 

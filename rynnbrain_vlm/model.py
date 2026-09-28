@@ -305,3 +305,17 @@ class RynnBrainModel:
         if result.cop_vector is None:
             raise RuntimeError("CoP-vector extraction was requested but returned no vector.")
         return result
+
+    def extract_multiturn_cop_vector(
+        self, turns: list[dict[str, Any]], generation: dict[str, Any], *, reference_response: str,
+    ) -> torch.Tensor:
+        """Capture the prompt vector with one generated token and a reused reference.
+
+        The vector is captured before that token, exactly as in normal inference.
+        Extra timeline snapshots therefore need no full text-answer generation.
+        """
+        result = self.generate_multiturn_with_cop_vector(
+            turns, {**generation, "max_new_tokens": 1, "do_sample": False},
+            reference_response=reference_response,
+        )
+        return result.cop_vector

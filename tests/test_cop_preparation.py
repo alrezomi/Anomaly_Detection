@@ -40,7 +40,7 @@ class ClassifierPreparationTests(unittest.TestCase):
                 "reference_bags": [str(self.root / "data/reference")],
                 "model": {"model_id": "test"}, "generation": {"do_sample": False},
                 "cop_vectors": {"enabled": False},
-                "cop_classifier": {"enabled": True, "model_paths": {"raw": str(self.model_path)},
+                "cop_classifier": {"enabled": True, "plot_timeline": False, "model_paths": {"raw": str(self.model_path)},
                     "training": {"input_dir": str(self.root / "vectors"), "input_mode": "raw",
                         "normal_bags": [str(self.root / "data" / name) for name in self.names[:2]],
                         "failure_bags": [str(self.root / "data" / name) for name in self.names[2:]],
@@ -151,6 +151,31 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.assertEqual(set(pd.read_csv(directory / "rynnbrain_results_multiturn.csv").input_mode), {"raw", "heatmap"})
 
     def test_benchmark_prepares_once_excludes_training_and_populates_reports(self):
+        self._check_benchmark_workflow()
+
+    def test_knn_benchmark_uses_only_nominals_and_preserves_responses_and_scores(self):
+        classifier = self.config["rynnbrain"]["cop_classifier"]
+        classifier.update(method="knn", knn={"n_neighbors": 1, "threshold_quantile": 0.95})
+        classifier["training"]["failure_bags"] = ["/missing/unused_failure_bag"]
+        self.config_path.write_text(json.dumps(self.config))
+        self.settings = configured_training_settings(self.config_path)
+        self.model.adapter_training_bags = set(self.names[:2])
+        self._check_benchmark_workflow(knn=True)
+        # The failure list is ignored even when its bags are unavailable. Only
+        # nominal training responses/vectors are prepared and later reused.
+        self.assertFalse((self.root / "vectors/failure_1").exists())
+        before = self.extractions.copy()
+        paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(self.extractions, before)
+        metadata = json.loads(self.settings["output_file"].with_suffix(".json").read_text())
+        self.assertEqual(metadata["training_bags"], self.names[:2])
+        for path in paths:
+            saved = json.loads((path.parent.parent / "rynnbrain_responses_multiturn.json").read_text())["results"][0]
+            self.assertEqual(saved["sample_role"], "classifier_training")
+            self.assertEqual(saved["lora_adapter_sha256"], "adapter_v1")
+
+    def _check_benchmark_workflow(self, knn=False):
         import run_benchmark as benchmark
         # Exercise real preparation, fitting, scoring, and CSV/JSON output; only
         # the expensive VLM/ROS reads and unrelated PCA/ROC rendering are mocked.
@@ -171,28 +196,87 @@ class ClassifierPreparationTests(unittest.TestCase):
              patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
             benchmark.main()
         factory.assert_called_once_with(self.config["rynnbrain"]["model"])
-        self.assertEqual(dino.call_count, 2)
+        test_names = ["normal_test", "failure_test"] + (self.names[2:] if knn else [])
+        self.assertEqual(dino.call_count, len(test_names))
         self.assertEqual(self.extractions, Counter(self.names + ["normal_test", "failure_test"]))
         clean = pd.read_csv(output / "benchmark_clean.csv")
-        self.assertEqual(set(clean.bag_name), {"normal_test", "failure_test"})
-        self.assertTrue(clean.failure_probability.notna().all())
+        self.assertEqual(set(clean.bag_name), set(test_names))
+        if knn:
+            self.assertTrue(clean.failure_probability.isna().all())
+            self.assertTrue(clean.anomaly_score.notna().all())
+            self.assertTrue((clean.anomaly_threshold > 0).all())
+            self.assertTrue(clean.classifier_decision.isin(["success", "failure"]).all())
+        else:
+            self.assertTrue(clean.failure_probability.notna().all())
         summary = pd.read_csv(output / "benchmark_summary.csv")
         self.assertTrue((summary.lora_adapter_sha256 == "adapter_v1").all())
         self.assertTrue((summary.response_source == "lora_adapted_model").all())
-        for name in ("normal_test", "failure_test"):
+        for name in test_names:
             response_path = output / name / "rynnbrain_multiturn/rynnbrain_responses_multiturn.json"
             saved = json.loads(response_path.read_text())["results"][0]
             self.assertEqual(saved["sample_role"], "evaluation")
             self.assertEqual(saved["response"], summary.loc[summary.bag_name == name, "response"].iloc[0])
         statistics = json.loads((output / "benchmark_statistics.json").read_text())
-        self.assertEqual(statistics["classifier"]["scored_rows"], 2)
-        probability_report = statistics["failure_probability"]["modes"][0]
-        self.assertEqual(probability_report["scored_rows"], 2)
-        self.assertTrue(Path(probability_report["plot_file"]).is_file())
-        self.assertEqual(statistics["probability_roc"]["score_column"], "classifier_failure_probability")
-        self.assertEqual(statistics["probability_roc"]["metrics"][0]["status"], "created")
-        self.assertTrue(all(Path(path).is_file() for path in statistics["probability_roc"]["plot_files"]))
+        self.assertEqual(statistics["classifier"]["scored_rows"], len(test_names))
+        score_report = statistics["anomaly_score" if knn else "failure_probability"]["modes"][0]
+        self.assertEqual(score_report["scored_rows"], len(test_names))
+        self.assertTrue(Path(score_report["plot_file"]).is_file())
+        roc = statistics["anomaly_roc" if knn else "probability_roc"]
+        self.assertEqual(roc["score_column"], "classifier_anomaly_score" if knn else "classifier_failure_probability")
+        self.assertEqual(roc["metrics"][0]["status"], "created")
+        self.assertTrue(all(Path(path).is_file() for path in roc["plot_files"]))
+        if knn:
+            self.assertEqual(statistics["probability_roc"]["metrics"][0]["status"], "skipped")
         self.assertEqual(json.loads(self.config_path.read_text()), self.config)
+
+    def test_knn_benchmark_trains_progress_prefixes_and_writes_each_case_timeline(self):
+        vlm = self.config["rynnbrain"]
+        vlm["num_frames"] = 3
+        vlm["cop_classifier"].update(method="knn", plot_timeline=True, knn={"n_neighbors": 1})
+        self.model.adapter_training_bags = set(self.names[:2])
+        self.model.extract_multiturn_cop_vector = Mock(side_effect=lambda turns, *args, **kwargs:
+            self.torch.tensor([1.0, len(turns[1]["images"]) * 0.2, 0.3, 0.4]))
+        self.config_path.write_text(json.dumps(self.config))
+        self.settings = configured_training_settings(self.config_path)
+        frames = [{"timestamp_sec": time, "sample_index": i} for i, time in enumerate((4.5, 9.2, 20.0))]
+        def inputs(path, *args):
+            return [(path.name, Image.new("RGB", (2, 2))) for _ in frames], frames
+        with patch("rynnbrain_vlm.run._raw_inputs", side_effect=inputs):
+            self._check_benchmark_workflow(knn=True)
+            summary = pd.read_csv(self.root / "benchmark/benchmark_summary.csv")
+            self.assertTrue((summary.knn_timeline_status == "created").all())
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, 12)
+            for _, row in summary.iterrows():
+                timeline = pd.read_csv(row.knn_timeline_csv)
+                self.assertTrue(Path(row.knn_timeline_plot).is_file())
+                self.assertEqual(timeline.timestamp_sec.tolist(), [4.5, 9.2, 20.0])
+                self.assertAlmostEqual(timeline.anomaly_score.iloc[-1], row.classifier_anomaly_score)
+                self.assertAlmostEqual(timeline.threshold.iloc[-1], row.classifier_threshold)
+            before = self.model.extract_multiturn_cop_vector.call_count
+            prepare_training_vectors(self.config, self.settings, model=self.model)
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, before)
+            # An optional plotting failure must still save the complete VLM
+            # response/vector and score. Disabling plotting clears stale graphs
+            # and performs no prefix passes.
+            bag_config = {**self.config, "test_bag": str(self.root / "data/normal_test")}
+            bag_vlm = {**vlm, "cop_vectors": {"enabled": True}}
+            output = self.root / "single"
+            with patch("rynnbrain_vlm.cop_timeline.write_knn_timeline", side_effect=RuntimeError("plot unavailable")):
+                rows, frames_out, responses, task = self.run.evaluate_multiturn(
+                    self.model, bag_config, bag_vlm, 3, {}, output, reference_response="reference response")
+                self.run.write_multiturn_outputs(output, rows, frames_out, responses, task)
+            self.assertEqual(rows[0]["knn_timeline_error"], "plot unavailable")
+            self.assertEqual(rows[0]["response"], "Decision: success")
+            self.assertIsNotNone(rows[0]["classifier_anomaly_score"])
+            self.assertTrue((output / "rynnbrain_responses_multiturn.json").is_file())
+            self.assertTrue(Path(rows[0]["cop_vector_path"]).is_file())
+            (output / "knn_timeline_raw.png").write_bytes(b"stale plot")
+            bag_vlm["cop_classifier"] = {**vlm["cop_classifier"], "plot_timeline": False}
+            rows, *_ = self.run.evaluate_multiturn(
+                self.model, bag_config, bag_vlm, 3, {}, output, reference_response="reference response")
+            self.assertEqual(rows[0]["knn_timeline_status"], "disabled")
+            self.assertFalse((output / "knn_timeline_raw.png").exists())
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, before)
 
     def test_dino_only_benchmark_does_not_load_vlm_or_prepare_enabled_classifier(self):
         import run_benchmark as benchmark
