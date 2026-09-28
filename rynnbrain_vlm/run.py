@@ -507,6 +507,28 @@ def evaluate_multiturn(
                 # and vector already produced (e.g. if this pass runs out of VRAM).
                 evidence_error = str(error)
                 print(f"Visual evidence unavailable; keeping the evaluation: {error}")
+        neighbors = {"status": "not_applicable", "csv": None, "plot": None, "error": None}
+        if not training_vectors_only:
+            from .cop_neighbors import neighbor_paths, write_knn_neighbors
+
+            neighbor_csv, neighbor_plot = neighbor_paths(output_directory, mode)
+            try:
+                neighbor_csv.unlink(missing_ok=True)
+                neighbor_plot.unlink(missing_ok=True)
+                if classifier_enabled and score_kind == "knn_distance":
+                    if classifier_error or cop_vector is None:
+                        raise ValueError(classifier_error or "No CoP vector is available for neighbour distances.")
+                    neighbors.update(write_knn_neighbors(
+                        classifiers[mode], cop_vector, comparison_signature=comparison_signature,
+                        directory=output_directory, mode=mode, bag_name=Path(config["test_bag"]).name,
+                        provenance=provenance,
+                    ))
+                    print(f"Saved kNN neighbour distances: {neighbors['plot']}")
+            except Exception as error:
+                neighbors.update(status="failed", error=str(error),
+                                 csv=str(neighbor_csv) if neighbor_csv.exists() else None)
+                print(f"kNN neighbour plot unavailable; keeping the full evaluation: {error}")
+        neighbor_fields = {f"knn_neighbors_{key}": neighbors.get(key) for key in ("status", "csv", "plot", "error")}
         timeline = {"status": "not_applicable", "csv": None, "plot": None, "error": None}
         if not training_vectors_only:
             from .cop_timeline import timeline_paths, write_knn_timeline
@@ -530,6 +552,7 @@ def evaluate_multiturn(
                             output_directory=output_directory, mode=mode,
                             bag_name=Path(config["test_bag"]).name, provenance=provenance,
                             classifier_model_path=classifier_model_path,
+                            config=config, vlm=vlm,
                         ))
                         print(f"Saved kNN timeline: {timeline['plot']}")
             except Exception as error:
@@ -540,9 +563,15 @@ def evaluate_multiturn(
                                 plot=None)
                 print(f"kNN timeline unavailable; keeping the full evaluation: {error}")
         timeline_fields = {f"knn_timeline_{key}": timeline.get(key) for key in ("status", "csv", "plot", "error")}
+        alert = timeline.get("first_alert", {})
+        timeline_fields.update({
+            "knn_last_below_before_alert_sec": alert.get("last_below_sec"),
+            "knn_first_above_threshold_sec": alert.get("first_above_sec"),
+        })
         rows.append(
             {
                 "test_bag": config["test_bag"],
+                **neighbor_fields,
                 "input_mode": mode,
                 "decision": decision,
                 "confidence": confidence,
@@ -629,6 +658,8 @@ def evaluate_multiturn(
             "classifier_score_kind": score_kind if classifier_enabled else None,
             **timeline_fields,
             "knn_timeline": timeline,
+            **neighbor_fields,
+            "knn_neighbors": neighbors,
         })
         print(f"{mode} (multiturn): decision={decision}, confidence={confidence}")
         if classifier_failure_probability is not None:

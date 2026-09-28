@@ -216,6 +216,16 @@ class ClassifierPreparationTests(unittest.TestCase):
             saved = json.loads(response_path.read_text())["results"][0]
             self.assertEqual(saved["sample_role"], "evaluation")
             self.assertEqual(saved["response"], summary.loc[summary.bag_name == name, "response"].iloc[0])
+            if knn:
+                # Neighbour plots are independent of the optional extra timeline inference.
+                self.assertEqual(saved["knn_neighbors_status"], "created")
+                self.assertTrue(Path(saved["knn_neighbors_plot"]).is_file())
+                distances = pd.read_csv(saved["knn_neighbors_csv"])
+                self.assertEqual(set(distances.nominal_bag), set(self.names[:2]))
+                self.assertAlmostEqual(distances.loc[distances.used_for_score, "distance"].mean(),
+                                       saved["classifier_anomaly_score"])
+            else:
+                self.assertEqual(saved["knn_neighbors_status"], "not_applicable")
         statistics = json.loads((output / "benchmark_statistics.json").read_text())
         self.assertEqual(statistics["classifier"]["scored_rows"], len(test_names))
         score_report = statistics["anomaly_score" if knn else "failure_probability"]["modes"][0]

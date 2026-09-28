@@ -15,6 +15,7 @@ from rynnbrain_vlm.cop_classifier import train_from_saved_vectors, load_classifi
 from rynnbrain_vlm.cop_timeline import (
     selected_frame_prefixes, prepare_nominal_prefixes, train_prefix_detector,
     load_prefix_detector, write_knn_timeline, prefix_model_path,
+    timeline_sampling, first_alert_interval,
 )
 
 
@@ -172,6 +173,82 @@ class PrefixTimelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stale"):
             load_prefix_detector(self.path, self.classifier)
         self.assertTrue(prefix_model_path(self.path).exists())
+
+    def test_dense_timeline_caps_context_uses_matched_caches_and_reuses_exact_final_vector(self):
+        self.prepare()
+        vlm = {"cop_classifier": {"timeline_num_frames": 7}}
+        sampling = timeline_sampling(vlm, 3)
+        dense_frames = [{"timestamp_sec": time, "sample_index": i} for i, time in
+                        enumerate([2.5, 4, 5, 6.2, 8, 10, 11.4])]
+        extractions = []
+
+        def inputs(config, options, count, modes):
+            self.assertEqual(count, 7)
+            return {"raw": ([(str(i), object()) for i in range(count)], dense_frames)}, dense_frames
+
+        def extract(turns, *args, **kwargs):
+            indices = [int(label) for label, _ in turns[1]["images"]]
+            self.assertLessEqual(len(indices), 3)
+            extractions.append(indices)
+            return np.asarray([1, 0.1 * indices[-1], 0.1, 0], dtype=np.float32)
+
+        model = SimpleNamespace(extract_multiturn_cop_vector=Mock(side_effect=extract))
+        with patch("rynnbrain_vlm.run._execution_inputs", side_effect=inputs):
+            prepare_nominal_prefixes(model, {}, vlm, self.records, [], "reference response", {})
+        self.assertEqual(model.extract_multiturn_cop_vector.call_count, 4 * 6)
+        # Training sees precisely the available past and current frame, with capped context.
+        self.assertEqual(extractions[:6], [[0], [0, 1], [0, 1, 2], [0, 2, 3], [0, 2, 4], [0, 2, 5]])
+        train_prefix_detector(self.records, self.path, self.metadata, timeline_num_frames=7)
+        detector = load_prefix_detector(self.path, self.classifier, sampling)
+        self.assertEqual(len(detector.thresholds), 7)
+        with self.assertRaisesRegex(ValueError, "sampling changed"):
+            load_prefix_detector(self.path, self.classifier)
+        model.extract_multiturn_cop_vector.reset_mock()
+        # Dense caches are reused without loading any bag or invoking the model.
+        prepare_nominal_prefixes(model, {}, vlm, self.records, [], "reference response", {})
+        model.extract_multiturn_cop_vector.assert_not_called()
+        with patch("rynnbrain_vlm.run._execution_inputs", side_effect=inputs):
+            report = write_knn_timeline(model=model, classifier=self.classifier, turns=self.turns,
+                generation={}, nominal_response="reference response", frame_metadata=self.frames,
+                final_vector=self.query[-1], comparison_signature=self.signature,
+                output_directory=self.root, mode="raw", bag_name="held_out", provenance={"evaluation_id": "dense-test"},
+                classifier_model_path=str(self.path), config={}, vlm=vlm)
+        rows = pd.read_csv(report["csv"])
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(model.extract_multiturn_cop_vector.call_count, 6)
+        self.assertEqual(rows.image_count.tolist(), [1, 2, 3, 3, 3, 3, 3])
+        self.assertAlmostEqual(rows.anomaly_score.iloc[-1], self.classifier.predict_anomaly_score(self.query[-1]))
+        self.assertAlmostEqual(rows.threshold.iloc[-1], self.classifier.threshold)
+        self.assertEqual(json.loads(rows.image_timestamps_sec.iloc[-1]), [2.5, 6.2, 11.4])
+        for row in rows.itertuples():
+            self.assertLessEqual(max(json.loads(row.image_timestamps_sec)), row.timestamp_sec)
+        # A request for the old cache cannot silently accept the dense one.
+        with self.assertRaisesRegex(ValueError, "missing or stale"):
+            train_prefix_detector(self.records, self.path, self.metadata)
+
+    def test_dense_sampling_keeps_complete_camera_groups_and_rejects_invalid_settings(self):
+        frames = [{"sample_index": step, "timestamp_sec": 2 * step + offset} for step in range(8) for offset in (0, 0.1)]
+        rows = selected_frame_prefixes(frames, 16, 8, context_frames=3)
+        self.assertEqual(rows[-1]["image_indices"], [0, 1, 8, 9, 14, 15])
+        self.assertEqual(rows[-1]["timestamp_sec"], 14.1)
+        for row in rows:
+            self.assertLessEqual(len(row["image_indices"]), 6)
+            self.assertTrue(all(frames[i]["timestamp_sec"] <= row["timestamp_sec"] for i in row["image_indices"]))
+        for bad in (0, 2, True, 3.5, "32"):
+            with self.assertRaises(ValueError):
+                timeline_sampling({"cop_classifier": {"timeline_num_frames": bad}}, 3)
+
+    def test_first_alert_interval_handles_missing_samples_and_never_interpolates_onset(self):
+        def report(scores):
+            return first_alert_interval(pd.DataFrame({"timestamp_sec": [0, 4, 8, 12],
+                                                      "anomaly_score": scores, "threshold": [1] * 4}))
+        result = report([0.2, 0.3, np.nan, 1.2])
+        self.assertEqual(result["last_below_sec"], 4)
+        self.assertEqual(result["first_above_sec"], 12)
+        self.assertEqual(result["unavailable_samples_in_interval"], 1)
+        self.assertEqual(report([1, 0, 0, 2])["status"], "no_prior_below")
+        self.assertIsNone(report([np.nan, 1, 0, 2])["last_below_sec"])
+        self.assertEqual(report([0, np.nan, 0, 0])["status"], "not_observed")
 
 
 if __name__ == "__main__":
