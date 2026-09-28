@@ -799,6 +799,18 @@ of matching training vectors.
 
 #### Anomaly score and threshold over time
 
+Every evaluated kNN test bag also gets `knn_neighbors_raw.png` and
+`knn_neighbors_raw.csv` in the same output directory. The figure shows the
+test execution beside the nominal training examples in a PCA projection fitted
+only to those nominal vectors, plus a ranked chart of actual full-feature
+distances. Blue bars mark the k neighbours used for the score; their mean is
+the anomaly score. The threshold applies to that mean, not each individual
+distance. PCA is only a visual aid and can hide separation. The CSV lists every
+nominal bag, its distance, rank, and whether it contributed to the score, together
+with the evaluation ID and LoRA identity. This adds no VLM inference passes and
+works independently of `plot_timeline`. `knn_neighbors_status` and
+`knn_neighbors_error` in the response files report any plotting problem.
+
 With kNN, `cop_classifier.plot_timeline` defaults to `true`. The normal
 benchmark automatically prepares **progress-matched nominal-prefix detectors**
 and saves two files per evaluated bag and input mode in its existing
@@ -844,6 +856,48 @@ reuse the reference response and do not generate full text answers. Set
 No new benchmark command or separate LoRA training is required. For a single
 bag, first run the usual benchmark or `cop-classifier-train` once to prepare
 the prefix detector, then use `rynnbrain-test-multiturn` normally.
+
+For finer time sampling, **manually** add `"timeline_num_frames": 32` inside
+`rynnbrain.cop_classifier`, beside `"plot_timeline": true`. Keep
+`rynnbrain.num_frames` at its existing value (e.g. 8). No config or bag paths
+need to change. The default, when omitted, is the original number of frames.
+The timeline count must be an integer at least as large as `rynnbrain.num_frames`.
+
+With 32 timeline snapshots and 8 main frames, each intermediate snapshot uses
+up to eight timesteps uniformly selected from the available history, always
+including the latest sampled timestep (all cameras in a timestep stay together).
+The nominal reference remains unchanged. Nominal prefixes are trained with
+exactly the same sampling policy. The last snapshot reuses the original
+whole-execution vector and threshold, so the main VLM decision and kNN score
+do not change merely because the timeline resolution changed. This is an
+offline diagnostic using the recording's duration to choose sampling times,
+not a streaming detector. The timeline CSV includes the actual image timestamps
+used at each snapshot.
+
+After changing this setting, run the normal commands:
+
+```bash
+docker compose run --rm --build cop-classifier-train
+docker compose run --rm --build rynnbrain-test-multiturn
+```
+
+Compatible full-execution training vectors are reused. Nominal-prefix caches
+are rebuilt for the new sampling policy; an old prefix detector cannot silently
+be used at a different resolution. Preparing 32 snapshots needs 31 short
+extractions per nominal training bag the first time, and per evaluated test bag.
+The normal benchmark also prepares these detectors automatically.
+
+The graph shades the interval from the last below-threshold snapshot to the
+first above-threshold snapshot. This is a bracket for the **first observed score
+crossing**, not a physical failure-start annotation or an interpolated estimate.
+If the first valid sample is already anomalous, no lower bound is invented;
+missing snapshots widen the bracket and are counted in the response JSON's
+`knn_timeline.first_alert`. The result CSV also includes
+`knn_last_below_before_alert_sec` and `knn_first_above_threshold_sec`.
+For a 90-second selected recording span, eight samples are roughly 13 seconds
+apart; 32 are roughly 3 seconds apart. Denser sampling reduces this timing gap,
+but does not guarantee an earlier correct detection. Speed/stage misalignment,
+the retained image history, and the detector itself can still delay an alert.
 
 These are **offline sampled-progress timelines**: the nominal and test bags
 are aligned by sample index across their respective recordings, not by exact

@@ -433,6 +433,7 @@ def train_from_saved_vectors(
     method: str = "logistic",
     knn_options: dict[str, Any] | None = None,
     include_timeline: bool = False,
+    timeline_num_frames: int | None = None,
 ) -> dict[str, Any]:
     classifier_method({"method": method})
     if method == "knn" and not bag_names:
@@ -503,7 +504,7 @@ def train_from_saved_vectors(
         metadata = train_knn(records, output_file, **(knn_options or {}))
         if include_timeline:
             from .cop_timeline import train_prefix_detector
-            train_prefix_detector(records, output_file, metadata)
+            train_prefix_detector(records, output_file, metadata, timeline_num_frames=timeline_num_frames)
         load_classifier.cache_clear()
         return metadata
     cv_probabilities, fold_count = _cross_validated_probabilities(
@@ -666,11 +667,16 @@ def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]
         **{name: "normal" for name in normal_bags},
         **{name: "fail" for name in failure_bags},
     }
+    if method == "knn" and classifier_config.get("plot_timeline", True):
+        from .cop_timeline import timeline_sampling
+        vlm = config.get("rynnbrain", {})
+        timeline_sampling(vlm, int(vlm.get("num_frames", 4)))
 
     return {
         "method": method,
         "knn_options": dict(classifier_config.get("knn", {})),
         "include_timeline": method == "knn" and bool(classifier_config.get("plot_timeline", True)),
+        "timeline_num_frames": classifier_config.get("timeline_num_frames"),
         "input_directory": Path(str(input_directory)),
         "output_file": Path(str(output_file)),
         "input_mode": str(input_mode),
