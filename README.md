@@ -857,35 +857,13 @@ No new benchmark command or separate LoRA training is required. For a single
 bag, first run the usual benchmark or `cop-classifier-train` once to prepare
 the prefix detector, then use `rynnbrain-test-multiturn` normally.
 
-For finer time sampling, **manually** add `"timeline_num_frames": 32` inside
-`rynnbrain.cop_classifier`, beside `"plot_timeline": true`. Keep
-`rynnbrain.num_frames` at its existing value (e.g. 8). No config or bag paths
-need to change. The default, when omitted, is the original number of frames.
-The timeline count must be an integer at least as large as `rynnbrain.num_frames`.
-
-With 32 timeline snapshots and 8 main frames, each intermediate snapshot uses
-up to eight timesteps uniformly selected from the available history, always
-including the latest sampled timestep (all cameras in a timestep stay together).
-The nominal reference remains unchanged. Nominal prefixes are trained with
-exactly the same sampling policy. The last snapshot reuses the original
-whole-execution vector and threshold, so the main VLM decision and kNN score
-do not change merely because the timeline resolution changed. This is an
-offline diagnostic using the recording's duration to choose sampling times,
-not a streaming detector. The timeline CSV includes the actual image timestamps
-used at each snapshot.
-
-After changing this setting, run the normal commands:
-
-```bash
-docker compose run --rm --build cop-classifier-train
-docker compose run --rm --build rynnbrain-test-multiturn
-```
-
-Compatible full-execution training vectors are reused. Nominal-prefix caches
-are rebuilt for the new sampling policy; an old prefix detector cannot silently
-be used at a different resolution. Preparing 32 snapshots needs 31 short
-extractions per nominal training bag the first time, and per evaluated test bag.
-The normal benchmark also prepares these detectors automatically.
+Keep `rynnbrain.num_frames` at its existing value (e.g. 8) and omit
+`cop_classifier.timeline_num_frames` to use the original sampled snapshots.
+The optional denser kNN sampling setting remains supported, but it changes
+sampling resolution, not the model's ability to recognize early failure evidence.
+If returning from a denser kNN detector, rerun `cop-classifier-train` once after
+removing that setting to rebuild matching nominal-prefix memories; compatible
+full-execution vectors are reused. This is offline analysis, not streaming.
 
 The graph shades the interval from the last below-threshold snapshot to the
 first above-threshold snapshot. This is a bracket for the **first observed score
@@ -894,10 +872,8 @@ If the first valid sample is already anomalous, no lower bound is invented;
 missing snapshots widen the bracket and are counted in the response JSON's
 `knn_timeline.first_alert`. The result CSV also includes
 `knn_last_below_before_alert_sec` and `knn_first_above_threshold_sec`.
-For a 90-second selected recording span, eight samples are roughly 13 seconds
-apart; 32 are roughly 3 seconds apart. Denser sampling reduces this timing gap,
-but does not guarantee an earlier correct detection. Speed/stage misalignment,
-the retained image history, and the detector itself can still delay an alert.
+Speed/stage misalignment, the retained image history, and the detector itself
+can delay an alert even when the failure is visible in an earlier sampled frame.
 
 These are **offline sampled-progress timelines**: the nominal and test bags
 are aligned by sample index across their respective recordings, not by exact
@@ -907,6 +883,117 @@ exact failure-onset time between samples. A recording with too few sampled
 timesteps cannot produce a matching timeline. Snapshot failures appear as
 gaps with errors in the CSV. A timeline failure is recorded in
 `knn_timeline_error` and does not discard the VLM response or final score.
+
+#### Logistic failure score over time
+
+With `cop_classifier.method: "logistic"`, `enabled: true`, and
+`plot_timeline: true` (the default), single tests and benchmarks also save
+`logistic_timeline_raw.png` and `logistic_timeline_raw.csv` in each evaluated
+bag's existing output directory. The graph shows the failure probability from
+0 to 100%, the saved classifier's fixed decision threshold (usually 50%), and
+above-threshold snapshots. Logistic failure probability is the anomaly score
+here; it is not a kNN distance or the probability that the VLM's answer is correct.
+The CSV stores `anomaly_score` and `failure_probability` as the same 0–1 value,
+plus `failure_percent`, `threshold`, `threshold_percent`, timestamps, errors,
+evaluation ID, and adapter identity. Aggregate benchmark columns keep their
+existing meanings: logistic scores remain in `failure_probability`.
+
+This reuses the **existing complete-execution logistic classifier** and the
+original sampled frames. For eight timesteps it makes seven extra short prefix
+vector extractions, with the same LoRA/reference/prompt, without generating
+additional full answers. The final point reuses the original full-execution
+vector, exactly matching the probability and threshold in the normal results.
+No prefix classifiers, new training labels, or failure-start annotations are
+required. `timeline_num_frames` is not used for logistic timelines.
+
+Prefix scores are a **diagnostic**: the classifier was trained on completed
+executions, so these scores are not calibrated probabilities that a failure
+has already happened. A failed bag can have normal early frames; assigning its
+failure label to every prefix would not teach accurate failure-start timing.
+Future onset supervision needs temporal annotations and separate evaluation.
+
+Use the normal `rynnbrain-test-multiturn` or `benchmark` command. Run
+`cop-classifier-train` first only if a compatible logistic classifier is not
+already available. `plot_timeline: false` skips the extra inference. The result
+CSV and response JSON report `logistic_timeline_status`, `logistic_timeline_plot`,
+`logistic_timeline_csv`, and `logistic_timeline_error`; the JSON's
+`logistic_timeline.first_alert` records the first observed threshold-crossing
+interval. Snapshot errors leave gaps; a timeline failure retains the VLM answer
+and final classifier result. Switching methods clears stale timeline graphs
+from the previously used method in that same output folder.
+
+### Failure-time evaluation against the error button
+
+For raw rosbag inputs, classifier timelines are now compared automatically with
+the recorded error-button event on `stage_topic` (normally `/recording_stage`).
+This works for both kNN and logistic regression, with `plot_timeline: true`,
+and adds no model inference or training. No config paths or bag lists need to
+change. Keep the existing eight-frame sampling if that is your current setup.
+
+The reference time is the **first failure marker after the startup filter**.
+The existing failure-marker vocabulary is reused (`Error`, `Anomaly`, `fail`,
+`failure`, `failed`, `NOK`, `not OK`, `Fehler`, case-insensitive). All stage
+messages are examined for onset, not just the final three messages used by the
+existing bag-label heuristic. Benchmark `--startup-ignore-sec` is respected;
+otherwise `$STAGE_STARTUP_IGNORE_SEC` or its default 0.1 seconds is used.
+The complete marker identity, timestamp, count, and filter are recorded in
+`failure_annotation` in each response JSON. Existing bag labels are unchanged;
+a nominal label that conflicts with an error marker is explicitly flagged.
+
+The predicted time is the **first sampled classifier score at or above its
+threshold**, including early alerts. Recorded and predicted times both use
+seconds since ROS bag start. The timing error is:
+
+```text
+failure_time_error_sec = predicted_failure_time_sec - recorded_failure_time_sec
+```
+
+Positive means late; negative means an early alert. For example, a button press
+at 20 s and first classifier alert at 26 s gives +6 s error and 6 s absolute
+error. No interpolation between snapshots is used. This evaluates the
+classifier's alert against the human annotation; it is not the VLM's textual
+decision timing, inference wall-clock latency, or an exact physical-onset claim.
+Annotations are only used after prediction for evaluation, never to choose
+thresholds, train models, or add information to the model prompt.
+
+Each case's existing `knn_timeline_raw.png` or `logistic_timeline_raw.png` gets
+a green vertical line for the recorded error-button time and a timing-error
+caption. The per-case result CSV/JSON and both `benchmark_summary.csv` and
+`benchmark_clean.csv` gain:
+
+- `recorded_failure_time_sec`
+- `predicted_failure_time_sec`
+- `failure_time_error_sec` (signed)
+- `failure_time_absolute_error_sec`
+- `failure_timing_status`, `failure_timing_error`, `failure_timing_method`
+
+The benchmark also writes `benchmark_failure_timing/failure_timing_raw_knn.png`
+(or `failure_timing_raw_logistic.png`), its per-bag CSV, and
+`failure_timing_summary.json`. The figure compares recorded/predicted times
+for each evaluated bag, shows signed error bars and the mean signed error,
+and reports the **mean absolute error** so early and late errors cannot cancel.
+The same statistics appear under `failure_timing` in `benchmark_statistics.json`.
+Each input mode is summarized separately, without pooling multiple predictions
+for the same bag into a single mean.
+
+Means include only complete, aligned timelines with both a failure annotation
+inside the sampled time window and an observed alert. All evaluated bags stay
+in the timing table/graph; missed detections (`not_detected`), missing markers,
+nominal false alerts, partial timelines, annotation/label conflicts, and failed
+evaluations have explicit statuses and counts. They are **not assigned zero
+error**. When no case can be compared, means are unavailable (`null`), not zero.
+The report shows the compared and excluded counts beside the means.
+
+Video playback timestamps are not assumed to equal bag time: generated-video,
+heatmap, and mixed raw/heatmap inputs currently report `unaligned_timebase`
+rather than subtracting unrelated clocks. Your `source: "rosbag"` with
+`input_modes: ["raw"]` uses the supported common clock. Missing stage topics
+or optional plot errors preserve the existing VLM/classifier results.
+
+Use the normal `rynnbrain-test-multiturn` or `benchmark` commands. A single test
+gets its annotation overlay and timing fields; the benchmark additionally
+aggregates the bags executed in that run. Previously saved results are not
+silently mixed into these averages.
 
 ### Frozen-vector logistic failure classifier
 

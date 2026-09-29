@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -20,6 +21,7 @@ from .cop_classifier import classifier_method, classifier_model_paths, load_clas
 from .cop_analysis import save_cop_vector
 from .model import COP_REPRESENTATION_ID, RynnBrainModel
 from .prompts import task_context_prompt, evaluation_prompt_multiturn, visual_evidence_prompt
+from .failure_timing import TIMING_FIELDS, read_failure_annotation, attach_failure_timing
 
 
 def _slug(value: str) -> str:
@@ -279,6 +281,7 @@ def evaluate_multiturn(
     *,
     training_vectors_only: bool = False,
     reference_response: str | None = None,
+    stage_startup_ignore_sec: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
     """Evaluate one test bag/video set with an already-loaded RynnBrain model.
 
@@ -360,6 +363,10 @@ def evaluate_multiturn(
         nominal_images.extend(bag_images)
     _save_inputs(output_directory, "nominal", nominal_images)
 
+    failure_annotation = None
+    if not training_vectors_only:
+        ignore_sec = stage_startup_ignore_sec if stage_startup_ignore_sec is not None else float(os.environ.get("STAGE_STARTUP_IGNORE_SEC", 0.1))
+        failure_annotation = read_failure_annotation(config["test_bag"], config.get("stage_topic", "/recording_stage"), ignore_sec)
     rows = []
     raw_records = []
 
@@ -529,49 +536,63 @@ def evaluate_multiturn(
                                  csv=str(neighbor_csv) if neighbor_csv.exists() else None)
                 print(f"kNN neighbour plot unavailable; keeping the full evaluation: {error}")
         neighbor_fields = {f"knn_neighbors_{key}": neighbors.get(key) for key in ("status", "csv", "plot", "error")}
-        timeline = {"status": "not_applicable", "csv": None, "plot": None, "error": None}
+        timelines = {method: {"status": "not_applicable", "csv": None, "plot": None, "error": None}
+                     for method in ("knn", "logistic")}
         if not training_vectors_only:
-            from .cop_timeline import timeline_paths, write_knn_timeline
+            from .cop_timeline import timeline_paths, write_knn_timeline, write_logistic_timeline
 
-            csv_path, plot_path = timeline_paths(output_directory, mode)
-            try:
-                # Also clear a stale kNN graph when rerunning with another
-                # classifier or with timeline plotting disabled.
-                csv_path.unlink(missing_ok=True)
-                plot_path.unlink(missing_ok=True)
-                if classifier_enabled and score_kind == "knn_distance":
-                    if not classifier_config.get("plot_timeline", True):
-                        timeline["status"] = "disabled"
-                    elif classifier_error or cop_vector is None:
-                        raise ValueError(classifier_error or "No CoP vector is available for the timeline.")
-                    else:
-                        timeline.update(write_knn_timeline(
-                            model=model, classifier=classifiers[mode], turns=turns, generation=generation,
-                            nominal_response=nominal_response, frame_metadata=mode_frame_metadata,
-                            final_vector=cop_vector, comparison_signature=comparison_signature,
-                            output_directory=output_directory, mode=mode,
-                            bag_name=Path(config["test_bag"]).name, provenance=provenance,
-                            classifier_model_path=classifier_model_path,
-                            config=config, vlm=vlm,
-                        ))
-                        print(f"Saved kNN timeline: {timeline['plot']}")
-            except Exception as error:
-                # This optional diagnostic must never discard the original
-                # VLM response, final vector, or full-execution classifier score.
-                timeline.update(status="failed", error=str(error),
-                                csv=str(csv_path) if csv_path.exists() else None,
-                                plot=None)
-                print(f"kNN timeline unavailable; keeping the full evaluation: {error}")
-        timeline_fields = {f"knn_timeline_{key}": timeline.get(key) for key in ("status", "csv", "plot", "error")}
-        alert = timeline.get("first_alert", {})
-        timeline_fields.update({
-            "knn_last_below_before_alert_sec": alert.get("last_below_sec"),
-            "knn_first_above_threshold_sec": alert.get("first_above_sec"),
-        })
+            for method, writer in (("knn", write_knn_timeline), ("logistic", write_logistic_timeline)):
+                timeline = timelines[method]
+                csv_path, plot_path = timeline_paths(output_directory, mode, method)
+                try:
+                    # A rerun must not leave plots from an older classifier or
+                    # from a run where plotting was enabled looking current.
+                    csv_path.unlink(missing_ok=True)
+                    plot_path.unlink(missing_ok=True)
+                    if classifier_enabled and classifier_method(classifier_config) == method:
+                        if not classifier_config.get("plot_timeline", True):
+                            timeline["status"] = "disabled"
+                        elif classifier_error or cop_vector is None:
+                            raise ValueError(classifier_error or "No CoP vector is available for the timeline.")
+                        else:
+                            options = {"config": config, "vlm": vlm} if method == "knn" else {}
+                            timeline.update(writer(
+                                model=model, classifier=classifiers[mode], turns=turns, generation=generation,
+                                nominal_response=nominal_response, frame_metadata=mode_frame_metadata,
+                                final_vector=cop_vector, comparison_signature=comparison_signature,
+                                output_directory=output_directory, mode=mode,
+                                bag_name=Path(config["test_bag"]).name, provenance=provenance,
+                                classifier_model_path=classifier_model_path, **options,
+                            ))
+                            print(f"Saved {method} timeline: {timeline['plot']}")
+                except Exception as error:
+                    # Optional diagnostics must never discard the original VLM
+                    # response, final vector, or full-execution classifier score.
+                    timeline.update(status="failed", error=str(error),
+                                    csv=str(csv_path) if csv_path.exists() else None, plot=None)
+                    print(f"{method} timeline unavailable; keeping the full evaluation: {error}")
+        timeline_fields = {}
+        for method, timeline in timelines.items():
+            timeline_fields.update({f"{method}_timeline_{key}": timeline.get(key)
+                                    for key in ("status", "csv", "plot", "error")})
+            alert = timeline.get("first_alert", {})
+            timeline_fields.update({
+                f"{method}_last_below_before_alert_sec": alert.get("last_below_sec"),
+                f"{method}_first_above_threshold_sec": alert.get("first_above_sec"),
+            })
+        timing_fields = dict.fromkeys(TIMING_FIELDS)
+        if not training_vectors_only:
+            timing_method = classifier_method(classifier_config)
+            timing_fields = attach_failure_timing(
+                failure_annotation, timelines[timing_method], source=vlm.get("source", "generated_videos"),
+                mode=mode, ground_truth=vlm.get("ground_truth_label", "unknown"), method=timing_method,
+                bag_name=Path(config["test_bag"]).name,
+            )
         rows.append(
             {
                 "test_bag": config["test_bag"],
                 **neighbor_fields,
+                **timing_fields,
                 "input_mode": mode,
                 "decision": decision,
                 "confidence": confidence,
@@ -657,7 +678,10 @@ def evaluate_multiturn(
             "classifier_anomaly_score": classifier_anomaly_score,
             "classifier_score_kind": score_kind if classifier_enabled else None,
             **timeline_fields,
-            "knn_timeline": timeline,
+            "knn_timeline": timelines["knn"],
+            "logistic_timeline": timelines["logistic"],
+            "failure_annotation": failure_annotation,
+            **timing_fields,
             **neighbor_fields,
             "knn_neighbors": neighbors,
         })
