@@ -35,6 +35,7 @@ from rynnbrain_vlm.cop_analysis import analyze_saved_vectors, write_failure_prob
 from rynnbrain_vlm.model import RynnBrainModel
 from rynnbrain_vlm.cop_classifier import classifier_method, classifier_model_paths
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
+from rynnbrain_vlm.failure_timing import TIMING_FIELDS, read_failure_annotation, evaluate_failure_timing, write_failure_timing_report
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -202,6 +203,9 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
     knn = any(row.get("classifier_score_kind") == "knn_distance" for row in master_rows)
     if knn:
         columns += ["anomaly_score", "anomaly_threshold", "classifier_decision"]
+    timing = any("failure_timing_status" in row for row in master_rows)
+    if timing:
+        columns += ["input_mode", *TIMING_FIELDS]
     return pd.DataFrame(
         [
             {
@@ -213,6 +217,7 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
                 **({"anomaly_score": row.get("classifier_anomaly_score"),
                     "anomaly_threshold": row.get("classifier_threshold") if row.get("classifier_score_kind") == "knn_distance" else None,
                     "classifier_decision": row.get("classifier_decision")} if knn else {}),
+                **({"input_mode": row.get("input_mode"), **{key: row.get(key) for key in TIMING_FIELDS}} if timing else {}),
             }
             for row in master_rows
         ],
@@ -430,6 +435,7 @@ def main() -> None:
                 rows, frame_metadata, raw_records, task_description = evaluate_multiturn(
                     model, config_bag, vlm_bag, frame_count, generation, Path(vlm_bag["output_dir"]),
                     reference_response=reference_response,
+                    stage_startup_ignore_sec=startup_ignore_sec,
                 )
                 write_multiturn_outputs(
                     Path(vlm_bag["output_dir"]), rows, frame_metadata, raw_records, task_description
@@ -458,6 +464,11 @@ def main() -> None:
                 "classifier_decision_correct": None,
                 "classifier_threshold": None,
                 "classifier_model_path": None,
+                **evaluate_failure_timing(
+                    read_failure_annotation(bag_path, stage_topic, startup_ignore_sec), {},
+                    source=vlm.get("source", "generated_videos"), mode="raw", ground_truth=ground_truth,
+                    method=classifier_method(vlm.get("cop_classifier", {})),
+                ),
                 **dino_summary,
             })
             continue
@@ -496,6 +507,7 @@ def main() -> None:
                 "classifier_error": row.get("classifier_error"),
                 "classifier_anomaly_score": row.get("classifier_anomaly_score"),
                 "classifier_score_kind": row.get("classifier_score_kind"),
+                **{key: row.get(key) for key in TIMING_FIELDS},
                 **{key: row.get(key) for key in ("knn_timeline_status", "knn_timeline_csv", "knn_timeline_plot", "knn_timeline_error")},
                 **{key: row.get(key) for key in ("logistic_timeline_status", "logistic_timeline_csv", "logistic_timeline_plot", "logistic_timeline_error",
                                                 "logistic_last_below_before_alert_sec", "logistic_first_above_threshold_sec")},
@@ -513,6 +525,10 @@ def main() -> None:
     clean_report_path = benchmark_root / "benchmark_clean.csv"
     clean_report.to_csv(clean_report_path, index=False)
     statistics = _report_statistics(master_rows)
+    statistics["failure_timing"] = write_failure_timing_report(
+        master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"]),
+        method=classifier_method(vlm.get("cop_classifier", {})),
+    )
     statistics["failure_probability"] = write_failure_probability_report(
         master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"])
     )
@@ -558,6 +574,7 @@ def main() -> None:
     print(f"Summary table: {summary_path}")
     print(f"Clean report: {clean_report_path}")
     print(f"Statistics: {statistics_path}")
+    print(f"Recorded vs. predicted failure timing: {benchmark_root / 'benchmark_failure_timing'}")
     if "anomaly_score" in statistics:
         print(f"Nominal kNN distance boxplots: {benchmark_root}")
         print(f"Anomaly-distance ROC/AUROC: {benchmark_root / 'benchmark_anomaly_roc'}")

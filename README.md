@@ -922,6 +922,79 @@ interval. Snapshot errors leave gaps; a timeline failure retains the VLM answer
 and final classifier result. Switching methods clears stale timeline graphs
 from the previously used method in that same output folder.
 
+### Failure-time evaluation against the error button
+
+For raw rosbag inputs, classifier timelines are now compared automatically with
+the recorded error-button event on `stage_topic` (normally `/recording_stage`).
+This works for both kNN and logistic regression, with `plot_timeline: true`,
+and adds no model inference or training. No config paths or bag lists need to
+change. Keep the existing eight-frame sampling if that is your current setup.
+
+The reference time is the **first failure marker after the startup filter**.
+The existing failure-marker vocabulary is reused (`Error`, `Anomaly`, `fail`,
+`failure`, `failed`, `NOK`, `not OK`, `Fehler`, case-insensitive). All stage
+messages are examined for onset, not just the final three messages used by the
+existing bag-label heuristic. Benchmark `--startup-ignore-sec` is respected;
+otherwise `$STAGE_STARTUP_IGNORE_SEC` or its default 0.1 seconds is used.
+The complete marker identity, timestamp, count, and filter are recorded in
+`failure_annotation` in each response JSON. Existing bag labels are unchanged;
+a nominal label that conflicts with an error marker is explicitly flagged.
+
+The predicted time is the **first sampled classifier score at or above its
+threshold**, including early alerts. Recorded and predicted times both use
+seconds since ROS bag start. The timing error is:
+
+```text
+failure_time_error_sec = predicted_failure_time_sec - recorded_failure_time_sec
+```
+
+Positive means late; negative means an early alert. For example, a button press
+at 20 s and first classifier alert at 26 s gives +6 s error and 6 s absolute
+error. No interpolation between snapshots is used. This evaluates the
+classifier's alert against the human annotation; it is not the VLM's textual
+decision timing, inference wall-clock latency, or an exact physical-onset claim.
+Annotations are only used after prediction for evaluation, never to choose
+thresholds, train models, or add information to the model prompt.
+
+Each case's existing `knn_timeline_raw.png` or `logistic_timeline_raw.png` gets
+a green vertical line for the recorded error-button time and a timing-error
+caption. The per-case result CSV/JSON and both `benchmark_summary.csv` and
+`benchmark_clean.csv` gain:
+
+- `recorded_failure_time_sec`
+- `predicted_failure_time_sec`
+- `failure_time_error_sec` (signed)
+- `failure_time_absolute_error_sec`
+- `failure_timing_status`, `failure_timing_error`, `failure_timing_method`
+
+The benchmark also writes `benchmark_failure_timing/failure_timing_raw_knn.png`
+(or `failure_timing_raw_logistic.png`), its per-bag CSV, and
+`failure_timing_summary.json`. The figure compares recorded/predicted times
+for each evaluated bag, shows signed error bars and the mean signed error,
+and reports the **mean absolute error** so early and late errors cannot cancel.
+The same statistics appear under `failure_timing` in `benchmark_statistics.json`.
+Each input mode is summarized separately, without pooling multiple predictions
+for the same bag into a single mean.
+
+Means include only complete, aligned timelines with both a failure annotation
+inside the sampled time window and an observed alert. All evaluated bags stay
+in the timing table/graph; missed detections (`not_detected`), missing markers,
+nominal false alerts, partial timelines, annotation/label conflicts, and failed
+evaluations have explicit statuses and counts. They are **not assigned zero
+error**. When no case can be compared, means are unavailable (`null`), not zero.
+The report shows the compared and excluded counts beside the means.
+
+Video playback timestamps are not assumed to equal bag time: generated-video,
+heatmap, and mixed raw/heatmap inputs currently report `unaligned_timebase`
+rather than subtracting unrelated clocks. Your `source: "rosbag"` with
+`input_modes: ["raw"]` uses the supported common clock. Missing stage topics
+or optional plot errors preserve the existing VLM/classifier results.
+
+Use the normal `rynnbrain-test-multiturn` or `benchmark` commands. A single test
+gets its annotation overlay and timing fields; the benchmark additionally
+aggregates the bags executed in that run. Previously saved results are not
+silently mixed into these averages.
+
 ### Frozen-vector logistic failure classifier
 
 RynnBrain remains fully frozen. After collecting labeled vectors, a small

@@ -411,7 +411,8 @@ def first_alert_interval(dataframe: pd.DataFrame) -> dict:
             "note": "Interval brackets the first observed threshold crossing, not the physical failure onset."}
 
 
-def _plot_timeline(dataframe: pd.DataFrame, plot_path: Path, bag_name: str, mode: str, *, probability=False) -> None:
+def _plot_timeline(dataframe: pd.DataFrame, plot_path: Path, bag_name: str, mode: str, *, probability=False,
+                   failure_timing=None) -> None:
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
@@ -441,6 +442,14 @@ def _plot_timeline(dataframe: pd.DataFrame, plot_path: Path, bag_name: str, mode
         elif alert["status"] == "no_prior_below":
             axis.axvline(alert["first_above_sec"], color="#c44850", alpha=0.6, linestyle=":",
                          label="First alert; no earlier below-threshold sample")
+        if failure_timing and failure_timing.get("recorded_failure_time_sec") is not None:
+            recorded = failure_timing["recorded_failure_time_sec"]
+            axis.axvline(recorded, color="#27875f", linestyle="-.", linewidth=1.7,
+                         label=f"Recorded error button: {recorded:.2f} s")
+            delta = failure_timing.get("failure_time_error_sec")
+            detail = (f"First alert minus recorded failure: {delta:+.2f} s (positive = late; negative = early)"
+                      if delta is not None else "Timing comparison: " + failure_timing["failure_timing_status"].replace("_", " "))
+            figure.text(.11, .835, detail, fontsize=9, color="#27875f")
         missing = ~np.isfinite(scores)
         if missing.any():
             axis.scatter(times[missing], np.zeros(missing.sum()), transform=axis.get_xaxis_transform(),

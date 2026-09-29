@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -20,6 +21,7 @@ from .cop_classifier import classifier_method, classifier_model_paths, load_clas
 from .cop_analysis import save_cop_vector
 from .model import COP_REPRESENTATION_ID, RynnBrainModel
 from .prompts import task_context_prompt, evaluation_prompt_multiturn, visual_evidence_prompt
+from .failure_timing import TIMING_FIELDS, read_failure_annotation, attach_failure_timing
 
 
 def _slug(value: str) -> str:
@@ -279,6 +281,7 @@ def evaluate_multiturn(
     *,
     training_vectors_only: bool = False,
     reference_response: str | None = None,
+    stage_startup_ignore_sec: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
     """Evaluate one test bag/video set with an already-loaded RynnBrain model.
 
@@ -360,6 +363,10 @@ def evaluate_multiturn(
         nominal_images.extend(bag_images)
     _save_inputs(output_directory, "nominal", nominal_images)
 
+    failure_annotation = None
+    if not training_vectors_only:
+        ignore_sec = stage_startup_ignore_sec if stage_startup_ignore_sec is not None else float(os.environ.get("STAGE_STARTUP_IGNORE_SEC", 0.1))
+        failure_annotation = read_failure_annotation(config["test_bag"], config.get("stage_topic", "/recording_stage"), ignore_sec)
     rows = []
     raw_records = []
 
@@ -573,10 +580,19 @@ def evaluate_multiturn(
                 f"{method}_last_below_before_alert_sec": alert.get("last_below_sec"),
                 f"{method}_first_above_threshold_sec": alert.get("first_above_sec"),
             })
+        timing_fields = dict.fromkeys(TIMING_FIELDS)
+        if not training_vectors_only:
+            timing_method = classifier_method(classifier_config)
+            timing_fields = attach_failure_timing(
+                failure_annotation, timelines[timing_method], source=vlm.get("source", "generated_videos"),
+                mode=mode, ground_truth=vlm.get("ground_truth_label", "unknown"), method=timing_method,
+                bag_name=Path(config["test_bag"]).name,
+            )
         rows.append(
             {
                 "test_bag": config["test_bag"],
                 **neighbor_fields,
+                **timing_fields,
                 "input_mode": mode,
                 "decision": decision,
                 "confidence": confidence,
@@ -664,6 +680,8 @@ def evaluate_multiturn(
             **timeline_fields,
             "knn_timeline": timelines["knn"],
             "logistic_timeline": timelines["logistic"],
+            "failure_annotation": failure_annotation,
+            **timing_fields,
             **neighbor_fields,
             "knn_neighbors": neighbors,
         })

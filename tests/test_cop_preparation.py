@@ -152,6 +152,20 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.assertFalse((directory / "logistic_timeline_raw.png").exists())
         self.assertTrue((directory / "rynnbrain_responses_multiturn.json").is_file())
 
+    def test_recorded_failure_timing_is_saved_without_changing_model_calls(self):
+        annotation = {"status": "available", "time_sec": 5., "marker": "Error", "marker_count": 1, "error": None}
+        with patch.object(self.run, "read_failure_annotation", return_value=annotation):
+            directory, row, response = self._run_logistic_single_with_timeline()
+        self.assertEqual(row["failure_timing_status"], "compared")
+        self.assertEqual(row["recorded_failure_time_sec"], 5.)
+        self.assertEqual(row["predicted_failure_time_sec"], 0.)
+        self.assertEqual(row["failure_time_error_sec"], -5.)
+        self.assertEqual(row["failure_time_absolute_error_sec"], 5.)
+        self.assertEqual(response["failure_annotation"], annotation)
+        self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, 7)
+        saved = pd.read_csv(directory / "rynnbrain_results_multiturn.csv")
+        self.assertEqual(saved.failure_time_error_sec.iloc[0], -5.)
+
     def test_training_responses_are_saved_and_missing_or_stale_files_are_repaired(self):
         paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
         for path in paths:
@@ -273,6 +287,10 @@ class ClassifierPreparationTests(unittest.TestCase):
             else:
                 self.assertEqual(saved["knn_neighbors_status"], "not_applicable")
         statistics = json.loads((output / "benchmark_statistics.json").read_text())
+        self.assertIn("failure_time_error_sec", clean.columns)
+        self.assertIn("failure_time_absolute_error_sec", clean.columns)
+        self.assertEqual(statistics["failure_timing"]["modes"][0]["evaluated_bags"], len(test_names))
+        self.assertIsNone(statistics["failure_timing"]["modes"][0]["mean_absolute_error_sec"])
         self.assertEqual(statistics["classifier"]["scored_rows"], len(test_names))
         score_report = statistics["anomaly_score" if knn else "failure_probability"]["modes"][0]
         self.assertEqual(score_report["scored_rows"], len(test_names))
