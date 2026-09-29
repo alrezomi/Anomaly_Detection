@@ -497,6 +497,8 @@ def main() -> None:
                 "classifier_anomaly_score": row.get("classifier_anomaly_score"),
                 "classifier_score_kind": row.get("classifier_score_kind"),
                 **{key: row.get(key) for key in ("knn_timeline_status", "knn_timeline_csv", "knn_timeline_plot", "knn_timeline_error")},
+                **{key: row.get(key) for key in ("logistic_timeline_status", "logistic_timeline_csv", "logistic_timeline_plot", "logistic_timeline_error",
+                                                "logistic_last_below_before_alert_sec", "logistic_first_above_threshold_sec")},
                 **{key: row.get(key) for key in ("knn_neighbors_status", "knn_neighbors_csv", "knn_neighbors_plot", "knn_neighbors_error",
                                                 "knn_last_below_before_alert_sec", "knn_first_above_threshold_sec")},
                 **dino_summary,

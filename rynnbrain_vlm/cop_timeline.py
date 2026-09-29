@@ -1,4 +1,4 @@
-"""Nominal-only kNN memories and score timelines matched by sampled progress."""
+"""CoP score timelines: matched nominal kNN prefixes and logistic diagnostics."""
 
 from __future__ import annotations
 
@@ -36,9 +36,11 @@ TIMELINE_NOTE = (
 )
 
 
-def timeline_paths(output_directory: Path, mode: str) -> tuple[Path, Path]:
+def timeline_paths(output_directory: Path, mode: str, method: str = "knn") -> tuple[Path, Path]:
+    if method not in {"knn", "logistic"}:
+        raise ValueError("Timeline method must be 'knn' or 'logistic'.")
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", mode).strip("_").lower()
-    stem = output_directory / f"knn_timeline_{slug}"
+    stem = output_directory / f"{method}_timeline_{slug}"
     return stem.with_suffix(".csv"), stem.with_suffix(".png")
 
 
@@ -322,6 +324,75 @@ def write_knn_timeline(
             "note": TIMELINE_NOTE}
 
 
+def write_logistic_timeline(
+    *, model, classifier, turns, generation, nominal_response: str,
+    frame_metadata: list[dict], final_vector, comparison_signature: dict,
+    output_directory: Path, mode: str, bag_name: str, provenance: dict,
+    classifier_model_path: str,
+) -> dict:
+    """Apply the existing full-execution classifier to the original sampled prefixes.
+
+    Bag-level failure labels do not establish when a failure began. Do not
+    propagate them onto early prefixes or fit onset classifiers without temporal
+    supervision. These partial-context scores are explicitly diagnostic.
+    """
+    csv_path, plot_path = timeline_paths(output_directory, mode, "logistic")
+    csv_path.unlink(missing_ok=True)
+    plot_path.unlink(missing_ok=True)
+    images = turns[1]["images"]
+    snapshots = selected_frame_prefixes(frame_metadata, len(images), comparison_signature["num_frames"])
+    final_score = classifier.predict_failure_probability(
+        _as_numpy(final_vector), input_mode=mode, comparison_signature=comparison_signature,
+    )
+    rows = []
+    for index, snapshot in enumerate(snapshots):
+        indices = snapshot["image_indices"]
+        complete = index == len(snapshots) - 1
+        score, error = None, None
+        print(f"Logistic timeline ({mode}): snapshot {index + 1}/{len(snapshots)} "
+              f"at {snapshot['timestamp_sec']:.3f}s ({len(indices)} images)")
+        try:
+            if complete:
+                score = final_score
+            else:
+                prefix = {**turns[1], "images": [images[i] for i in indices]}
+                vector = model.extract_multiturn_cop_vector(
+                    [turns[0], prefix], generation, reference_response=nominal_response,
+                )
+                score = classifier.predict_failure_probability(
+                    _as_numpy(vector), input_mode=mode, comparison_signature=comparison_signature,
+                )
+        except (RuntimeError, ValueError) as failure:
+            error = str(failure)
+            print(f"Logistic timeline snapshot unavailable; retaining the full evaluation: {error}")
+        rows.append({
+            "bag_name": bag_name, "input_mode": mode, "evaluation_id": provenance["evaluation_id"],
+            "lora_adapter_sha256": provenance.get("lora_adapter_sha256"),
+            "timestamp_sec": snapshot["timestamp_sec"], "sample_index": index,
+            "image_count": len(indices), "image_indices": json.dumps(indices),
+            "image_timestamps_sec": json.dumps([float(frame_metadata[i]["timestamp_sec"]) for i in indices]),
+            "score_kind": "failure_probability", "anomaly_score": score, "failure_probability": score,
+            "failure_percent": score * 100 if score is not None else None,
+            "threshold": classifier.threshold, "threshold_percent": classifier.threshold * 100,
+            "above_threshold": score >= classifier.threshold if score is not None else None,
+            "complete_execution": complete,
+            "vector_source": "existing_full_execution" if complete else "prefix_prompt",
+            "threshold_source": "full_execution_classifier",
+            "classifier_model_path": classifier_model_path, "error": error,
+        })
+    dataframe = pd.DataFrame(rows)
+    dataframe.to_csv(csv_path, index=False)
+    _plot_timeline(dataframe, plot_path, bag_name, mode, probability=True)
+    failed = sum(row["error"] is not None for row in rows)
+    return {"status": "partial" if failed else "created", "csv": str(csv_path), "plot": str(plot_path),
+            "point_count": len(rows), "failed_point_count": failed,
+            "protocol": "full_execution_logistic_on_prefixes_v1",
+            "score_kind": "failure_probability", "first_alert": first_alert_interval(dataframe),
+            "note": "The same complete-execution logistic classifier scores every prefix. "
+                    "Prefix probabilities are diagnostic and are not calibrated failure-onset estimates. "
+                    "No onset labels or prefix training are used; the last point matches the complete score."}
+
+
 def first_alert_interval(dataframe: pd.DataFrame) -> dict:
     """Bound a sampled score crossing; never call it physical failure onset."""
     scores = dataframe.anomaly_score.to_numpy(dtype=float)
@@ -340,23 +411,26 @@ def first_alert_interval(dataframe: pd.DataFrame) -> dict:
             "note": "Interval brackets the first observed threshold crossing, not the physical failure onset."}
 
 
-def _plot_timeline(dataframe: pd.DataFrame, plot_path: Path, bag_name: str, mode: str) -> None:
+def _plot_timeline(dataframe: pd.DataFrame, plot_path: Path, bag_name: str, mode: str, *, probability=False) -> None:
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
     times = dataframe.timestamp_sec.to_numpy(dtype=float)
-    scores = dataframe.anomaly_score.to_numpy(dtype=float)
-    thresholds = dataframe.threshold.to_numpy(dtype=float)
+    scale = 100 if probability else 1
+    scores = dataframe.anomaly_score.to_numpy(dtype=float) * scale
+    thresholds = dataframe.threshold.to_numpy(dtype=float) * scale
     above = np.isfinite(scores) & (scores >= thresholds)
     figure, axis = plt.subplots(figsize=(10, 5.6))
     try:
         figure.subplots_adjust(left=0.11, right=0.97, top=0.81, bottom=0.26)
-        figure.text(0.11, 0.94, "kNN anomaly score over time", fontsize=18, weight="bold", color="#172b40")
+        title = "Logistic failure score over time" if probability else "kNN anomaly score over time"
+        figure.text(0.11, 0.94, title, fontsize=18, weight="bold", color="#172b40")
         figure.text(0.11, 0.875, f"{bag_name}  /  {mode}  /  {len(times)} sampled snapshots", fontsize=10, color="#607080")
-        axis.plot(times, scores, "o-", color="#2f78c4", linewidth=1.8, markersize=5, label="Anomaly distance")
+        axis.plot(times, scores, "o-", color="#2f78c4", linewidth=1.8, markersize=5,
+                  label="Failure probability" if probability else "Anomaly distance")
         axis.plot(times, thresholds, "s--", color="#c27524", linewidth=1.6, markersize=4,
-                  label="Nominal threshold (matched progress)")
+                  label="Classifier threshold" if probability else "Nominal threshold (matched progress)")
         if above.any():
             axis.scatter(times[above], scores[above], color="#c44850", s=45, zorder=4, label="Above threshold")
         alert = first_alert_interval(dataframe)
@@ -371,7 +445,11 @@ def _plot_timeline(dataframe: pd.DataFrame, plot_path: Path, bag_name: str, mode
         if missing.any():
             axis.scatter(times[missing], np.zeros(missing.sum()), transform=axis.get_xaxis_transform(),
                          marker="x", color="#777777", clip_on=False, label="Snapshot unavailable")
-        axis.set(xlabel="Time from bag / video start (s)", ylabel="Anomaly distance", ylim=(0, None))
+        axis.set(xlabel="Time from bag / video start (s)",
+                 ylabel="Failure probability (%)" if probability else "Anomaly distance",
+                 ylim=(0, 103 if probability else None))
+        if probability:
+            axis.set_yticks(np.arange(0, 101, 20))
         if len(times) == 1:
             axis.set_xlim(times[0] - 0.5, times[0] + 0.5)
         axis.grid(axis="y", color="#e7ecf0", linewidth=0.8)
@@ -379,8 +457,11 @@ def _plot_timeline(dataframe: pd.DataFrame, plot_path: Path, bag_name: str, mode
         axis.legend(loc="best", fontsize=9, frameon=False)
         figure.text(0.11, 0.12, "Offline diagnostic: each point uses only selected execution images available by that time.",
                     fontsize=9, color="#607080")
-        figure.text(0.11, 0.065, "Thresholds use nominal prefixes at the same sampled progress index, not robot-stage alignment.\n"
-                    "Lines connect evaluated snapshots only; they do not locate the exact failure onset.", fontsize=8.5, color="#607080")
+        note = ("The classifier was trained on complete executions. Prefix probabilities are diagnostic,\n"
+                "not calibrated estimates of whether a failure has already started." if probability else
+                "Thresholds use nominal prefixes at the same sampled progress index, not robot-stage alignment.\n"
+                "Lines connect evaluated snapshots only; they do not locate the exact failure onset.")
+        figure.text(0.11, 0.065, note, fontsize=8.5, color="#607080")
         figure.savefig(plot_path, dpi=180, bbox_inches="tight", facecolor="white")
     finally:
         plt.close(figure)

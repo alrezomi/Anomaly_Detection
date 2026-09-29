@@ -106,6 +106,52 @@ class ClassifierPreparationTests(unittest.TestCase):
             prepare_training_vectors(self.config, self.settings, model=self.model)
         self.model.generate_nominal.assert_not_called()
 
+    def _run_logistic_single_with_timeline(self, *, enabled=True):
+        paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
+        train_from_saved_vectors(**self.settings, metadata_paths=paths)
+        self.config["test_bag"] = str(self.root / "data/failure_test")
+        vlm = {**self.config["rynnbrain"], "ground_truth_label": "fail", "cop_vectors": {"enabled": True},
+               "cop_classifier": {**self.config["rynnbrain"]["cop_classifier"], "plot_timeline": enabled}}
+        images = [("failure_test", Image.new("RGB", (2, 2))) for _ in range(8)]
+        frames = [{"sample_index": i, "timestamp_sec": i * 3.0} for i in range(8)]
+        self.model.extract_multiturn_cop_vector = Mock(return_value=self.torch.tensor([-1., .2, .3, .4]))
+        directory = self.root / "single"
+        directory.mkdir(exist_ok=True)
+        (directory / "knn_timeline_raw.png").write_text("stale knn graph")
+        (directory / "logistic_timeline_raw.png").write_text("stale logistic graph")
+        with patch.object(self.run, "_execution_inputs", return_value=({"raw": (images, frames)}, frames)):
+            rows, frames, responses, task = self.run.evaluate_multiturn(self.model, self.config, vlm, 8, {}, directory)
+        self.run.write_multiturn_outputs(directory, rows, frames, responses, task)
+        self.assertFalse((directory / "knn_timeline_raw.png").exists())
+        self.assertEqual(responses[0]["response"], "Decision: failure")
+        self.assertIsNotNone(rows[0]["classifier_failure_probability"])
+        return directory, rows[0], responses[0]
+
+    def test_logistic_single_timeline_is_saved_and_matches_full_probability(self):
+        directory, row, response = self._run_logistic_single_with_timeline()
+        self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, 7)
+        self.assertEqual(row["logistic_timeline_status"], "created")
+        self.assertEqual(response["knn_timeline"]["status"], "not_applicable")
+        self.assertEqual(response["logistic_timeline"]["protocol"], "full_execution_logistic_on_prefixes_v1")
+        snapshots = pd.read_csv(row["logistic_timeline_csv"])
+        self.assertEqual(len(snapshots), 8)
+        self.assertAlmostEqual(snapshots.failure_probability.iloc[-1], row["classifier_failure_probability"])
+        self.assertTrue(Path(row["logistic_timeline_plot"]).is_file())
+
+    def test_logistic_timeline_disabled_skips_extra_model_calls_and_clears_stale_plot(self):
+        directory, row, response = self._run_logistic_single_with_timeline(enabled=False)
+        self.model.extract_multiturn_cop_vector.assert_not_called()
+        self.assertEqual(row["logistic_timeline_status"], "disabled")
+        self.assertFalse((directory / "logistic_timeline_raw.png").exists())
+
+    def test_logistic_timeline_error_preserves_response_and_probability(self):
+        with patch("rynnbrain_vlm.cop_timeline.write_logistic_timeline", side_effect=ValueError("bad timestamps")):
+            directory, row, response = self._run_logistic_single_with_timeline()
+        self.assertEqual(row["logistic_timeline_status"], "failed")
+        self.assertEqual(row["logistic_timeline_error"], "bad timestamps")
+        self.assertFalse((directory / "logistic_timeline_raw.png").exists())
+        self.assertTrue((directory / "rynnbrain_responses_multiturn.json").is_file())
+
     def test_training_responses_are_saved_and_missing_or_stale_files_are_repaired(self):
         paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
         for path in paths:
