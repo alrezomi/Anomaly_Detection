@@ -434,8 +434,11 @@ def train_from_saved_vectors(
     knn_options: dict[str, Any] | None = None,
     include_timeline: bool = False,
     timeline_num_frames: int | None = None,
+    onset_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     classifier_method({"method": method})
+    if onset_options is not None and (method != "logistic" or input_mode != "raw" or not bag_names):
+        raise ValueError("Onset training requires logistic/raw and an explicit training bag selection.")
     if method == "knn" and not bag_names:
         raise ValueError("Nominal kNN requires an explicit normal_bags selection; never train on all benchmark vectors.")
     records = _select_training_records(
@@ -581,6 +584,10 @@ def train_from_saved_vectors(
     )
     save_classifier(model_path, classifier)
     load_classifier.cache_clear()
+    if onset_options is not None:
+        from .cop_onset import train_onset_classifier
+        onset_metadata = train_onset_classifier(records, targets, model_path, metadata, onset_options)
+        return {**metadata, "onset_model": onset_metadata}
     return metadata
 
 
@@ -607,6 +614,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]:
+    config = {}
     classifier_config: dict[str, Any] = {}
     training_config: dict[str, Any] = {}
     if arguments.config is not None:
@@ -672,11 +680,13 @@ def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]
         vlm = config.get("rynnbrain", {})
         timeline_sampling(vlm, int(vlm.get("num_frames", 4)))
 
+    from .cop_onset import onset_training_options
     return {
         "method": method,
         "knn_options": dict(classifier_config.get("knn", {})),
         "include_timeline": method == "knn" and bool(classifier_config.get("plot_timeline", True)),
         "timeline_num_frames": classifier_config.get("timeline_num_frames"),
+        "onset_options": onset_training_options(config, input_mode),
         "input_directory": Path(str(input_directory)),
         "output_file": Path(str(output_file)),
         "input_mode": str(input_mode),
@@ -829,6 +839,18 @@ def prepare_training_vectors(
         from .cop_timeline import prepare_nominal_prefixes
         prepare_nominal_prefixes(model, config, vlm, discover_saved_vectors(root, paths),
                                  nominal_images, reference_response, generation, refresh=refresh)
+    if settings.get("onset_options") is not None:
+        from .cop_onset import select_annotated_records
+        from .cop_timeline import prepare_nominal_prefixes
+        records = discover_saved_vectors(root, paths)
+        labels_by_name = {name: LABEL_TO_TARGET[label] for _, name, _, label in selected}
+        annotated, _, _ = select_annotated_records(
+            records, [labels_by_name[record.metadata["bag_name"]] for record in records], settings["onset_options"])
+        # Logistic onset training uses the original frame count, not the optional dense kNN grid.
+        onset_vlm = {**vlm, "cop_classifier": {**vlm.get("cop_classifier", {})}}
+        onset_vlm["cop_classifier"].pop("timeline_num_frames", None)
+        prepare_nominal_prefixes(model, config, onset_vlm, annotated,
+                                 nominal_images, reference_response, generation, refresh=refresh, require_timestamps=True)
     return paths, reference_response
 
 

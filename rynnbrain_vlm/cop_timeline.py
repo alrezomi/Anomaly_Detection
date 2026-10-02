@@ -84,7 +84,7 @@ def _prefix_cache_paths(record):
     return directory / f"{slug}_prefix_vectors.npz", directory / f"{slug}_prefix_vectors.json"
 
 
-def _load_prefix_cache(record, sampling=None):
+def _load_prefix_cache(record, sampling=None, *, require_timestamps=False):
     path, sidecar = _prefix_cache_paths(record)
     metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     signature = record.metadata["comparison_signature"]
@@ -100,19 +100,25 @@ def _load_prefix_cache(record, sampling=None):
             or not np.isfinite(vectors).all()
             or not np.array_equal(vectors[-1], record.vector)):
         raise ValueError(f"Missing or stale nominal-prefix vectors for {record.metadata['bag_name']}.")
+    if require_timestamps:
+        times = np.asarray([row.get("timestamp_sec", np.nan) for row in metadata.get("snapshots", [])], dtype=float)
+        if (times.shape != (sampling["step_count"],) or not np.isfinite(times).all()
+                or (times < 0).any() or (np.diff(times) <= 0).any()):
+            raise ValueError("Prefix cache has no valid bag-relative timestamps; prepare it again.")
     return vectors
 
 
-def prepare_nominal_prefixes(model, config, vlm, records, nominal_images, reference_response, generation, *, refresh=False):
-    """Extract only missing/stale nominal prefixes, reusing full response/vector files."""
+def prepare_nominal_prefixes(model, config, vlm, records, nominal_images, reference_response, generation, *, refresh=False,
+                             require_timestamps=False):
+    """Extract missing/stale training prefixes, reusing full response/vector files."""
     from .run import _execution_inputs
 
     for record in records:
         sampling = timeline_sampling(vlm, record.metadata["comparison_signature"]["num_frames"])
         if not refresh:
             try:
-                _load_prefix_cache(record, sampling)
-                print(f"Reusing nominal-prefix vectors: {record.metadata['bag_name']}")
+                _load_prefix_cache(record, sampling, require_timestamps=require_timestamps)
+                print(f"Reusing training-prefix vectors: {record.metadata['bag_name']}")
                 continue
             except (ValueError, OSError, KeyError, EOFError, BadZipFile):
                 pass
@@ -130,7 +136,7 @@ def prepare_nominal_prefixes(model, config, vlm, records, nominal_images, refere
             if snapshot["sample_index"] == count - 1:
                 vector = record.vector
             else:
-                print(f"Extracting nominal prefix: {record.metadata['bag_name']} "
+                print(f"Extracting training prefix: {record.metadata['bag_name']} "
                       f"({snapshot['sample_index'] + 1}/{count})")
                 prefix = {**turns[1], "images": [images[i] for i in snapshot["image_indices"]]}
                 vector = _as_numpy(model.extract_multiturn_cop_vector(
@@ -144,7 +150,8 @@ def prepare_nominal_prefixes(model, config, vlm, records, nominal_images, refere
         np.savez_compressed(path, vectors=np.stack(vectors))
         # The final cached vector comes from the original full execution. Its
         # source images need not equal a subset of a newly sampled dense grid.
-        snapshots[-1] = {"sample_index": count - 1, "vector_source": "existing_full_execution",
+        snapshots[-1] = {"sample_index": count - 1, "timestamp_sec": snapshots[-1]["timestamp_sec"],
+                         "vector_source": "existing_full_execution",
                          "full_vector_file": str(record.vector_path)}
         sidecar.write_text(json.dumps({"protocol": sampling["protocol"], "sampling": sampling,
             "bag_name": record.metadata["bag_name"], "full_evaluation_id": record.metadata["evaluation_id"],
@@ -329,18 +336,23 @@ def write_logistic_timeline(
     frame_metadata: list[dict], final_vector, comparison_signature: dict,
     output_directory: Path, mode: str, bag_name: str, provenance: dict,
     classifier_model_path: str,
+    use_onset_classifier: bool = False, source: str | None = None,
 ) -> dict:
-    """Apply the existing full-execution classifier to the original sampled prefixes.
-
-    Bag-level failure labels do not establish when a failure began. Do not
-    propagate them onto early prefixes or fit onset classifiers without temporal
-    supervision. These partial-context scores are explicitly diagnostic.
-    """
+    """Score original prefixes with an explicitly selected diagnostic or onset model."""
     csv_path, plot_path = timeline_paths(output_directory, mode, "logistic")
     csv_path.unlink(missing_ok=True)
     plot_path.unlink(missing_ok=True)
     images = turns[1]["images"]
     snapshots = selected_frame_prefixes(frame_metadata, len(images), comparison_signature["num_frames"])
+    score_source = "full_execution_classifier"
+    if use_onset_classifier:
+        from .cop_onset import load_onset_classifier
+        if source != "rosbag" or mode != "raw":
+            raise ValueError("Timestamp-supervised logistic timelines require raw rosbag inputs.")
+        classifier, onset_path = load_onset_classifier(classifier_model_path, classifier, bag_name=bag_name)
+        classifier_model_path = str(onset_path)
+        score_source = "timestamp_supervised_prefix_classifier"
+        print(f"Logistic timeline uses timestamp-supervised classifier: {onset_path}")
     final_score = classifier.predict_failure_probability(
         _as_numpy(final_vector), input_mode=mode, comparison_signature=comparison_signature,
     )
@@ -377,7 +389,7 @@ def write_logistic_timeline(
             "above_threshold": score >= classifier.threshold if score is not None else None,
             "complete_execution": complete,
             "vector_source": "existing_full_execution" if complete else "prefix_prompt",
-            "threshold_source": "full_execution_classifier",
+            "threshold_source": score_source,
             "classifier_model_path": classifier_model_path, "error": error,
         })
     dataframe = pd.DataFrame(rows)
@@ -386,11 +398,15 @@ def write_logistic_timeline(
     failed = sum(row["error"] is not None for row in rows)
     return {"status": "partial" if failed else "created", "csv": str(csv_path), "plot": str(plot_path),
             "point_count": len(rows), "failed_point_count": failed,
-            "protocol": "full_execution_logistic_on_prefixes_v1",
+            "protocol": "recorded_failure_logistic_prefixes_v1" if use_onset_classifier else "full_execution_logistic_on_prefixes_v1",
+            "classifier_model_path": classifier_model_path,
             "score_kind": "failure_probability", "first_alert": first_alert_interval(dataframe),
-            "note": "The same complete-execution logistic classifier scores every prefix. "
+            "note": ("A separate timestamp-supervised classifier scores every prefix, including the final vector. "
+                    "The timeline estimates whether failure has already occurred; the separate whole-bag probability is unchanged. "
+                    "Button timestamps are used only as training labels and evaluation references, never prediction inputs."
+                    if use_onset_classifier else "The same complete-execution logistic classifier scores every prefix. "
                     "Prefix probabilities are diagnostic and are not calibrated failure-onset estimates. "
-                    "No onset labels or prefix training are used; the last point matches the complete score."}
+                    "No onset labels or prefix training are used; the last point matches the complete score.")}
 
 
 def first_alert_interval(dataframe: pd.DataFrame) -> dict:
@@ -466,7 +482,10 @@ def _plot_timeline(dataframe: pd.DataFrame, plot_path: Path, bag_name: str, mode
         axis.legend(loc="best", fontsize=9, frameon=False)
         figure.text(0.11, 0.12, "Offline diagnostic: each point uses only selected execution images available by that time.",
                     fontsize=9, color="#607080")
-        note = ("The classifier was trained on complete executions. Prefix probabilities are diagnostic,\n"
+        onset_trained = probability and "threshold_source" in dataframe and (dataframe.threshold_source == "timestamp_supervised_prefix_classifier").all()
+        note = ("Trained on visual prefixes labeled before/after the recorded error button; scores are not guaranteed calibrated.\n"
+                "First threshold crossing is a sampled alert time, not exact physical onset or inference latency." if onset_trained else
+                "The classifier was trained on complete executions. Prefix probabilities are diagnostic,\n"
                 "not calibrated estimates of whether a failure has already started." if probability else
                 "Thresholds use nominal prefixes at the same sampled progress index, not robot-stage alignment.\n"
                 "Lines connect evaluated snapshots only; they do not locate the exact failure onset.")

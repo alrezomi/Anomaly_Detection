@@ -898,7 +898,7 @@ plus `failure_percent`, `threshold`, `threshold_percent`, timestamps, errors,
 evaluation ID, and adapter identity. Aggregate benchmark columns keep their
 existing meanings: logistic scores remain in `failure_probability`.
 
-This reuses the **existing complete-execution logistic classifier** and the
+By default this reuses the **existing complete-execution logistic classifier** and the
 original sampled frames. For eight timesteps it makes seven extra short prefix
 vector extractions, with the same LoRA/reference/prompt, without generating
 additional full answers. The final point reuses the original full-execution
@@ -910,7 +910,7 @@ Prefix scores are a **diagnostic**: the classifier was trained on completed
 executions, so these scores are not calibrated probabilities that a failure
 has already happened. A failed bag can have normal early frames; assigning its
 failure label to every prefix would not teach accurate failure-start timing.
-Future onset supervision needs temporal annotations and separate evaluation.
+The optional timestamp-supervised model below addresses this training mismatch.
 
 Use the normal `rynnbrain-test-multiturn` or `benchmark` command. Run
 `cop-classifier-train` first only if a compatible logistic classifier is not
@@ -921,6 +921,85 @@ CSV and response JSON report `logistic_timeline_status`, `logistic_timeline_plot
 interval. Snapshot errors leave gaps; a timeline failure retains the VLM answer
 and final classifier result. Switching methods clears stale timeline graphs
 from the previously used method in that same output folder.
+
+#### Train logistic timelines with recorded failure times
+
+To teach the timeline classifier whether a failure has **already occurred**, add
+this field yourself inside `rynnbrain.cop_classifier` (keep your current paths
+and bag lists):
+
+```json
+"logistic_onset": {
+  "enabled": true
+}
+```
+
+Use `method: "logistic"`, `enabled: true`, `plot_timeline: true`,
+`rynnbrain.source: "rosbag"`, and input mode `raw`. The feature is off when the
+new field is absent or false, and does not change kNN behavior.
+
+Then train and run a held-out test with the existing commands:
+
+```bash
+docker compose run --rm --build cop-classifier-train
+docker compose run --rm --build rynnbrain-test-multiturn
+```
+
+Or run `docker compose run --rm --build benchmark`: its normal classifier
+preparation trains both logistic models before evaluating held-out bags.
+No LoRA retraining is needed. This code does not edit your configuration.
+
+Training uses only `cop_classifier.training.normal_bags` and `failure_bags`
+(or explicitly selected training bags). It reuses compatible saved vectors and
+extracts missing prefix vectors from the same frozen VLM/LoRA. With eight frames,
+each training bag supplies eight visual prefixes: first frame, first two frames,
+and so on. This does **not** increase the frame count. The first run needs extra
+prefix inference; later runs reuse matching timestamped caches. Older caches
+without complete timestamps are regenerated. `--saved-vectors-only` requires
+these prefix caches and access to the bags' stage annotations.
+
+Labels come from the first eligible failure marker on `stage_topic`, using the
+existing startup filter (0.1 seconds by default):
+
+- Nominal bag: all prefixes have target 0.
+- Failure bag: prefixes strictly before the marker have target 0; prefixes at
+  or after it have target 1, even if the robot subsequently recovers.
+- Missing/unreadable failure annotations, nominal bags with failure markers,
+  and failures recorded after the final sampled image are excluded from onset
+  fitting, with reasons reported. At least two usable nominal and two annotated
+  failure bags are required. Whole-execution training keeps its existing labels.
+
+One separate logistic classifier is fitted across the labeled prefixes, using
+the existing regularization, class-weight setting, and threshold. Time and stage
+messages are **not prediction inputs**. All prefixes from a bag stay together
+in cross-validation; preprocessing is fitted within each training fold. Its
+out-of-fold diagnostics evaluate this classifier only: the upstream frozen
+VLM/LoRA is not retrained per fold. Use entirely held-out bags for final evaluation.
+
+The new model is saved beside the whole-execution model as
+`raw_logistic_onset.npz` and `.json` when the original is `raw_logistic.npz`.
+The metadata includes annotation provenance, excluded bags, grouped validation,
+and the complete-model fingerprint. `raw_logistic_onset_training_predictions.csv`
+lists every training prefix, timestamp, target, fold, and out-of-fold score.
+
+With this option enabled, **all timeline points**, including the last one, use
+the onset classifier. `logistic_timeline_raw.csv` identifies it through
+`threshold_source: timestamp_supervised_prefix_classifier` and its model path.
+The timeline's final probability may differ from `benchmark_clean.csv`'s
+`failure_probability`, which retains the separate **whole-execution outcome**
+meaning. VLM responses, whole-execution ROC/boxplots, and LoRA weights are unchanged.
+Failure-timing errors and their aggregate graph use the new timeline's first
+threshold crossing. Missing/stale onset models produce a clear timeline error;
+they never silently fall back to the old diagnostic classifier.
+
+This supervision can help, but improvement is not guaranteed. It assumes the
+execution was normal before the button press; human reaction delay can make
+that label imperfect. Eight snapshots cannot pinpoint events between snapshots,
+and the frozen visual features must contain evidence of the failure. Scores are
+not guaranteed calibrated probabilities, especially with balanced class weights.
+Compare timing error **and missed detections/false alerts** on the same held-out
+bags before concluding it is better. Set `logistic_onset.enabled` back to false
+to use the original whole-execution classifier for diagnostic timelines.
 
 ### Failure-time evaluation against the error button
 

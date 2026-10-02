@@ -365,6 +365,54 @@ class ClassifierPreparationTests(unittest.TestCase):
         statistics = json.loads((output / "benchmark_statistics.json").read_text())
         self.assertEqual(statistics["failure_probability"]["modes"][0]["status"], "skipped")
 
+    def test_onset_benchmark_prepares_training_prefixes_and_preserves_main_outputs(self):
+        from rynnbrain_vlm.cop_classifier import load_classifier
+        from rynnbrain_vlm.cop_onset import onset_model_path
+        vlm = self.config["rynnbrain"]
+        vlm["num_frames"] = 3
+        vlm["cop_classifier"].update(method="logistic", plot_timeline=True, logistic_onset={"enabled": True})
+        self.config_path.write_text(json.dumps(self.config))
+        self.settings = configured_training_settings(self.config_path)
+        frames = [{"timestamp_sec": time, "sample_index": i} for i, time in enumerate((1., 5., 9.))]
+        def inputs(path, *args):
+            return [(path.name, Image.new("RGB", (2, 2))) for _ in frames], frames
+        def prefix(turns, *args, **kwargs):
+            images = turns[1]["images"]
+            sign = -1. if images[0][0].startswith("failure") and len(images) >= 2 else 1.
+            return self.torch.tensor([sign, .2, .3, .4])
+        def annotation(path, **kwargs):
+            failure = Path(path).name.startswith("failure")
+            return {"status": "available" if failure else "missing_marker", "time_sec": 5. if failure else None}
+        self.model.extract_multiturn_cop_vector = Mock(side_effect=prefix)
+        with patch("rynnbrain_vlm.run._raw_inputs", side_effect=inputs), \
+             patch("rynnbrain_vlm.cop_onset.read_failure_annotation", side_effect=annotation) as labels:
+            self._check_benchmark_workflow()
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, 12)  # 4 train + 2 test bags, 2 prefixes each
+            self.assertTrue(all(Path(call.args[0]).name in self.names for call in labels.call_args_list))
+            onset = load_classifier(onset_model_path(self.model_path))
+            self.assertEqual(onset.metadata["training_prefix_count"], 12)
+            summary = pd.read_csv(self.root / "benchmark/benchmark_summary.csv")
+            self.assertTrue((summary.logistic_timeline_status == "created").all())
+            for _, row in summary.iterrows():
+                timeline = pd.read_csv(row.logistic_timeline_csv)
+                self.assertTrue((timeline.threshold_source == "timestamp_supervised_prefix_classifier").all())
+                import numpy as np
+                final_vector = np.load(row.cop_vector_path)
+                self.assertAlmostEqual(timeline.failure_probability.iloc[-1], onset.predict_failure_probability(final_vector))
+                full = load_classifier(self.model_path)
+                self.assertAlmostEqual(row.classifier_failure_probability, full.predict_failure_probability(final_vector))
+            before = self.model.extract_multiturn_cop_vector.call_count
+            prepare_training_vectors(self.config, self.settings, model=self.model)
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, before)
+            # A changed annotation updates labels without another image/vector pass.
+            with patch("rynnbrain_vlm.cop_onset.read_failure_annotation", side_effect=lambda path, **kwargs:
+                       {**annotation(path), **({"time_sec": 8.} if Path(path).name.startswith("failure") else {})}):
+                paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
+                metadata = train_from_saved_vectors(**self.settings, metadata_paths=paths)
+            self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, before)
+            predictions = pd.read_csv(metadata["onset_model"]["cross_validation"]["predictions_csv"])
+            self.assertEqual(predictions[predictions.bag_name == "failure_1"].failure_has_occurred.tolist(), [0, 0, 1])
+
     def test_benchmark_records_why_a_bag_has_no_response(self):
         import run_benchmark as benchmark
         self.config["rynnbrain"]["cop_classifier"]["enabled"] = False
