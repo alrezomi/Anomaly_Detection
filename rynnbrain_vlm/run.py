@@ -555,7 +555,9 @@ def evaluate_multiturn(
                         elif classifier_error or cop_vector is None:
                             raise ValueError(classifier_error or "No CoP vector is available for the timeline.")
                         else:
-                            options = {"config": config, "vlm": vlm} if method == "knn" else {}
+                            from .cop_onset import onset_enabled
+                            options = ({"config": config, "vlm": vlm} if method == "knn" else
+                                       {"use_onset_classifier": onset_enabled(classifier_config), "source": vlm.get("source")})
                             timeline.update(writer(
                                 model=model, classifier=classifiers[mode], turns=turns, generation=generation,
                                 nominal_response=nominal_response, frame_metadata=mode_frame_metadata,

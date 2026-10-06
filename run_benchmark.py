@@ -358,6 +358,8 @@ def main() -> None:
         settings_by_mode = [configured_training_settings(arguments.config, mode)
                             for mode in vlm.get("input_modes", ["raw"])]
         for settings in settings_by_mode:
+            if settings.get("onset_options") is not None:
+                settings["onset_options"]["startup_ignore_sec"] = startup_ignore_sec
             configured_path = classifier_model_paths(vlm["cop_classifier"]).get(settings["input_mode"])
             if not configured_path or Path(configured_path).resolve() != settings["output_file"].resolve():
                 raise ValueError("Classifier training output_file must match model_paths for benchmark scoring.")
