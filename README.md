@@ -1342,9 +1342,16 @@ change in multiples of `1 / normal_count`, and recalls in multiples of
 `1 / failure_count`; several such changes can lie on the same straight segment.
 Several perfect-ranking categories can also overlap on the same curve.
 
+Both probability and kNN ROC plots emphasize **Overall (all evaluated bags)**
+as a thick dark line drawn above the thinner, lighter category curves. This
+overall ROC pools all scored held-out nominal and failure bags directly; it is
+not an average of category AUROCs. The empirical points are not smoothed.
+
 The plots show each comparison's sample counts. ROC dots mark observed score
-thresholds; diamonds mark the saved `classifier_threshold`, with recall and
-false-alarm rate in the legend. The common threshold must be present and valid
+thresholds; diamonds mark the saved `classifier_threshold`. The compact legend
+keeps every AUROC and shows threshold recall/false-alarm details for the overall
+curve; per-category threshold details remain in the CSV/JSON reports.
+The common threshold must be present and valid
 for every scored bag in that comparison; missing, invalid or mixed thresholds
 are reported instead of assuming 0.5. `auroc.csv` and `roc_summary.json` also
 save the configured threshold and TP/FP/TN/FN counts and rates at that threshold.
