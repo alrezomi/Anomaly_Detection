@@ -1032,8 +1032,9 @@ at 20 s and first classifier alert at 26 s gives +6 s error and 6 s absolute
 error. No interpolation between snapshots is used. This evaluates the
 classifier's alert against the human annotation; it is not the VLM's textual
 decision timing, inference wall-clock latency, or an exact physical-onset claim.
-Annotations are only used after prediction for evaluation, never to choose
-thresholds, train models, or add information to the model prompt.
+The evaluated bag's annotation is used only after prediction, never to choose
+thresholds, train models, or add information to its prompt. The optional onset
+classifier above uses annotations from its separate training bags.
 
 Each case's existing `knn_timeline_raw.png` or `logistic_timeline_raw.png` gets
 a green vertical line for the recorded error-button time and a timing-error
@@ -1048,20 +1049,24 @@ caption. The per-case result CSV/JSON and both `benchmark_summary.csv` and
 
 The benchmark also writes `benchmark_failure_timing/failure_timing_raw_knn.png`
 (or `failure_timing_raw_logistic.png`), its per-bag CSV, and
-`failure_timing_summary.json`. The figure compares recorded/predicted times
-for each evaluated bag, shows signed error bars and the mean signed error,
-and reports the **mean absolute error** so early and late errors cannot cancel.
+`failure_timing_summary.json`. The figure is one horizontal bar plot of signed
+timing differences for **failure-labeled bags with valid comparisons**. Nominal
+cases are hidden. Blue bars indicate early alerts and orange bars late alerts;
+a prominent purple dashed line spans every row at the mean signed difference.
+The header also reports the **mean absolute error** so early and late errors
+cannot cancel. Long bag labels wrap, and the layout scales to the displayed cases.
 The same statistics appear under `failure_timing` in `benchmark_statistics.json`.
 Each input mode is summarized separately, without pooling multiple predictions
 for the same bag into a single mean.
 
-Means include only complete, aligned timelines with both a failure annotation
-inside the sampled time window and an observed alert. All evaluated bags stay
-in the timing table/graph; missed detections (`not_detected`), missing markers,
+Means include only failure-labeled bags with complete, aligned timelines, a failure
+annotation inside the sampled time window, and an observed alert. All evaluated bags
+stay in the CSV table; missed detections (`not_detected`), missing markers,
 nominal false alerts, partial timelines, annotation/label conflicts, and failed
 evaluations have explicit statuses and counts. They are **not assigned zero
 error**. When no case can be compared, means are unavailable (`null`), not zero.
-The report shows the compared and excluded counts beside the means.
+The graph counts failure cases without valid timing differences in its footer;
+they are excluded from the bars and mean, rather than appearing as zero-error bars.
 
 Video playback timestamps are not assumed to equal bag time: generated-video,
 heatmap, and mixed raw/heatmap inputs currently report `unaligned_timebase`

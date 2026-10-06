@@ -118,7 +118,7 @@ def write_failure_timing_report(rows, output_directory: Path, *, input_modes, me
     directory = output_directory / "benchmark_failure_timing"
     directory.mkdir(parents=True, exist_ok=True)
     report = {"definition": "signed error = first classifier alert time - first recorded failure-marker time",
-              "mean_population": "Complete aligned timelines with a recorded failure marker and an observed alert; one row per evaluated bag and input mode.",
+              "mean_population": "Failure-labeled bags with complete aligned timelines, a recorded failure marker and an observed alert; one row per bag and input mode.",
               "note": "Positive is late; negative is an early alert. These are offline sampled alert times, not runtime latency or exact physical failure onset.",
               "modes": []}
     for mode in dict.fromkeys(input_modes):
@@ -128,7 +128,8 @@ def write_failure_timing_report(rows, output_directory: Path, *, input_modes, me
                               **{key: row.get(key) for key in TIMING_FIELDS},
                               "failure_timing_status": row.get("failure_timing_status") or "not_evaluated"}
                              for row in selected], columns=["bag_name", "input_mode", "ground_truth_label", *TIMING_FIELDS])
-        compared = data[data.failure_timing_status == "compared"]
+        failures = data.ground_truth_label.astype(str).str.lower().isin(["fail", "failure"])
+        compared = data[failures & (data.failure_timing_status == "compared")]
         errors = pd.to_numeric(compared.failure_time_error_sec, errors="coerce").to_numpy(dtype=float)
         errors = errors[np.isfinite(errors)]
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", mode).strip("_").lower()
@@ -136,6 +137,7 @@ def write_failure_timing_report(rows, output_directory: Path, *, input_modes, me
         csv_path, plot_path = stem.with_suffix(".csv"), stem.with_suffix(".png")
         data.to_csv(csv_path, index=False)
         stats = {"input_mode": mode, "method": method, "evaluated_bags": len(data),
+                 "failure_bags": int(failures.sum()),
                  "compared_bags": len(errors), "status_counts": dict(Counter(data.failure_timing_status)),
                  "mean_signed_error_sec": float(errors.mean()) if len(errors) else None,
                  "mean_absolute_error_sec": float(np.abs(errors).mean()) if len(errors) else None,
@@ -152,57 +154,68 @@ def _plot_timing_report(data, stats, path):
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    import matplotlib.patheffects as effects
+    import textwrap
 
-    figure, (events, errors) = plt.subplots(1, 2, figsize=(13, max(5.5, 3.0 + .27 * len(data))),
-                                           sharey=True, gridspec_kw={"width_ratios": [1.1, 1]})
+    failures = data.ground_truth_label.astype(str).str.lower().isin(["fail", "failure"])
+    values = pd.to_numeric(data.failure_time_error_sec, errors="coerce")
+    plotted = data[failures & (data.failure_timing_status == "compared") & np.isfinite(values)]
+    deltas = pd.to_numeric(plotted.failure_time_error_sec).to_numpy(dtype=float)
+    labels = ["\n".join(textwrap.wrap(str(name).replace("_", " ") if len(str(name)) > 38 else str(name), width=38))
+              for name in plotted.bag_name]
+    row_heights = np.asarray([max(1., .65 * (label.count("\n") + 1)) for label in labels])
+    positions = np.cumsum(row_heights) - row_heights / 2
+    total_rows = max(float(row_heights.sum()), 1.)
+    height = max(4.8, 2.6 + .30 * total_rows)
+    label_width = max((max(map(len, label.splitlines())) for label in labels), default=10)
+    left = max(.16, min(.34, .075 + label_width * .0064))
+    figure, axis = plt.subplots(figsize=(12, height))
     try:
-        figure.subplots_adjust(left=.22, right=.97, bottom=.24, top=.80, wspace=.23)
-        figure.text(.04, .95, "Failure timing against recorded error button", fontsize=18, weight="bold", color="#172b40")
+        # Use physical margins so a long list does not create huge empty headers/footers.
+        figure.subplots_adjust(left=left, right=.97, bottom=1.2 / height, top=1 - 1.3 / height)
+        figure.text(.04, 1 - .33 / height, "Failure detection timing error", fontsize=19, weight="bold", color="#172b40")
         mean = stats["mean_signed_error_sec"]
-        subtitle = (f"Mean absolute error: {stats['mean_absolute_error_sec']:.2f} s    "
-                    f"Mean signed error: {mean:+.2f} s" if mean is not None else "No comparable detections; timing means are unavailable")
-        figure.text(.04, .90, f"{stats['method']} / {stats['input_mode']}    {subtitle}", fontsize=10, color="#607080")
-        positions = np.arange(len(data))
-        recorded = pd.to_numeric(data.recorded_failure_time_sec, errors="coerce").to_numpy(dtype=float)
-        predicted = pd.to_numeric(data.predicted_failure_time_sec, errors="coerce").to_numpy(dtype=float)
-        deltas = pd.to_numeric(data.failure_time_error_sec, errors="coerce").to_numpy(dtype=float)
-        compared = (data.failure_timing_status == "compared").to_numpy() & np.isfinite(deltas)
-        for index in np.flatnonzero(np.isfinite(recorded) & np.isfinite(predicted)):
-            events.plot([recorded[index], predicted[index]], [index, index], color="#b5c1cc", linewidth=2, zorder=1)
-        events.scatter(recorded, positions, color="#27875f", s=38, marker="|", linewidths=2.5, label="Recorded failure", zorder=3)
-        events.scatter(predicted, positions, color="#2f78c4", s=30, label="First classifier alert", zorder=3)
-        events.set_yticks(positions, data.bag_name.tolist())
-        events.tick_params(axis="y", labelsize=8)
-        events.set(xlabel="Time from bag start (s)", title="Recorded time and first observed alert", xlim=(0, None))
-        events.legend(loc="best", fontsize=8, frameon=False)
-        colors = np.where(deltas[compared] < 0, "#2f78c4", "#c27524")
-        errors.barh(positions[compared], deltas[compared], color=colors, height=.6)
-        errors.axvline(0, color="#8292a0", linewidth=1)
-        extent = max(1., float(np.max(np.abs(deltas[compared]))) if compared.any() else 1.) * 1.45
-        errors.set(xlim=(-extent, extent), xlabel="Timing error (s): early < 0 / late > 0", title="Prediction minus recorded time")
+        method_label = "kNN" if stats["method"] == "knn" else "Logistic regression"
+        subtitle = (f"{len(plotted)} failure cases   |   Mean absolute error: {stats['mean_absolute_error_sec']:.2f} s"
+                    if mean is not None else "No failure cases with a valid timing comparison")
+        figure.text(.04, 1 - .65 / height, f"{method_label} / {stats['input_mode']}   |   {subtitle}", fontsize=11, color="#607080")
+        early_color, late_color, mean_color = "#377eb8", "#d68739", "#7c2e86"
+        axis.barh(positions, deltas, color=np.where(deltas < 0, early_color, late_color), height=.66, zorder=3)
+        axis.axvline(0, color="#7c8995", linewidth=1.1, zorder=2)
+        low = min(0., float(deltas.min())) if len(deltas) else 0.
+        high = max(0., float(deltas.max())) if len(deltas) else 0.
+        padding = max(1., high - low) * .18
+        axis.set(xlim=(low - padding, high + padding), ylim=(total_rows + .25, -.25),
+                 xlabel="Predicted time − recorded error time (s)")
+        axis.set_yticks(positions, labels)
+        axis.tick_params(axis="y", labelsize=9, length=0, pad=9)
+        axis.tick_params(axis="x", labelsize=10, colors="#536273")
+        axis.xaxis.label.set_size(11)
+        handles = [Patch(facecolor=early_color, label="Early alert (−)"), Patch(facecolor=late_color, label="Late alert (+)")]
         if mean is not None:
-            errors.axvline(mean, color="#772d7c", linestyle="--", linewidth=1.5, label=f"Mean signed error: {mean:+.2f} s")
-            errors.legend(loc="best", fontsize=8, frameon=False)
-        for index, row in enumerate(data.itertuples()):
-            if compared[index]:
-                value = deltas[index]
-                errors.annotate(f"{value:+.2f}", (value, index), xytext=(4 if value >= 0 else -4, 0),
-                                textcoords="offset points", ha="left" if value >= 0 else "right", va="center", fontsize=8)
-            else:
-                errors.text(0, index, "  " + str(row.failure_timing_status).replace("_", " "), va="center", fontsize=8, color="#607080",
-                            bbox={"facecolor": "white", "edgecolor": "none", "pad": 1})
-        for axis in (events, errors):
-            axis.set_ylim(max(len(data), 1) - .5, -.5)
-            axis.grid(axis="x", color="#e7ecf0", linewidth=.7)
-            axis.set_axisbelow(True)
-            axis.spines[["top", "right"]].set_visible(False)
-        if data.empty:
-            events.text(.5, .5, "No evaluated bags", transform=events.transAxes, ha="center")
-        excluded = stats["evaluated_bags"] - stats["compared_bags"]
-        figure.text(.04, .10, f"Mean population: {stats['compared_bags']} comparable detections / {stats['evaluated_bags']} evaluated bags; "
-                    f"{excluded} without a valid timing comparison. Missing alerts are not zero-error detections.", fontsize=9, color="#607080")
-        figure.text(.04, .045, "Reference = recorded button press. Prediction = first sampled classifier threshold crossing.\n"
-                    "Offline timing comparison; this does not measure inference latency or interpolate physical failure onset.", fontsize=9, color="#607080")
+            axis.axvline(mean, color=mean_color, linestyle="--", linewidth=2.5, zorder=5,
+                         path_effects=[effects.Stroke(linewidth=4, foreground="white"), effects.Normal()])
+            handles.append(Line2D([0], [0], color=mean_color, linestyle="--", linewidth=2.5,
+                                  label=f"Mean difference: {mean:+.2f} s"))
+        figure.legend(handles=handles, loc="upper left", bbox_to_anchor=(.033, 1 - .83 / height),
+                      ncol=3, frameon=False, fontsize=10, handlelength=2.8, columnspacing=2.3)
+        for position, value in zip(positions, deltas):
+            axis.annotate(f"{value:+.2f}", (value, position), xytext=(5 if value >= 0 else -5, 0),
+                          textcoords="offset points", ha="left" if value >= 0 else "right", va="center", fontsize=9,
+                          color="#344454", zorder=6,
+                          path_effects=[effects.Stroke(linewidth=2.5, foreground="white"), effects.Normal()])
+        axis.grid(axis="x", color="#e7ecf0", linewidth=.8)
+        axis.set_axisbelow(True)
+        axis.spines[["top", "right", "left"]].set_visible(False)
+        axis.spines["bottom"].set_color("#c5ced6")
+        if not len(plotted):
+            axis.text(.5, .5, "No valid failure timing differences to plot", transform=axis.transAxes,
+                      ha="center", color="#607080")
+        excluded = int(failures.sum()) - len(plotted)
+        figure.text(.04, .26 / height, f"Failure cases only. {excluded} failure cases without a valid timing difference are excluded from the mean.\n"
+                    "All bag results, including nominal cases and missed detections, remain in the CSV report.", fontsize=9, color="#607080")
         figure.savefig(path, dpi=180, bbox_inches="tight", facecolor="white")
     finally:
         plt.close(figure)
