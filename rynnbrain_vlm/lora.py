@@ -81,7 +81,8 @@ def attach_lora(model: Any, config: dict[str, Any]) -> Any:
     return adapted
 
 
-def supervised_example(prefix: dict[str, Any], tokenizer: Any, label: str, max_tokens: int) -> dict[str, Any]:
+def supervised_example(prefix: dict[str, Any], tokenizer: Any, label: str, max_tokens: int,
+                       *, target_text: str | None = None) -> dict[str, Any]:
     """Keep images/context unmasked as inputs, but supervise only the final answer."""
     import torch
 
@@ -90,7 +91,7 @@ def supervised_example(prefix: dict[str, Any], tokenizer: Any, label: str, max_t
         raise ValueError(f"Unknown training label: {label}")
     if tokenizer.eos_token_id is None:
         raise ValueError("The model tokenizer must define an EOS token.")
-    answer = tokenizer.encode(f"Decision: {decisions[label]}", add_special_tokens=False)
+    answer = tokenizer.encode(target_text if target_text is not None else f"Decision: {decisions[label]}", add_special_tokens=False)
     answer.append(tokenizer.eos_token_id)
     answer_ids = torch.tensor([answer], dtype=prefix["input_ids"].dtype)
     prefix_length = prefix["input_ids"].shape[1]
@@ -147,6 +148,10 @@ def load_lora_adapter(model: Any, adapter_path: str | Path, model_id: str) -> tu
         with (root / filename).open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
+    from .temporal_lora import adapter_profile
+    profile = adapter_profile(root)
+    if profile:
+        digest.update(json.dumps(profile, sort_keys=True).encode("utf-8"))
     load_kwargs: dict[str, Any] = {}
     device_map = getattr(model, "hf_device_map", None)
     if device_map:

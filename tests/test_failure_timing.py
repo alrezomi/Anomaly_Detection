@@ -109,10 +109,15 @@ class FailureTimingTests(unittest.TestCase):
         rows = [{"bag_name": name, "input_mode": "raw", "ground_truth_label": "fail", **result}
                 for name, result in (("late", late), ("early", early), ("missed", missed))]
         rows.append({"bag_name": "pipeline_failed", "input_mode": None})
+        # A nominal/unknown row must not enter the failure-only mean, even if
+        # importing an older report with a numeric timing result for that row.
+        rows += [{"bag_name": label, "input_mode": "raw", "ground_truth_label": label,
+                  **{**late, "failure_time_error_sec": 100.}} for label in ("normal", "unknown")]
         report = write_failure_timing_report(rows, self.root, input_modes=["raw", "heatmap"], method="knn")
         raw, heatmap = report["modes"]
         self.assertEqual(raw["compared_bags"], 2)
-        self.assertEqual(raw["evaluated_bags"], 4)
+        self.assertEqual(raw["evaluated_bags"], 6)
+        self.assertEqual(raw["failure_bags"], 3)
         self.assertEqual(raw["mean_signed_error_sec"], -.5)
         self.assertEqual(raw["mean_absolute_error_sec"], 3.5)
         self.assertEqual(raw["status_counts"]["not_detected"], 1)
@@ -120,7 +125,7 @@ class FailureTimingTests(unittest.TestCase):
         self.assertEqual(heatmap["compared_bags"], 0)
         self.assertIsNone(heatmap["mean_absolute_error_sec"])
         self.assertTrue(Path(raw["plot"]).is_file())
-        self.assertEqual(len(pd.read_csv(raw["csv"])), 4)
+        self.assertEqual(len(pd.read_csv(raw["csv"])), 6)
         saved = json.loads((self.root / "benchmark_failure_timing/failure_timing_summary.json").read_text())
         self.assertEqual(saved["modes"][0]["mean_absolute_error_sec"], 3.5)
 

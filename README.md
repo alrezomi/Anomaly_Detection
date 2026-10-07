@@ -708,6 +708,117 @@ setting no longer sends tokens to CUDA when the model has been placed on CPU.
 The resolved device is printed at startup. If it reports CPU unexpectedly,
 check `nvidia-smi` on the lab PC for available GPU memory; CPU inference is slow.
 
+### Optional LoRA supervision for failure onset and both camera views
+
+This is a new, opt-in training mode. Existing decision-only adapters and commands
+still work. No configuration file, bag list or experiment path is changed for you.
+
+Make these edits manually in your current `pipeline_config.json`:
+
+1. Set **both** `rynnbrain.camera_topics` and `rynnbrain.memory_camera_topics`
+   to this same ordered list (the top-level DINO `camera_topics` can stay as it is):
+
+   ```json
+   [
+     "/top_camera/cam_135222070433/color/image_raw/compressed",
+     "/flange_camera/cam_230422272745/color/image_raw/compressed"
+   ]
+   ```
+
+2. Under `rynnbrain.lora.training`, add `"temporal_supervision": true`.
+   Populate its `normal_bags` and `failure_bags` lists; optional validation lists
+   must also contain both classes. Keep reference demonstrations and final test
+   bags separate from training and validation.
+3. Keep `rynnbrain.source: "rosbag"`, `rynnbrain.input_modes: ["raw"]`,
+   `lora.training.input_mode: "raw"`, and your existing `num_frames: 8`.
+   Both cameras must exist in all selected bags, including reference bags.
+4. Set `rynnbrain.model.lora_adapter_path` to `null` for training a **new** adapter
+   from the base checkpoint. Your existing v102 adapter files are retained.
+   With `lora.training.output_dir: null`, this mode saves to
+   `<rynnbrain.output_dir>/lora_temporal_adapter`. An explicit training output
+   directory overrides that default and must be empty.
+
+Then run these commands in order:
+
+```bash
+docker compose run --rm --build rynnbrain-lora-train \
+  --config /config/pipeline_config.json --validate-only
+docker compose run --rm rynnbrain-lora-train
+```
+
+In this mode, validation also reads the camera streams and recorded error-button
+annotations without loading the VLM. A failure bag must have an eligible marker
+on `stage_topic` (normally `/recording_stage`); a nominal bag must not have one.
+The existing startup-marker exclusion applies. Missing/unreadable or conflicting
+annotations, missing camera frames, and failure markers outside the sampled
+camera window stop training with an error rather than silently changing labels.
+
+Each image is labeled with its camera topic and actual timestamp in seconds from
+that bag's start, using the same clock as the error-button annotation. The
+existing per-camera uniform sampling is retained; cameras are not assumed to
+be synchronized. Eight timesteps produce 16 execution images across two cameras,
+plus 16 reference images for one reference bag. This mode does not add more
+sampled timesteps.
+
+Each training bag supplies eight examples: its first camera pair, then its first
+two pairs, and so on. An example contains only images available by its cutoff.
+Before the recorded failure, its answer is:
+
+```text
+Decision: success
+Failure onset (s): none
+```
+
+At and after the recorded failure, its answer is, for example:
+
+```text
+Decision: failure
+Failure onset (s): 12.350
+```
+
+Here success means **no failure observed yet**, even if the task is unfinished.
+The failure label stays positive after a later recovery. The recorded onset
+appears only in the supervised answer, never in the input prompt. All prefixes
+of a bag stay in its original training or validation split. Balanced weighting
+uses the resulting prefix labels; gradient accumulation counts prefix examples.
+
+Training applies causal cross-entropy to the decision, onset text and end token;
+input/context tokens are masked from the loss. Only the configured LoRA language
+attention weights change; base and vision weights remain frozen. The numeric
+time is learned as answer tokens, not with a separate numerical regression loss.
+The manifest records the camera/time protocol, annotations and prefix targets.
+Two views and multiple prefixes require more GPU memory and training time than
+decision-only training. Overlong inputs are rejected without truncation.
+
+After training, set `rynnbrain.model.lora_adapter_path` to the **new directory
+printed by the trainer**. Retain the same two camera lists and frame count.
+Loading the adapter automatically selects the timestamp-aware prompts and checks
+those input settings against its manifest. Changing only the training flag does
+not convert an existing adapter.
+
+The changed adapter and camera inputs also change CoP features. For a single test
+with the classifier enabled, retrain the selected classifier first:
+
+```bash
+docker compose run --rm cop-classifier-train
+docker compose run --rm rynnbrain-test-multiturn
+```
+
+Alternatively, `docker compose run --rm --build benchmark` performs its existing
+automatic classifier preparation. Use your chosen new output paths to retain old
+results. kNN, logistic regression, their timelines and their alert-time metrics
+remain available; old classifier features cannot silently match the new adapter.
+
+The temporal VLM's response is retained in the existing per-bag files. Per-bag
+results and benchmark summaries additionally contain `vlm_failure_onset_sec`,
+`vlm_failure_onset_status`, `vlm_failure_time_error_sec` (prediction minus marker)
+and `vlm_failure_time_absolute_error_sec`. Missing/invalid predictions leave
+errors blank. These are separate from classifier threshold-crossing times and
+their existing timing graphs. A time estimated from the full bag is retrospective;
+it is not the time at which an online system raised an alert. This supervision
+can help localization, but sparse frames and button timing still limit accuracy;
+evaluate improvement on bags held out from both training and validation.
+
 ### Nominal-only kNN detector
 
 The checked-in config selects `rynnbrain.cop_classifier.method: "knn"`.
@@ -1032,8 +1143,9 @@ at 20 s and first classifier alert at 26 s gives +6 s error and 6 s absolute
 error. No interpolation between snapshots is used. This evaluates the
 classifier's alert against the human annotation; it is not the VLM's textual
 decision timing, inference wall-clock latency, or an exact physical-onset claim.
-Annotations are only used after prediction for evaluation, never to choose
-thresholds, train models, or add information to the model prompt.
+The evaluated bag's annotation is used only after prediction, never to choose
+thresholds, train models, or add information to its prompt. The optional onset
+classifier above uses annotations from its separate training bags.
 
 Each case's existing `knn_timeline_raw.png` or `logistic_timeline_raw.png` gets
 a green vertical line for the recorded error-button time and a timing-error
@@ -1048,20 +1160,24 @@ caption. The per-case result CSV/JSON and both `benchmark_summary.csv` and
 
 The benchmark also writes `benchmark_failure_timing/failure_timing_raw_knn.png`
 (or `failure_timing_raw_logistic.png`), its per-bag CSV, and
-`failure_timing_summary.json`. The figure compares recorded/predicted times
-for each evaluated bag, shows signed error bars and the mean signed error,
-and reports the **mean absolute error** so early and late errors cannot cancel.
+`failure_timing_summary.json`. The figure is one horizontal bar plot of signed
+timing differences for **failure-labeled bags with valid comparisons**. Nominal
+cases are hidden. Blue bars indicate early alerts and orange bars late alerts;
+a prominent purple dashed line spans every row at the mean signed difference.
+The header also reports the **mean absolute error** so early and late errors
+cannot cancel. Long bag labels wrap, and the layout scales to the displayed cases.
 The same statistics appear under `failure_timing` in `benchmark_statistics.json`.
 Each input mode is summarized separately, without pooling multiple predictions
 for the same bag into a single mean.
 
-Means include only complete, aligned timelines with both a failure annotation
-inside the sampled time window and an observed alert. All evaluated bags stay
-in the timing table/graph; missed detections (`not_detected`), missing markers,
+Means include only failure-labeled bags with complete, aligned timelines, a failure
+annotation inside the sampled time window, and an observed alert. All evaluated bags
+stay in the CSV table; missed detections (`not_detected`), missing markers,
 nominal false alerts, partial timelines, annotation/label conflicts, and failed
 evaluations have explicit statuses and counts. They are **not assigned zero
 error**. When no case can be compared, means are unavailable (`null`), not zero.
-The report shows the compared and excluded counts beside the means.
+The graph counts failure cases without valid timing differences in its footer;
+they are excluded from the bars and mean, rather than appearing as zero-error bars.
 
 Video playback timestamps are not assumed to equal bag time: generated-video,
 heatmap, and mixed raw/heatmap inputs currently report `unaligned_timebase`
@@ -1337,9 +1453,16 @@ change in multiples of `1 / normal_count`, and recalls in multiples of
 `1 / failure_count`; several such changes can lie on the same straight segment.
 Several perfect-ranking categories can also overlap on the same curve.
 
+Both probability and kNN ROC plots emphasize **Overall (all evaluated bags)**
+as a thick dark line drawn above the thinner, lighter category curves. This
+overall ROC pools all scored held-out nominal and failure bags directly; it is
+not an average of category AUROCs. The empirical points are not smoothed.
+
 The plots show each comparison's sample counts. ROC dots mark observed score
-thresholds; diamonds mark the saved `classifier_threshold`, with recall and
-false-alarm rate in the legend. The common threshold must be present and valid
+thresholds; diamonds mark the saved `classifier_threshold`. The compact legend
+keeps every AUROC and shows threshold recall/false-alarm details for the overall
+curve; per-category threshold details remain in the CSV/JSON reports.
+The common threshold must be present and valid
 for every scored bag in that comparison; missing, invalid or mixed thresholds
 are reported instead of assuming 0.5. `auroc.csv` and `roc_summary.json` also
 save the configured threshold and TP/FP/TN/FN counts and rates at that threshold.

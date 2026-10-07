@@ -782,16 +782,24 @@ def prepare_training_vectors(
     if model is None:
         model = RynnBrainModel(vlm["model"])
     count = int(vlm.get("num_frames", 4))
+    temporal_profile = getattr(model, "temporal_profile", {})
+    if temporal_profile:
+        from .temporal_lora import validate_profile
+        validate_profile(temporal_profile, config, vlm, count, [mode])
+        vlm = {**vlm, "_temporal_profile": temporal_profile}
     topics = vlm.get("memory_camera_topics", vlm.get("camera_topics", config.get("camera_topics", [])))
     nominal_images = []
     for bag in reference_bags:
-        images, _ = _raw_inputs(Path(bag), list(topics), count)
+        images, frames = _raw_inputs(Path(bag), list(topics), count)
+        if temporal_profile:
+            from .temporal_lora import timestamped_images
+            images = timestamped_images(images, frames, list(topics), count)
         nominal_images.extend(images)
     if not nominal_images:
         raise ValueError("No nominal reference images were loaded.")
     reference_response = model.generate_nominal({
         "role": "user", "images": nominal_images,
-        "text": task_context_prompt(vlm.get("task_description", "Robot manipulation task")),
+        "text": task_context_prompt(vlm.get("task_description", "Robot manipulation task"), temporal=bool(temporal_profile)),
     }, generation)
     expected = cop_comparison_signature(model, config, vlm, mode, reference_response, count, generation)
     paths = []

@@ -13,6 +13,7 @@ from typing import Any
 
 from .lora import answer_loss, attach_lora, resolve_bag_selection, supervised_example
 from .prompts import evaluation_prompt_multiturn, task_context_prompt
+from .temporal_lora import training_profile, temporal_annotation, prefix_samples
 
 
 def training_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -24,7 +25,9 @@ def training_settings(config: dict[str, Any]) -> dict[str, Any]:
         "precision": "bfloat16", "gradient_checkpointing": True,
         "class_weight": "balanced", "input_mode": "raw", **supplied,
     }
-    settings["output_dir"] = supplied.get("output_dir") or str(Path(vlm["output_dir"]) / "lora_adapter")
+    settings["temporal_profile"] = training_profile(config, settings)
+    folder = "lora_temporal_adapter" if settings["temporal_profile"] else "lora_adapter"
+    settings["output_dir"] = supplied.get("output_dir") or str(Path(vlm["output_dir"]) / folder)
     settings["benchmark_dir"] = supplied.get("benchmark_dir") or f"{vlm['output_dir']}_benchmark"
     for key in ("epochs", "gradient_accumulation_steps", "max_tokens"):
         if not isinstance(settings[key], int) or settings[key] < 1:
@@ -83,6 +86,32 @@ def _load_execution_images(row: dict[str, str], config: dict[str, Any], settings
     return [item for pair in zip(raw, heatmaps) for item in pair]
 
 
+def _temporal_inputs(row, config, settings):
+    from .run import _execution_inputs
+    vlm = {**config["rynnbrain"], "_temporal_profile": settings["temporal_profile"]}
+    selected, _ = _execution_inputs({**config, "test_bag": row["bag_path"]}, vlm,
+                                    settings["temporal_profile"]["num_frames"], ["raw"])
+    return selected["raw"]
+
+
+def validate_temporal_rows(config, settings, rows):
+    """Validate stage labels, both camera streams and prefix targets without a GPU."""
+    if not settings["temporal_profile"]:
+        return
+    from .run import _raw_inputs
+    from .temporal_lora import timestamped_images
+    profile = settings["temporal_profile"]
+    for bag in config["rynnbrain"]["reference_bags"]:
+        images, frames = _raw_inputs(Path(bag), profile["memory_camera_topics"], profile["num_frames"])
+        timestamped_images(images, frames, profile["memory_camera_topics"], profile["num_frames"])
+    for row in rows:
+        annotation = temporal_annotation(row, config, float(os.environ.get("STAGE_STARTUP_IGNORE_SEC", .1)))
+        images, frames = _temporal_inputs(row, config, settings)
+        samples = prefix_samples(row, images, frames, profile, annotation)
+        print(f"Validated {row['bag_name']}: {len(images)} images, {len(samples)} prefixes, "
+              f"error time={annotation.get('time_sec')}", flush=True)
+
+
 def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str, str]]) -> None:
     import torch
     from PIL import Image
@@ -109,23 +138,34 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
     model_config.update(dtype=settings["precision"], device_map={"": "cuda:0"}, input_device="cuda:0")
     model_config.pop("max_memory", None)  # Inference CPU offload is not a training strategy.
     wrapper = RynnBrainModel(model_config)
+    wrapper.temporal_profile = settings["temporal_profile"]
+    temporal = bool(wrapper.temporal_profile)
     generation = dict(vlm.get("generation", {}))
     topics = list(vlm.get("memory_camera_topics", vlm.get("camera_topics", config.get("camera_topics", []))))
     nominal_images = []
     for bag in vlm["reference_bags"]:
-        images, _ = _raw_inputs(Path(bag), topics, int(vlm.get("num_frames", 4)))
+        images, frames = _raw_inputs(Path(bag), topics, int(vlm.get("num_frames", 4)))
+        if temporal:
+            from .temporal_lora import timestamped_images
+            images = timestamped_images(images, frames, topics, int(vlm.get("num_frames", 4)))
         nominal_images.extend(images)
     if not nominal_images:
         raise ValueError("No nominal reference images were loaded.")
     task = vlm.get("task_description", "Robot manipulation task")
-    nominal_turn = {"role": "user", "images": nominal_images, "text": task_context_prompt(task)}
+    nominal_turn = {"role": "user", "images": nominal_images, "text": task_context_prompt(task, temporal=temporal)}
     nominal_response = wrapper.generate_nominal(nominal_turn, generation)
     nominal_message = wrapper.conversation_message(nominal_turn)
 
     # Decode each ROS bag only once; retain resized lossless frames for all epochs.
     prepared = []
+    temporal_records = []
     for index, row in enumerate(rows):
-        images = _load_execution_images(row, config, settings)
+        annotation, frames = None, []
+        if temporal:
+            annotation = temporal_annotation(row, config, float(os.environ.get("STAGE_STARTUP_IGNORE_SEC", .1)))
+            images, frames = _temporal_inputs(row, config, settings)
+        else:
+            images = _load_execution_images(row, config, settings)
         if not images:
             raise ValueError(f"No input images for {row['bag_name']}.")
         folder = output / "training_frames" / f"{index:04d}"
@@ -135,7 +175,13 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
             path = folder / f"{image_index:03d}.png"
             wrapper._resize(image).save(path)
             files.append((label, path))
-        prepared.append({**row, "images": files})
+        if temporal:
+            samples = prefix_samples(row, files, frames, wrapper.temporal_profile, annotation)
+            prepared.extend(samples)
+            temporal_records.append({**row, "annotation": annotation, "frames": frames,
+                "samples": [{key: value for key, value in sample.items() if key != "images"} for sample in samples]})
+        else:
+            prepared.append({**row, "images": files})
         print(f"Prepared {row['split']} {row['bag_name']} ({row['label']}, {len(files)} images)", flush=True)
 
     def example(sample: dict[str, Any]) -> dict[str, Any]:
@@ -143,10 +189,11 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
         for label, path in sample["images"]:
             with Image.open(path) as image:
                 images.append((label, image.convert("RGB")))
-        turn = {"role": "user", "images": images, "text": evaluation_prompt_multiturn(task, settings["input_mode"])}
+        turn = {"role": "user", "images": images, "text": evaluation_prompt_multiturn(task, settings["input_mode"], temporal=temporal)}
         conversation = [nominal_message, {"role": "assistant", "content": [{"type": "text", "text": nominal_response}]}, wrapper.conversation_message(turn)]
         prefix = wrapper.tokenize_conversation(conversation, generation)
-        data = supervised_example(prefix, wrapper.processor.tokenizer, sample["label"], settings["max_tokens"])
+        data = supervised_example(prefix, wrapper.processor.tokenizer, sample["label"], settings["max_tokens"],
+                                  target_text=sample.get("target_text"))
         return {key: value.to(wrapper.input_device) if isinstance(value, torch.Tensor) else value for key, value in data.items()}
 
     wrapper.model = attach_lora(wrapper.model, dict(vlm.get("lora", {})))
@@ -162,13 +209,19 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
         "input_mode": settings["input_mode"], "settings": settings,
         "vlm_config": vlm, "nominal_response": nominal_response,
         "trainable_parameters": trainable_count,
-        "supervision": "Final Decision: success/failure plus EOS only; context and images masked from loss.",
+        "temporal_profile": wrapper.temporal_profile,
+        "temporal_training_data": temporal_records,
+        "supervision": ("Prefix Decision plus annotated Failure onset (s) and EOS; context/images masked. "
+                        "No failure before marker, failure at/after marker including recovery. Numeric time is a token target, not a regression loss."
+                        if temporal else "Final Decision: success/failure plus EOS only; context and images masked from loss."),
         "nominal_turn": "Frozen base model; adapter applies only to the execution decision turn.",
     }
     (output / "training_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     training = [sample for sample in prepared if sample["split"] == "train"]
     validation = [sample for sample in prepared if sample["split"] == "validation"]
     counts = {label: sum(sample["label"] == label for sample in training) for label in ("normal", "fail")}
+    if not all(counts.values()):
+        raise ValueError("LoRA training needs both normal and failure supervised examples.")
     weights = {label: len(training) / (2 * count) if settings["class_weight"] == "balanced" else 1.0 for label, count in counts.items()}
     optimizer = torch.optim.AdamW(parameters, lr=float(settings["learning_rate"]), weight_decay=0.0)
     dtype = getattr(torch, settings["precision"])
@@ -244,7 +297,9 @@ def main() -> None:
     settings = training_settings(config)
     rows = resolve_bag_selection(settings, args.data_root, config["rynnbrain"]["reference_bags"])
     print(json.dumps({"bags": rows, "output_dir": settings["output_dir"]}, indent=2))
-    if not args.validate_only:
+    if args.validate_only:
+        validate_temporal_rows(config, settings, rows)
+    else:
         train(config, settings, rows)
 
 

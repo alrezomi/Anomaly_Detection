@@ -344,34 +344,46 @@ def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path, 
     import matplotlib.pyplot as plt
     score_title = "CoP nominal kNN" if anomaly else "CoP probability"
 
-    colors = ["#222222"] + [plt.get_cmap("tab10")(index % 10) for index in range(len(curves) - 1)]
-    labels = [textwrap.fill(result["failure_category"].replace("_", " "), width=42)
+    colors = ["#171d26" if result["failure_category"] == "all_failures" else plt.get_cmap("tab10")(max(0, index - 1) % 10)
+              for index, (result, *_) in enumerate(curves)]
+    labels = [textwrap.fill("Overall (all evaluated bags)" if result["failure_category"] == "all_failures"
+                           else result["failure_category"].replace("_", " "), width=42)
               + f"\n{result['normal_count']} normal · {result['failure_count']} failure bags" for result, *_ in curves]
-    figure, axis = plt.subplots(figsize=(7.2, max(6.4, 0.85 * len(curves))))
+    figure, axis = plt.subplots(figsize=(7.2, max(6.4, 0.6 * len(curves))))
     try:
         for (result, fpr, tpr, auroc), color, label in zip(curves, colors, labels):
+            overall = result["failure_category"] == "all_failures"
             threshold_detail = ""
             if result["threshold_status"] == "available":
                 threshold_label = f"distance {result['configured_threshold']:.4g}" if anomaly else f"{100 * result['configured_threshold']:g}%"
-                threshold_detail = (f"\nAt {threshold_label}: recall {100 * result['recall_at_threshold']:.1f}%, "
-                                    f"false alarms {100 * result['false_positive_rate_at_threshold']:.1f}%")
+                if overall:
+                    threshold_detail = (f"\nAt {threshold_label}: recall {100 * result['recall_at_threshold']:.1f}%, "
+                                        f"false alarms {100 * result['false_positive_rate_at_threshold']:.1f}%")
                 axis.scatter(result["false_positive_rate_at_threshold"], result["recall_at_threshold"],
-                             marker="D", s=55, color=color, edgecolors="white", linewidths=0.7, zorder=5)
-            else:
+                             marker="D", s=75 if overall else 22, color=color,
+                             alpha=1.0 if overall else .7, edgecolors="white", linewidths=0.7,
+                             zorder=7 if overall else 4)
+            elif overall:
                 threshold_detail = "\nSaved threshold unavailable or mixed"
-            axis.plot(fpr, tpr, color=color, linewidth=2.4 if result["failure_category"] == "all_failures" else 1.5,
-                      marker=".", markersize=3.5, label=f"{label}\nAUROC = {auroc:.3f}{threshold_detail}")
-        axis.plot([0, 1], [0, 1], "--", color="#999999", label="Chance (AUROC = 0.5)")
+            axis.plot(fpr, tpr, color=color, linewidth=3.2 if overall else .85,
+                      alpha=1.0 if overall else .7, zorder=6 if overall else 3,
+                      marker=".", markersize=4 if overall else 2,
+                      label=f"{label}\nAUROC = {auroc:.3f}{threshold_detail}")
+        axis.plot([0, 1], [0, 1], "--", color="#a5adb6", linewidth=1.1, zorder=1, label="Chance (AUROC = 0.5)")
         axis.set(xlabel="False positive rate (normal bags)", ylabel="True positive rate (failure bags)",
                  title=f"{score_title} ROC — {mode}", xlim=(-0.015, 1.015), ylim=(-0.015, 1.025))
         axis.set_xticks(np.linspace(0, 1, 6))
         axis.set_yticks(np.linspace(0, 1, 6))
         axis.grid(color="#e7ecf0", linewidth=0.8)
         axis.spines[["top", "right"]].set_visible(False)
-        axis.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=False, labelspacing=1.1)
+        legend = axis.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=False,
+                             labelspacing=1.1, handlelength=3)
+        for text, (result, *_) in zip(legend.get_texts(), curves):
+            if result["failure_category"] == "all_failures":
+                text.set_weight("bold")
         figure.subplots_adjust(bottom=0.18)
-        figure.text(0.125, 0.045, "Dots: observed score thresholds · Diamonds: saved classifier threshold\n"
-                    "Overlapping curves share ROC coordinates. More thresholds between scores add no new points.",
+        figure.text(0.125, 0.045, "Thick line: pooled ROC across all scored nominal and failure bags. Thin lines: individual failure categories.\n"
+                    "Dots: observed thresholds · Diamonds: saved threshold. Finite samples produce steps; curves are not smoothed.",
                     fontsize=8, color="#607080")
         figure.savefig(roc_path, dpi=180, bbox_inches="tight")
     finally:

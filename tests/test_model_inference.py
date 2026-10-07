@@ -58,12 +58,14 @@ class ModelInferenceTests(unittest.TestCase):
         model = self.embedding_model()
         with patch("rynnbrain_vlm.model.AutoProcessor.from_pretrained"), \
              patch("rynnbrain_vlm.model.AutoModelForImageTextToText.from_pretrained", return_value=model), \
-             patch("rynnbrain_vlm.lora.load_lora_adapter", return_value=(model, "adapter-sha256", {"training-bag"})) as loader:
+             patch("rynnbrain_vlm.lora.load_lora_adapter", return_value=(model, "adapter-sha256", {"training-bag"})) as loader, \
+             patch("rynnbrain_vlm.temporal_lora.adapter_profile", return_value={"protocol": "test-profile"}):
             wrapper = self.wrapper_class({"model_id": "test", "lora_adapter_path": "/saved/lora_adapter"})
         loader.assert_called_once_with(model, "/saved/lora_adapter", "test")
         self.assertEqual(wrapper.lora_adapter_path, "/saved/lora_adapter")
         self.assertEqual(wrapper.adapter_identity, "adapter-sha256")
         self.assertEqual(wrapper.adapter_training_bags, {"training-bag"})
+        self.assertEqual(wrapper.temporal_profile, {"protocol": "test-profile"})
 
     def test_real_accelerate_disk_offload_generation_on_cpu(self):
         try:

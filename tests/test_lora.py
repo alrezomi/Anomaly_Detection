@@ -161,6 +161,119 @@ class LoraGradientTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "trained for"):
                 load_lora_adapter(self.tiny_model(), root, "wrong-base")
 
+    def test_timestamp_answer_multiview_loss_updates_only_lora(self):
+        from rynnbrain_vlm.temporal_lora import temporal_answer, PROTOCOL
+        torch = self.torch
+        target = temporal_answer("fail", 5.1)
+        class Tokenizer:
+            eos_token_id = 2
+            def encode(self, text, add_special_tokens=False):
+                assert text == target
+                return [10, 12, 13, 14, 15, 16]
+        prefix = {
+            "input_ids": torch.tensor([[4, 3, 5, 4, 3, 5, 7]]),
+            "attention_mask": torch.ones((1, 7), dtype=torch.long),
+            "pixel_values": torch.randn(8, 3 * 2 * 16 * 16),
+            "image_grid_thw": torch.tensor([[1, 2, 2], [1, 2, 2]]),
+        }
+        sample = supervised_example(prefix, Tokenizer(), "fail", 30, target_text=target)
+        self.assertEqual(sample["labels"].tolist(), [[-100] * 7 + [10, 12, 13, 14, 15, 16, 2]])
+        self.assertIs(sample["pixel_values"], prefix["pixel_values"])
+        model = attach_lora(self.tiny_model(), {"rank": 2, "alpha": 4, "dropout": 0.0})
+        model.eval()
+        with torch.no_grad():
+            torch.testing.assert_close(answer_loss(model, sample), model(**sample, use_cache=False).loss)
+        before = {name: p.detach().clone() for name, p in model.named_parameters()}
+        optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=.01)
+        model.train()
+        answer_loss(model, sample).backward()
+        optimizer.step()
+        changed = [name for name, p in model.named_parameters() if not torch.equal(before[name], p)]
+        self.assertTrue(changed)
+        self.assertTrue(all("lora_" in name and ".language_model." in name for name in changed))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model.save_pretrained(root, safe_serialization=True)
+            profile = {"protocol": PROTOCOL, "camera_topics": ["top", "side"]}
+            manifest = {"bags": [], "temporal_profile": profile}
+            (root / "training_manifest.json").write_text(json.dumps(manifest))
+            restored, digest, _ = load_lora_adapter(self.tiny_model(), root, "tiny-rynnbrain-test")
+            model.eval()
+            restored.eval()
+            with torch.no_grad():
+                torch.testing.assert_close(answer_loss(restored, sample), answer_loss(model, sample))
+            manifest["temporal_profile"]["camera_topics"] = ["different"]
+            (root / "training_manifest.json").write_text(json.dumps(manifest))
+            _, changed_digest, _ = load_lora_adapter(self.tiny_model(), root, "tiny-rynnbrain-test")
+            self.assertNotEqual(digest, changed_digest)
+
+    def test_temporal_training_prepares_prefixes_validates_and_saves_adapter(self):
+        from contextlib import nullcontext
+        from unittest.mock import Mock
+        from PIL import Image
+        from rynnbrain_vlm.model import RynnBrainModel
+        from rynnbrain_vlm.train_lora import train
+        torch = self.torch
+        wrapper = RynnBrainModel.__new__(RynnBrainModel)
+        wrapper.model = self.tiny_model()
+        wrapper.model_id = "tiny-rynnbrain-test"
+        wrapper.input_device = torch.device("cpu")
+        wrapper.max_image_size = 640
+        wrapper.generate_nominal = Mock(return_value="Successful reference.")
+        seen_targets, seen_image_counts = [], []
+        class Tokenizer:
+            eos_token_id = 2
+            def encode(self, text, add_special_tokens=False):
+                seen_targets.append(text)
+                return [10, 11, 12] if "success" in text else [10, 13, 14, 15]
+        wrapper.processor = Mock(tokenizer=Tokenizer())
+        def tokenize(conversation, generation):
+            count = sum(item["type"] == "image" for turn in conversation for item in turn["content"])
+            seen_image_counts.append(count)
+            ids = [4, 3, 5] * count + [7]
+            return {"input_ids": torch.tensor([ids]),
+                    "attention_mask": torch.ones((1, len(ids)), dtype=torch.long),
+                    "pixel_values": torch.ones(count * 4, 3 * 2 * 16 * 16),
+                    "image_grid_thw": torch.tensor([[1, 2, 2]] * count)}
+        wrapper.tokenize_conversation = tokenize
+        frames = [{"topic": topic, "sample_index": i, "timestamp_sec": time + offset}
+                  for i, time in enumerate([1., 5., 9.]) for topic, offset in [("top", 0), ("side", .2)]]
+        images = [("frame", Image.new("RGB", (4, 4))) for _ in frames]
+        rows = [{"bag_name": f"{split}_{label}", "bag_path": f"{split}_{label}", "label": label, "split": split}
+                for split in ("train", "validation") for label in ("normal", "fail")]
+        def annotation(bag, *args):
+            return {"status": "available", "time_sec": 5.1} if str(bag).endswith("fail") else {"status": "missing_marker", "time_sec": None}
+        with tempfile.TemporaryDirectory() as directory:
+            config = {"camera_topics": ["top"], "output_dir": directory, "rynnbrain": {"source": "rosbag", "input_modes": ["raw"], "num_frames": 3,
+                "camera_topics": ["top", "side"], "memory_camera_topics": ["top", "side"],
+                "reference_bags": ["reference"], "output_dir": directory, "model": {"model_id": "tiny-rynnbrain-test"},
+                "lora": {"rank": 2, "alpha": 4, "dropout": 0., "training": {
+                    "temporal_supervision": True, "epochs": 1, "gradient_accumulation_steps": 4}}}}
+            settings = training_settings(config)
+            # Exercise the production loop on a real tiny multimodal model. Only
+            # hardware checks/autocast and bag decoding are substituted for CPU.
+            with patch("rynnbrain_vlm.model.RynnBrainModel", return_value=wrapper), \
+                 patch("rynnbrain_vlm.run._raw_inputs", return_value=(images, frames)), \
+                 patch("rynnbrain_vlm.temporal_lora.read_failure_annotation", side_effect=annotation), \
+                 patch.object(torch.cuda, "is_available", return_value=True), \
+                 patch.object(torch.cuda, "is_bf16_supported", return_value=True), \
+                 patch.object(torch.cuda, "is_current_stream_capturing", return_value=False), \
+                 patch.object(torch, "autocast", side_effect=lambda *a, **kw: nullcontext()):
+                train(config, settings, rows)
+            output = Path(settings["output_dir"])
+            manifest = json.loads((output / "training_manifest.json").read_text())
+            self.assertEqual(len(manifest["temporal_training_data"]), 4)
+            failure = manifest["temporal_training_data"][1]["samples"]
+            self.assertEqual([sample["label"] for sample in failure], ["normal", "fail", "fail"])
+            self.assertEqual(set(seen_image_counts), {8, 10, 12})
+            self.assertEqual(set(seen_targets), {"Decision: success\nFailure onset (s): none",
+                                                 "Decision: failure\nFailure onset (s): 5.100"})
+            self.assertTrue((output / "adapter_model.safetensors").is_file())
+            summary = json.loads((output / "training_summary.json").read_text())
+            self.assertEqual(summary["optimizer_steps"], 2)
+            self.assertEqual(summary["selection"], "lowest validation loss")
+            self.assertTrue(torch.isfinite(torch.tensor(summary["epochs"][0]["validation_loss"])))
+
     def check_preserved_device_map(self, device_map):
         from accelerate import dispatch_model
         from rynnbrain_vlm.model import _input_execution_device
