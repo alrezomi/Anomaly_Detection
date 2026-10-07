@@ -11,8 +11,15 @@ Mention concrete matches or mismatches and say when the frames are insufficient 
 Do not infer unseen events or give a success/failure decision.
 Return: Visual evidence: [one or two sentences describing what is visible]"""
 
-def task_context_prompt(task_description: str) -> str:
+def task_context_prompt(task_description: str, *, temporal: bool = False) -> str:
     """First turn: Keep the nominal reference clear and faithful to the user's intent."""
+    if temporal:
+        return f"""You are a Failure Detector for Robotic Manipulation Tasks.
+Nominal reference task: {task_description}
+These camera views show a successful reference execution. Camera identities and actual frame times
+are written beside each image. Times are seconds from this reference bag's start, independent of the test bag.
+Use all supplied views to understand the expected object motion, grasp and placement. Different views may
+have slightly different capture times; do not treat frame indices as seconds. Describe the expected behavior."""
     return f"""You are a Failure Detector for Robotic Manipulation Tasks.
 
         Nominal reference task that robot is trying to perform: {task_description}
@@ -25,8 +32,19 @@ def task_context_prompt(task_description: str) -> str:
         Observe the nominal demonstration closely. It is one example of the expected behavior:"""
 
 
-def evaluation_prompt_multiturn(task_description: str, input_mode: str) -> str:
+def evaluation_prompt_multiturn(task_description: str, input_mode: str, *, temporal: bool = False) -> str:
     """Second turn: Compare the current observation against the nominal demonstration."""
+    if temporal:
+        return f"""Compare the current execution with the nominal reference for: {task_description}
+Use all supplied camera views and their actual timestamps in seconds from this execution bag's start.
+Only a prefix of the execution may be shown. Decide whether a failure has occurred by the latest
+provided frame. Success means no failure observed yet, not necessarily that the task has finished.
+If failure has occurred, estimate when it first began, using the visible evidence and frame times.
+An earlier failure still counts if the robot later recovers. Do not use unseen future events.
+Do not infer failure merely because a normal execution is unfinished.
+Return exactly two lines:
+Decision: success / failure / uncertain
+Failure onset (s): numeric seconds for failure, none for success, or unknown if uncertain"""
     if input_mode == "raw":
         heatmap_info = ""
         visual_focus = "raw camera frames"

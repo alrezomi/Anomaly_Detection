@@ -36,6 +36,7 @@ from rynnbrain_vlm.model import RynnBrainModel
 from rynnbrain_vlm.cop_classifier import classifier_method, classifier_model_paths
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
 from rynnbrain_vlm.failure_timing import TIMING_FIELDS, read_failure_annotation, evaluate_failure_timing, write_failure_timing_report
+from rynnbrain_vlm.temporal_lora import VLM_TIME_FIELDS
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -206,6 +207,9 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
     timing = any("failure_timing_status" in row for row in master_rows)
     if timing:
         columns += ["input_mode", *TIMING_FIELDS]
+    temporal = any("vlm_failure_onset_status" in row for row in master_rows)
+    if temporal:
+        columns += list(VLM_TIME_FIELDS)
     return pd.DataFrame(
         [
             {
@@ -218,6 +222,7 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
                     "anomaly_threshold": row.get("classifier_threshold") if row.get("classifier_score_kind") == "knn_distance" else None,
                     "classifier_decision": row.get("classifier_decision")} if knn else {}),
                 **({"input_mode": row.get("input_mode"), **{key: row.get(key) for key in TIMING_FIELDS}} if timing else {}),
+                **({key: row.get(key) for key in VLM_TIME_FIELDS} if temporal else {}),
             }
             for row in master_rows
         ],
@@ -510,6 +515,7 @@ def main() -> None:
                 "classifier_anomaly_score": row.get("classifier_anomaly_score"),
                 "classifier_score_kind": row.get("classifier_score_kind"),
                 **{key: row.get(key) for key in TIMING_FIELDS},
+                **{key: row[key] for key in VLM_TIME_FIELDS if key in row},
                 **{key: row.get(key) for key in ("knn_timeline_status", "knn_timeline_csv", "knn_timeline_plot", "knn_timeline_error")},
                 **{key: row.get(key) for key in ("logistic_timeline_status", "logistic_timeline_csv", "logistic_timeline_plot", "logistic_timeline_error",
                                                 "logistic_last_below_before_alert_sec", "logistic_first_above_threshold_sec")},

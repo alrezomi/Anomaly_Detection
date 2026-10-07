@@ -22,6 +22,7 @@ from .cop_analysis import save_cop_vector
 from .model import COP_REPRESENTATION_ID, RynnBrainModel
 from .prompts import task_context_prompt, evaluation_prompt_multiturn, visual_evidence_prompt
 from .failure_timing import TIMING_FIELDS, read_failure_annotation, attach_failure_timing
+from .temporal_lora import VLM_TIME_FIELDS, validate_profile, timestamped_images, evaluate_vlm_onset
 
 
 def _slug(value: str) -> str:
@@ -161,6 +162,9 @@ def _execution_inputs(config, vlm, frame_count, input_modes):
         raw_inputs, raw_metadata = _raw_inputs(Path(config["test_bag"]), topics, frame_count)
     else:
         raise ValueError("rynnbrain.source must be 'generated_videos' or 'rosbag'")
+    if vlm.get("_temporal_profile"):
+        validate_profile(vlm["_temporal_profile"], config, vlm, frame_count, input_modes)
+        raw_inputs = timestamped_images(raw_inputs, raw_metadata, topics, frame_count)
     selected = {}
     for mode in input_modes:
         if mode == "raw":
@@ -245,6 +249,8 @@ def cop_comparison_signature(model, config, vlm, mode, nominal_response, frame_c
     """Shared cache identity for classifier preparation and evaluation."""
     task = vlm.get("task_description", "Robot manipulation task")
     topics = list(vlm.get("camera_topics", config.get("camera_topics", [])))
+    temporal_profile = getattr(model, "temporal_profile", {})
+    validate_profile(temporal_profile, config, vlm, frame_count, [mode])
     signature = {
         "representation_id": COP_REPRESENTATION_ID,
         "model_id": model.model_id,
@@ -263,9 +269,11 @@ def cop_comparison_signature(model, config, vlm, mode, nominal_response, frame_c
         "sampling_end_sec": float(vlm["sampling_end_sec"]) if vlm.get("sampling_end_sec") is not None else None,
         "enable_thinking": bool(generation.get("enable_thinking", False)),
         "hidden_size": getattr(getattr(model.model.config, "text_config", None), "hidden_size", None),
-        "turn1_prompt": task_context_prompt(task),
-        "turn2_prompt": evaluation_prompt_multiturn(task, mode),
+        "turn1_prompt": task_context_prompt(task, temporal=bool(temporal_profile)),
+        "turn2_prompt": evaluation_prompt_multiturn(task, mode, temporal=bool(temporal_profile)),
     }
+    if temporal_profile:
+        signature["temporal_profile"] = temporal_profile
     if getattr(model, "adapter_identity", None):
         signature["lora_adapter_sha256"] = model.adapter_identity
     return signature
@@ -290,6 +298,10 @@ def evaluate_multiturn(
     Returns (rows, frame_metadata, raw_records, task_description).
     """
     task_description = vlm.get("task_description", "Robot manipulation task")
+    temporal_profile = getattr(model, "temporal_profile", {})
+    if temporal_profile:
+        validate_profile(temporal_profile, config, vlm, frame_count, vlm.get("input_modes", ["raw"]))
+        vlm = {**vlm, "_temporal_profile": temporal_profile}
     provenance = {
         "evaluation_id": str(uuid4()),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -359,7 +371,9 @@ def evaluate_multiturn(
     memory_topics = list(vlm.get("memory_camera_topics", topics))
     nominal_images: list[tuple[str, Image.Image]] = []
     for bag_value in reference_bags:
-        bag_images, _ = _raw_inputs(Path(bag_value), memory_topics, frame_count)
+        bag_images, bag_frames = _raw_inputs(Path(bag_value), memory_topics, frame_count)
+        if temporal_profile:
+            bag_images = timestamped_images(bag_images, bag_frames, memory_topics, frame_count)
         nominal_images.extend(bag_images)
     _save_inputs(output_directory, "nominal", nominal_images)
 
@@ -376,10 +390,10 @@ def evaluate_multiturn(
         _save_inputs(output_directory, mode, inputs)
 
         # Turn 1: Model sees nominal demonstration and learns the task
-        turn1_text = task_context_prompt(task_description)
+        turn1_text = task_context_prompt(task_description, temporal=bool(temporal_profile))
         
         # Turn 2: Model evaluates test case against observed nominal
-        turn2_text = evaluation_prompt_multiturn(task_description, mode)
+        turn2_text = evaluation_prompt_multiturn(task_description, mode, temporal=bool(temporal_profile))
         
         # Create multi-turn conversation
         turns = [
@@ -418,6 +432,10 @@ def evaluate_multiturn(
         _print_exchange(f"MULTITURN TURN 2 ({mode})", turn2_text, response)
         
         decision, confidence = _parse_response(response)
+        vlm_time_fields = {}
+        if temporal_profile:
+            vlm_time_fields = evaluate_vlm_onset(response, decision, mode_frame_metadata,
+                                               failure_annotation or {}, vlm.get("ground_truth_label", "unknown"))
         cop_vector_path: str | None = None
         cop_metadata_path: str | None = None
         classifier_failure_probability: float | None = None
@@ -595,6 +613,7 @@ def evaluate_multiturn(
                 "test_bag": config["test_bag"],
                 **neighbor_fields,
                 **timing_fields,
+                **vlm_time_fields,
                 "input_mode": mode,
                 "decision": decision,
                 "confidence": confidence,
@@ -684,6 +703,7 @@ def evaluate_multiturn(
             "logistic_timeline": timelines["logistic"],
             "failure_annotation": failure_annotation,
             **timing_fields,
+            **vlm_time_fields,
             **neighbor_fields,
             "knn_neighbors": neighbors,
         })
