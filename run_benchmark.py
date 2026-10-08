@@ -37,6 +37,7 @@ from rynnbrain_vlm.cop_classifier import classifier_method, classifier_model_pat
 from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
 from rynnbrain_vlm.failure_timing import TIMING_FIELDS, read_failure_annotation, evaluate_failure_timing, write_failure_timing_report
 from rynnbrain_vlm.temporal_lora import VLM_TIME_FIELDS
+from rynnbrain_vlm.runtime import RUNTIME_FIELDS, clock, record_run
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -146,10 +147,13 @@ def _run_dino_test(config: dict[str, Any], bag_path: Path, bag_output_dir: Path)
     config_path = bag_output_dir / "pipeline_config.json"
     config_path.write_text(json.dumps(bag_config, indent=2), encoding="utf-8")
     try:
-        subprocess.run(
-            [sys.executable, str(REPO_ROOT / "run_rosbag_vision.py"), "--config", str(config_path), "--mode", "test"],
-            cwd=REPO_ROOT, check=True,
-        )
+        command = [sys.executable, "-u", str(REPO_ROOT / "run_rosbag_vision.py"), "--config", str(config_path), "--mode", "test"]
+        with subprocess.Popen(command, cwd=REPO_ROOT, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace") as process:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+            if process.wait():
+                raise subprocess.CalledProcessError(process.returncode, command)
         return True
     except subprocess.CalledProcessError as error:
         print(f"  [DINO FAILED] {bag_path.name}: {error}")
@@ -185,7 +189,7 @@ def _dino_summary(camera_topics: list[str], bag_output_dir: Path) -> dict[str, A
 
 def _decision_correct(ground_truth: str, decision: str) -> bool | None:
     expected = GROUND_TRUTH_TO_DECISION.get(ground_truth)
-    if expected is None:
+    if expected is None or decision == "not_generated":
         return None
     if decision in ABSTAIN_DECISIONS:
         return False
@@ -210,6 +214,12 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
     temporal = any("vlm_failure_onset_status" in row for row in master_rows)
     if temporal:
         columns += list(VLM_TIME_FIELDS)
+    runtime = any("inference_mode" in row for row in master_rows)
+    if runtime:
+        columns += ["inference_mode", *RUNTIME_FIELDS, "runtime_total_bag_sec"]
+        if "classifier_decision" not in columns:
+            columns += ["classifier_decision"]
+        columns += ["classifier_correct"]
     return pd.DataFrame(
         [
             {
@@ -223,6 +233,10 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
                     "classifier_decision": row.get("classifier_decision")} if knn else {}),
                 **({"input_mode": row.get("input_mode"), **{key: row.get(key) for key in TIMING_FIELDS}} if timing else {}),
                 **({key: row.get(key) for key in VLM_TIME_FIELDS} if temporal else {}),
+                **({"inference_mode": row.get("inference_mode"),
+                    **{key: row.get(key) for key in (*RUNTIME_FIELDS, "runtime_total_bag_sec")},
+                    "classifier_decision": row.get("classifier_decision"),
+                    "classifier_correct": row.get("classifier_decision_correct")} if runtime else {}),
             }
             for row in master_rows
         ],
@@ -323,9 +337,19 @@ def _select_named_records(
     return selected
 
 
-def main() -> None:
-    arguments = parse_arguments()
-    config = json.loads(arguments.config.read_text(encoding="utf-8"))
+def _write_tables(master_rows, benchmark_root):
+    """Checkpoint completed bags without rerunning any model or plots."""
+    for row in master_rows:
+        row["failure_category"] = failure_category(row["bag_path"], row["ground_truth_label"])
+    for name, data in (("benchmark_summary.csv", pd.DataFrame(master_rows)),
+                       ("benchmark_clean.csv", _build_clean_report(master_rows))):
+        path = benchmark_root / name
+        temporary = path.with_suffix(".csv.tmp")
+        data.to_csv(temporary, index=False)
+        temporary.replace(path)
+
+
+def _run_benchmark(arguments, config, update) -> None:
     vlm = dict(config.get("rynnbrain", {}))
     if not vlm and not arguments.skip_vlm:
         raise ValueError("Add a 'rynnbrain' section to pipeline_config.json, or pass --skip-vlm.")
@@ -353,6 +377,8 @@ def main() -> None:
         arguments.prepare_classifier or bool(vlm.get("cop_classifier", {}).get("enabled", False))
     )
     if prepare_classifier:
+        update(phase="classifier_preparation")
+        preparation_started = clock()
         from rynnbrain_vlm.cop_classifier import (
             configured_training_settings, prepare_training_vectors, train_from_saved_vectors,
         )
@@ -369,12 +395,16 @@ def main() -> None:
             if not configured_path or Path(configured_path).resolve() != settings["output_file"].resolve():
                 raise ValueError("Classifier training output_file must match model_paths for benchmark scoring.")
         print("Loading RynnBrain once for classifier preparation and benchmark evaluation...")
+        started = clock()
         model = RynnBrainModel(vlm["model"])
+        update(model_load_sec=clock() - started)
         for settings in settings_by_mode:
             paths, reference_response = prepare_training_vectors(config, settings, model=model, data_root=data_root)
             classifier_metadata = train_from_saved_vectors(**settings, metadata_paths=paths)
             print(f"Prepared {settings['method']} classifier: {classifier_metadata['model_file']}")
+        update(classifier_preparation_sec=clock() - preparation_started)
 
+    update(phase="bag_selection")
     print(f"Scanning bags under: {data_root}")
     all_bags = discover_bags(data_root, recursive=not arguments.no_recursive)
     excluded_names = _excluded_bag_names(config, arguments.include_nominal_bags)
@@ -411,10 +441,15 @@ def main() -> None:
 
     if not arguments.skip_vlm and model is None:
         print("\nLoading RynnBrain model once for the whole benchmark...")
+        update(phase="model_loading")
+        started = clock()
         model = RynnBrainModel(vlm["model"])
+        update(model_load_sec=clock() - started)
 
     master_rows: list[dict[str, Any]] = []
+    _write_tables(master_rows, benchmark_root)
     for index, record in enumerate(candidates, start=1):
+        bag_started = clock()
         bag_path = Path(record["bag_path"])
         # bag_path was stored relative to data_root by infer_bag_record's caller convention.
         if not bag_path.is_absolute():
@@ -423,6 +458,7 @@ def main() -> None:
         ground_truth = record["label"]
         bag_output_dir = benchmark_root / bag_name
         print(f"\n[{index}/{len(candidates)}] {bag_name} (ground_truth={ground_truth})")
+        update(phase="evaluation", current_bag=bag_name, selected_bags=len(candidates))
 
         dino_ok = True
         if not arguments.skip_dino:
@@ -471,6 +507,7 @@ def main() -> None:
                 "classifier_decision_correct": None,
                 "classifier_threshold": None,
                 "classifier_model_path": None,
+                "runtime_total_bag_sec": clock() - bag_started,
                 **evaluate_failure_timing(
                     read_failure_annotation(bag_path, stage_topic, startup_ignore_sec), {},
                     source=vlm.get("source", "generated_videos"), mode="raw", ground_truth=ground_truth,
@@ -478,6 +515,8 @@ def main() -> None:
                 ),
                 **dino_summary,
             })
+            _write_tables(master_rows, benchmark_root)
+            update(completed_bags=index)
             continue
 
         for row in rows:
@@ -497,6 +536,9 @@ def main() -> None:
                 "lora_adapter_path": row.get("lora_adapter_path"),
                 "lora_adapter_sha256": row.get("lora_adapter_sha256"),
                 "response_source": row.get("response_source"),
+                "inference_mode": row.get("inference_mode", "generation"),
+                **{key: row.get(key) for key in RUNTIME_FIELDS},
+                "runtime_total_bag_sec": clock() - bag_started,
                 "cop_vector_path": row.get("cop_vector_path"),
                 "cop_metadata_path": row.get("cop_metadata_path"),
                 "classifier_failure_probability": row.get(
@@ -523,15 +565,15 @@ def main() -> None:
                                                 "knn_last_below_before_alert_sec", "knn_first_above_threshold_sec")},
                 **dino_summary,
             })
+        _write_tables(master_rows, benchmark_root)
+        update(completed_bags=index)
 
-    for row in master_rows:
-        row["failure_category"] = failure_category(row["bag_path"], row["ground_truth_label"])
-    summary_df = pd.DataFrame(master_rows)
+    update(phase="reports", current_bag=None,
+           mean_runtime_sec={key: float(pd.Series([row.get(key) for row in master_rows], dtype=float).dropna().mean())
+                             for key in RUNTIME_FIELDS if any(row.get(key) is not None for row in master_rows)})
+    _write_tables(master_rows, benchmark_root)
     summary_path = benchmark_root / "benchmark_summary.csv"
-    summary_df.to_csv(summary_path, index=False)
-    clean_report = _build_clean_report(master_rows)
     clean_report_path = benchmark_root / "benchmark_clean.csv"
-    clean_report.to_csv(clean_report_path, index=False)
     statistics = _report_statistics(master_rows)
     statistics["failure_timing"] = write_failure_timing_report(
         master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"]),
@@ -623,6 +665,16 @@ def main() -> None:
                 "\nCoP PCA did not create a plot. Check cop_pca_summary.json "
                 "for missing classes or incompatible vectors."
             )
+
+
+def main() -> None:
+    arguments = parse_arguments()
+    config = json.loads(arguments.config.read_text(encoding="utf-8"))
+    base = config.get("rynnbrain", {}).get("output_dir", str(Path(config.get("output_dir", "outputs")) / "rynnbrain"))
+    directory = arguments.benchmark_dir or Path(f"{base}_benchmark")
+    with record_run(directory, "benchmark") as update:
+        update(arguments=vars(arguments) | {key: str(value) for key, value in vars(arguments).items() if isinstance(value, Path)})
+        _run_benchmark(arguments, config, update)
 
 
 if __name__ == "__main__":

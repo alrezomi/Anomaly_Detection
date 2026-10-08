@@ -76,6 +76,84 @@ class ClassifierPreparationTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    def test_feature_only_preparation_and_evaluation_keep_classifier_scores_without_answers(self):
+        from run_benchmark import _build_clean_report
+        from rynnbrain_vlm.runtime import RUNTIME_FIELDS
+        for method in ("logistic", "knn"):
+            with self.subTest(method=method):
+                vlm = self.config["rynnbrain"]
+                vlm["inference"] = {"feature_only": True}
+                vlm["cop_vectors"]["enabled"] = True
+                vlm["cop_classifier"]["method"] = method
+                vlm["cop_classifier"]["knn"] = {"n_neighbors": 1, "threshold_quantile": .95}
+                self.config_path.write_text(json.dumps(self.config))
+                settings = configured_training_settings(self.config_path)
+                self.model.generate_multiturn_with_cop_vector.reset_mock()
+                def extract(turns, generation, **kwargs):
+                    return self.torch.tensor([-1. if turns[1]["images"][0][0].startswith("failure") else 1., .2, .3, .4])
+                self.model.extract_multiturn_cop_vector = Mock(side_effect=extract)
+                self.model.generate_visual_evidence = Mock(side_effect=AssertionError("No explanations in feature-only mode"))
+                paths, reference = prepare_training_vectors(self.config, settings, model=self.model, refresh=True)
+                train_from_saved_vectors(**settings, metadata_paths=paths)
+                self.model.generate_multiturn_with_cop_vector.assert_not_called()
+                self.config["test_bag"] = str(self.root / "data/failure_test")
+                rows, frames, responses, task = self.run.evaluate_multiturn(
+                    self.model, self.config, {**vlm, "ground_truth_label": "fail"}, 8,
+                    {"explain_decision": True}, self.root / "feature_test", reference_response=reference)
+                self.model.generate_multiturn_with_cop_vector.assert_not_called()
+                self.model.generate_visual_evidence.assert_not_called()
+                row = rows[0]
+                self.assertEqual(row["decision"], "not_generated")
+                self.assertEqual(row["response"], "")
+                self.assertIsNotNone(row["classifier_decision"])
+                score_key = "classifier_failure_probability" if method == "logistic" else "classifier_anomaly_score"
+                self.assertIsNotNone(row[score_key])
+                self.assertTrue(all(row[key] >= 0 for key in RUNTIME_FIELDS))
+                self.assertGreaterEqual(row["runtime_bag_sec"], row["runtime_model_sec"])
+                self.run.write_multiturn_outputs(self.root / "feature_test", rows, frames, responses, task)
+                clean = _build_clean_report(rows)
+                self.assertEqual(clean.model_decision.iloc[0], "not_generated")
+                self.assertEqual(clean.classifier_decision.iloc[0], row["classifier_decision"])
+                self.assertEqual(clean.inference_mode.iloc[0], "feature_only")
+                # Returning to normal mode must regenerate missing answers, not
+                # present feature-only cache files as generated VLM responses.
+                vlm["inference"]["feature_only"] = False
+                prepare_training_vectors(self.config, settings, model=self.model)
+                self.assertTrue(self.model.generate_multiturn_with_cop_vector.called)
+
+    def test_feature_only_benchmark_finishes_reports_and_times_without_vlm_accuracy(self):
+        import run_benchmark as benchmark
+        import sys
+        vlm = self.config["rynnbrain"]
+        vlm["output_dir"] = str(self.root / "benchmark_vlm")
+        vlm["inference"] = {"feature_only": True}
+        self.config_path.write_text(json.dumps(self.config))
+        self.model.extract_multiturn_cop_vector = Mock(side_effect=lambda turns, *a, **kw:
+            self.torch.tensor([-1. if turns[1]["images"][0][0].startswith("failure") else 1., .2, .3, .4]))
+        bags = [self.root / "data" / name for name in self.names + ["reference", "normal_test", "failure_test"]]
+        with patch.object(sys, "argv", ["benchmark", "--config", str(self.config_path), "--skip-dino"]), \
+             patch.object(benchmark, "RynnBrainModel", return_value=self.model), \
+             patch.object(benchmark, "discover_bags", return_value=bags), \
+             patch.object(benchmark, "infer_bag_record", side_effect=lambda path, *a: {
+                 "bag_name": path.name, "bag_path": str(path), "label": "fail" if path.name.startswith("failure") else "normal"}):
+            benchmark.main()
+        root = self.root / "benchmark_vlm_benchmark"
+        clean = pd.read_csv(root / "benchmark_clean.csv")
+        self.assertEqual(set(clean.bag_name), {"normal_test", "failure_test"})
+        self.assertTrue(clean.correct.isna().all())
+        self.assertTrue(clean.classifier_correct.all())
+        self.assertTrue((clean.runtime_model_sec >= 0).all())
+        self.assertTrue((clean.runtime_total_bag_sec >= clean.runtime_bag_sec).all())
+        runtime = json.loads((root / "benchmark_runtime.json").read_text())
+        self.assertEqual(runtime["status"], "completed")
+        self.assertEqual(runtime["completed_bags"], 2)
+        self.assertIn("runtime_model_sec", runtime["mean_runtime_sec"])
+        statistics = json.loads((root / "benchmark_statistics.json").read_text())
+        self.assertEqual(statistics["scored_rows"], 0)
+        self.assertEqual(statistics["classifier"]["scored_rows"], 2)
+        self.assertTrue((root / "benchmark_probability_roc").is_dir())
+        self.model.generate_multiturn_with_cop_vector.assert_not_called()
+
     def test_missing_stale_and_corrupt_vectors_refresh_only_selected_training_bags(self):
         paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
         self.assertEqual(self.extractions, Counter(self.names))

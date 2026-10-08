@@ -212,7 +212,14 @@ class ModelInferenceTests(unittest.TestCase):
             return torch.tensor([[1, 2, 3]])
 
         wrapper.processor = Processor()
-        wrapper.model = SimpleNamespace(generate=generate, config=SimpleNamespace(text_config=SimpleNamespace(hidden_size=4)))
+        class Model(torch.nn.Module):
+            config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=4))
+            def generate(self, **kwargs):
+                return generate(**kwargs)
+            def forward(self, **kwargs):
+                calls.append(kwargs)
+                norm(torch.ones((1, 2, 4)))
+        wrapper.model = Model()
         turns = [{"role": "user", "text": "Reference", "images": []},
                  {"role": "user", "text": "Execution", "images": []}]
         with patch.object(wrapper, "_final_language_norm", return_value=norm):
@@ -222,8 +229,10 @@ class ModelInferenceTests(unittest.TestCase):
             settings = {"max_new_tokens": 280, "do_sample": True}
             snapshot = wrapper.extract_multiturn_cop_vector(turns, settings, reference_response=original.nominal_response)
         self.assertEqual(len(calls), 4)
-        self.assertEqual(calls[-1]["max_new_tokens"], 1)
-        self.assertFalse(calls[-1]["do_sample"])
+        self.assertNotIn("max_new_tokens", calls[-1])
+        self.assertNotIn("do_sample", calls[-1])
+        self.assertFalse(calls[-1]["use_cache"])
+        self.assertEqual(calls[-1]["logits_to_keep"], 1)
         self.assertEqual(settings, {"max_new_tokens": 280, "do_sample": True})
         torch.testing.assert_close(snapshot, original.cop_vector)
         self.assertEqual(cached.nominal_response, original.nominal_response)

@@ -806,6 +806,9 @@ def prepare_training_vectors(
     for selector, name, record, label in selected:
         if not refresh and record is not None and record.metadata.get("comparison_signature") == expected:
             try:
+                from .runtime import feature_only_enabled
+                if not feature_only_enabled(vlm) and record.metadata.get("inference_mode") == "feature_only":
+                    raise ValueError("Generated responses requested; cached vector was extracted without an answer")
                 loaded = discover_saved_vectors(root, [record.metadata_path])[0]
                 if loaded.vector.size != expected["hidden_size"] or loaded.metadata.get("representation_id") != expected["representation_id"]:
                     raise ValueError("Vector representation changed")

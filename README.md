@@ -819,6 +819,90 @@ it is not the time at which an online system raised an alert. This supervision
 can help localization, but sparse frames and button timing still limit accuracy;
 evaluate improvement on bags held out from both training and validation.
 
+### Feature-only classifier inference and runtime measurements
+
+To score CoP features without generating the execution answer, manually add this
+object inside `rynnbrain` in your existing configuration:
+
+```json
+"inference": {
+  "feature_only": true
+}
+```
+
+Keep `cop_vectors.enabled` and `cop_classifier.enabled` true. The configured
+`cop_classifier.method` still selects logistic regression or nominal kNN; no
+adapter, bag list, classifier method or path is changed automatically. Setting
+`feature_only` to false (or omitting it) retains generated VLM decisions.
+
+Feature-only mode performs one execution-prompt forward pass, retaining the same
+final normalized, last-prompt-token vector used by the existing classifiers. It
+does not enter the token-generation loop or generate an execution explanation.
+The LoRA adapter, camera inputs, timestamps and prompts still apply. The nominal
+reference description is needed to preserve the trained context: it is generated
+once during benchmark preparation and reused for evaluation; a standalone test
+generates it once. Image decoding, tokenization, visual encoding and prompt
+processing are still required. The speed improvement depends on those costs,
+answer length and CPU offloading; there is no promised speedup factor.
+
+Logistic regression continues to report `failure_probability`. kNN continues to
+report `anomaly_score` (a distance, not a probability). The VLM decision is saved
+as `not_generated`, its answer is empty and its accuracy is unscored. The clean
+table includes `classifier_decision` and `classifier_correct` separately. A
+temporal adapter does not generate an onset timestamp in this mode; classifier
+timeline alerts and their existing timing evaluation remain available.
+
+For the quickest per-bag comparison, manually set
+`rynnbrain.cop_classifier.plot_timeline` to false. Timelines otherwise require
+additional prefix forward passes; feature-only mode does not disable them for
+you. Optional logistic onset-classifier preparation is also separate startup
+work. Use raw rosbag input and skip DINO for a VLM/classifier benchmark:
+
+```bash
+docker compose run --rm --build benchmark \
+  --config /config/pipeline_config.json --skip-dino --include-nominal-bags
+```
+
+This still excludes reference, LoRA-training and classifier-training bags.
+The ordinary `rynnbrain-test-multiturn` and `cop-classifier-train` commands also
+honor feature-only mode. Switching this mode alone does not change the feature
+comparison signature or require classifier retraining. Changing the adapter,
+camera inputs or prompts does. Missing preparation vectors are extracted without
+execution-answer generation when feature-only mode is enabled.
+
+Timing columns are saved in each bag's result CSV/JSON and the benchmark tables:
+
+| Column | Measured wall-clock seconds |
+| --- | --- |
+| `runtime_input_sec` | Input setup, classifier loading, reference/test image loading and reference-image saving |
+| `runtime_reference_sec` | Separate nominal-response generation in feature-only single tests; zero when reused |
+| `runtime_model_sec` | Tokenization, transfers and execution feature extraction or response generation |
+| `runtime_classifier_sec` | Applying the loaded full-execution classifier to the vector |
+| `runtime_diagnostics_sec` | Optional explanations, neighbour plots and timeline processing |
+| `runtime_bag_sec` | Whole VLM evaluation call, including image/result preparation and diagnostics |
+| `runtime_total_bag_sec` | Benchmark only: DINO (if enabled), VLM evaluation and per-bag output writing |
+
+CUDA work is synchronized at measurement boundaries. `runtime_model_sec` in
+normal generation mode also includes nominal generation if it was not reused.
+Shared input/reference costs and `runtime_bag_sec` are repeated across a bag's
+input-mode rows; do not sum those duplicates. These offline measurements include
+bag decoding and diagnostics as specified, not camera-to-alert live latency.
+The current commands remain offline bag evaluators, not a ROS streaming node.
+
+`benchmark_runtime.json` records model loading, classifier preparation (including
+model loading), mean per-row VLM timing fields, total elapsed time and progress.
+`benchmark_run.log` retains printed output and Python tracebacks across runs.
+The summary and clean tables are checkpointed after each completed bag; final
+plots are generated after the bag loop. A failed/interrupted run's tables are
+partial. Check the runtime JSON's status before treating reports as complete.
+A hard process kill cannot write a final status, so its last phase remains marked
+running; the log and completed rows are still retained. These files aid diagnosis
+but do not automatically resume a stopped run. Older plots in a reused output
+directory can still belong to its previous run.
+
+Single tests similarly write `inference_runtime.json` and `inference_run.log`
+beneath `rynnbrain.output_dir`, including model-loading time separately.
+
 ### Nominal-only kNN detector
 
 The checked-in config selects `rynnbrain.cop_classifier.method: "knn"`.

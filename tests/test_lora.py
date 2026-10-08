@@ -377,6 +377,20 @@ class LoraGradientTests(unittest.TestCase):
         with wrapper.model.disable_adapter():
             base = wrapper.generate_multiturn_with_cop_vector(turns, generation, reference_response=single.nominal_response)
         self.assertFalse(torch.allclose(base.cop_vector, cached.cop_vector))
+        # Feature-only inference must never enter generate(), and must retain
+        # the same last-prompt latent state across repeated full/prefix calls.
+        with patch.object(wrapper.model, "generate", side_effect=AssertionError("No token generation allowed")):
+            direct = wrapper.extract_multiturn_cop_vector(turns, generation, reference_response=single.nominal_response)
+            torch.testing.assert_close(direct, cached.cop_vector, rtol=1e-5, atol=1e-6)
+            prefix_turns = [turns[0], {**turns[1], "text": "Shorter execution", "images": []}]
+            wrapper.extract_multiturn_cop_vector(prefix_turns, generation, reference_response=single.nominal_response)
+            repeated = wrapper.extract_multiturn_cop_vector(turns, generation, reference_response=single.nominal_response)
+            torch.testing.assert_close(direct, repeated, rtol=0, atol=0)
+        self.assertEqual(len(wrapper._final_language_norm()._forward_hooks), 0)
+        with patch.object(wrapper.model, "forward", side_effect=RuntimeError("test failure")):
+            with self.assertRaisesRegex(RuntimeError, "test failure"):
+                wrapper.extract_multiturn_cop_vector(turns, generation, reference_response=single.nominal_response)
+        self.assertEqual(len(wrapper._final_language_norm()._forward_hooks), 0)
 
     def test_adapter_keeps_root_and_module_maps_without_recalculating_memory(self):
         for device_map in ({"": "cpu"}, {"model": "cpu", "lm_head": "cpu"}):
