@@ -23,6 +23,7 @@ from .model import COP_REPRESENTATION_ID, RynnBrainModel
 from .prompts import task_context_prompt, evaluation_prompt_multiturn, visual_evidence_prompt
 from .failure_timing import TIMING_FIELDS, read_failure_annotation, attach_failure_timing
 from .temporal_lora import VLM_TIME_FIELDS, validate_profile, timestamped_images, evaluate_vlm_onset
+from .runtime import RUNTIME_FIELDS, clock, feature_only_enabled, record_run
 
 
 def _slug(value: str) -> str:
@@ -297,6 +298,9 @@ def evaluate_multiturn(
     once and call this per test bag instead of reloading it every time.
     Returns (rows, frame_metadata, raw_records, task_description).
     """
+    bag_started = clock()
+    feature_only = feature_only_enabled(vlm)
+    runtime = dict.fromkeys(RUNTIME_FIELDS, 0.0)
     task_description = vlm.get("task_description", "Robot manipulation task")
     temporal_profile = getattr(model, "temporal_profile", {})
     if temporal_profile:
@@ -312,7 +316,10 @@ def evaluate_multiturn(
         "nominal_response_source": "base_model",
         "nominal_response_reused": reference_response is not None,
         "response_source": "lora_adapted_model" if getattr(model, "adapter_identity", None) else "base_model",
+        "inference_mode": "feature_only" if feature_only else "generation",
     }
+    if feature_only:
+        provenance["response_source"] = "not_generated"
 
     if not training_vectors_only and Path(config["test_bag"]).name in getattr(model, "adapter_training_bags", set()):
         raise ValueError("This bag was used to train the loaded LoRA adapter; select a held-out evaluation bag.")
@@ -330,6 +337,8 @@ def evaluate_multiturn(
     input_modes = list(vlm.get("input_modes", ["raw"]))
     classifier_config = dict(vlm.get("cop_classifier", {}))
     classifier_enabled = not training_vectors_only and bool(classifier_config.get("enabled", False))
+    if feature_only and (not capture_cop_vectors or (not training_vectors_only and not classifier_enabled)):
+        raise ValueError("Feature-only evaluation needs cop_vectors.enabled=true and cop_classifier.enabled=true.")
     classifiers: dict[str, Any] = {}
     if classifier_enabled:
         if not capture_cop_vectors:
@@ -376,6 +385,12 @@ def evaluate_multiturn(
             bag_images = timestamped_images(bag_images, bag_frames, memory_topics, frame_count)
         nominal_images.extend(bag_images)
     _save_inputs(output_directory, "nominal", nominal_images)
+    runtime["runtime_input_sec"] = clock() - bag_started
+    if feature_only and reference_response is None:
+        started = clock()
+        reference_response = model.generate_nominal({"role": "user", "images": nominal_images,
+            "text": task_context_prompt(task_description, temporal=bool(temporal_profile))}, generation)
+        runtime["runtime_reference_sec"] = clock() - started
 
     failure_annotation = None
     if not training_vectors_only:
@@ -415,7 +430,11 @@ def evaluate_multiturn(
         # Use multi-turn generation. When requested, capture the final normalized
         # decoder state from the turn-2 prompt prefill without an extra forward pass.
         cop_vector = None
-        if capture_cop_vectors:
+        started = clock()
+        if feature_only:
+            nominal_response, response = reference_response, ""
+            cop_vector = model.extract_multiturn_cop_vector(turns, generation, reference_response=reference_response)
+        elif capture_cop_vectors:
             options = {"reference_response": reference_response} if reference_response is not None else {}
             generated = model.generate_multiturn_with_cop_vector(turns, generation, **options)
             nominal_response = generated.nominal_response
@@ -423,6 +442,7 @@ def evaluate_multiturn(
             cop_vector = generated.cop_vector
         else:
             nominal_response, response = model.generate_multiturn(turns, generation)
+        runtime["runtime_model_sec"] = clock() - started
         
         # Display prompts and response
         prompt_display = f"[Turn 1] Nominal demonstration:\n{turn1_text}\n\n[Turn 2] Test evaluation:\n{turn2_text}"
@@ -432,10 +452,14 @@ def evaluate_multiturn(
         _print_exchange(f"MULTITURN TURN 2 ({mode})", turn2_text, response)
         
         decision, confidence = _parse_response(response)
+        if feature_only:
+            decision, confidence = "not_generated", "not_generated"
         vlm_time_fields = {}
         if temporal_profile:
             vlm_time_fields = evaluate_vlm_onset(response, decision, mode_frame_metadata,
                                                failure_annotation or {}, vlm.get("ground_truth_label", "unknown"))
+            if feature_only:
+                vlm_time_fields["vlm_failure_onset_status"] = "not_generated"
         cop_vector_path: str | None = None
         cop_metadata_path: str | None = None
         classifier_failure_probability: float | None = None
@@ -452,6 +476,7 @@ def evaluate_multiturn(
                 model, config, vlm, mode, nominal_response, frame_count, generation
             )
             if classifier_enabled:
+                classifier_started = clock()
                 classifier = classifiers[mode]
                 classifier_threshold = classifier.threshold
                 classifier_model_path = str(
@@ -477,6 +502,7 @@ def evaluate_multiturn(
                     classifier_anomaly_score = None
                     classifier_error = str(error)
                     print(f"Classifier scoring failed ({mode}); keeping VLM response and vector: {error}")
+                runtime["runtime_classifier_sec"] = clock() - classifier_started
             vector_path, metadata_path = save_cop_vector(
                 output_directory,
                 mode,
@@ -513,10 +539,11 @@ def evaluate_multiturn(
                 f"{vector_path}"
             )
         visual_evidence = None
+        diagnostics_started = clock()
         evidence_error = None
         evidence_prompt = None
         evidence_source = None
-        if not training_vectors_only and generation.get("explain_decision", False):
+        if not feature_only and not training_vectors_only and generation.get("explain_decision", False):
             evidence_prompt = visual_evidence_prompt(task_description, mode)
             evidence_source = "base_model_separate_pass"
             try:
@@ -717,7 +744,16 @@ def evaluate_multiturn(
         if classifier_anomaly_score is not None:
             print(f"{mode} (nominal kNN): anomaly distance={classifier_anomaly_score:.6g}, "
                   f"threshold={classifier_threshold:.6g}, decision={classifier_decision} (not a probability)")
+        runtime["runtime_diagnostics_sec"] = clock() - diagnostics_started
+        rows[-1].update(runtime)
+        raw_records[-1].update(runtime)
+        print(f"Runtime ({mode}): model={runtime['runtime_model_sec']:.3f}s, "
+              f"classifier={runtime['runtime_classifier_sec']:.6f}s, "
+              f"diagnostics={runtime['runtime_diagnostics_sec']:.3f}s")
 
+    elapsed = clock() - bag_started
+    for row in rows + raw_records:
+        row["runtime_bag_sec"] = elapsed
     return rows, frame_metadata, raw_records, task_description
 
 
@@ -792,11 +828,17 @@ def run_test_multiturn(arguments: argparse.Namespace) -> None:
     config, vlm, frame_count, generation = _common_config(arguments)
     vision_output_directory = Path(config["output_dir"])
     output_directory = Path(vlm.get("output_dir", vision_output_directory / "rynnbrain_multiturn"))
-    model = RynnBrainModel(vlm["model"])
-    rows, frame_metadata, raw_records, task_description = evaluate_multiturn(
-        model, config, vlm, frame_count, generation, output_directory
-    )
-    write_multiturn_outputs(output_directory, rows, frame_metadata, raw_records, task_description)
+    with record_run(output_directory, "inference") as update:
+        update(phase="model_loading")
+        started = clock()
+        model = RynnBrainModel(vlm["model"])
+        update(phase="evaluation", model_load_sec=clock() - started)
+        rows, frame_metadata, raw_records, task_description = evaluate_multiturn(
+            model, config, vlm, frame_count, generation, output_directory
+        )
+        write_multiturn_outputs(output_directory, rows, frame_metadata, raw_records, task_description)
+        update(completed_bags=1, timing_by_mode=[{"input_mode": row["input_mode"],
+               **{key: row[key] for key in RUNTIME_FIELDS}} for row in rows])
 
 
 def main() -> None:

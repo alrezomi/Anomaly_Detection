@@ -179,10 +179,14 @@ class RynnBrainModel:
         generation: dict[str, Any],
         capture_cop_vector: bool,
         reference_response: str | None = None,
+        feature_only: bool = False,
     ) -> MultiturnGeneration:
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if len(turns) != 2:
+            raise ValueError("generate_multiturn requires exactly two user turns")
+        if not feature_only:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         conversation: list[dict[str, Any]] = []
         responses: list[str] = []
@@ -240,12 +244,17 @@ class RynnBrainModel:
                     if self.adapter_identity and turn_index == 0 else nullcontext()
                 )
                 with adapter_context, torch.inference_mode():
-                    output_ids = self.model.generate(
-                        **inputs,
-                        max_new_tokens=int(generation.get("max_new_tokens", 500)),
-                        do_sample=bool(generation.get("do_sample", False)),
-                        use_cache=True,
-                    )
+                    if feature_only and capture_this_turn:
+                        # One prompt forward pass: no token sampling/decoding loop,
+                        # no KV cache, and only one position's vocabulary logits.
+                        self.model(**inputs, use_cache=False, logits_to_keep=1)
+                    else:
+                        output_ids = self.model.generate(
+                            **inputs,
+                            max_new_tokens=int(generation.get("max_new_tokens", 500)),
+                            do_sample=bool(generation.get("do_sample", False)),
+                            use_cache=True,
+                        )
             finally:
                 if hook_handle is not None:
                     hook_handle.remove()
@@ -254,7 +263,7 @@ class RynnBrainModel:
                 if not captured:
                     raise RuntimeError(
                         "The final language layer did not expose the full turn-2 "
-                        "prompt state during generation."
+                        "prompt state during inference."
                     )
                 vector = captured[0]
                 text_config = getattr(self.model.config, "text_config", None)
@@ -271,10 +280,13 @@ class RynnBrainModel:
                     raise RuntimeError("The captured CoP vector contains non-finite values.")
                 cop_vector = vector
 
-            new_tokens = output_ids[:, inputs["input_ids"].shape[1]:]
-            response = self.processor.decode(
-                new_tokens[0], skip_special_tokens=True
-            ).strip()
+            if feature_only and capture_this_turn:
+                response = ""
+            else:
+                new_tokens = output_ids[:, inputs["input_ids"].shape[1]:]
+                response = self.processor.decode(
+                    new_tokens[0], skip_special_tokens=True
+                ).strip()
             responses.append(response)
 
             conversation.append(
@@ -312,13 +324,9 @@ class RynnBrainModel:
     def extract_multiturn_cop_vector(
         self, turns: list[dict[str, Any]], generation: dict[str, Any], *, reference_response: str,
     ) -> torch.Tensor:
-        """Capture the prompt vector with one generated token and a reused reference.
-
-        The vector is captured before that token, exactly as in normal inference.
-        Extra timeline snapshots therefore need no full text-answer generation.
-        """
-        result = self.generate_multiturn_with_cop_vector(
-            turns, {**generation, "max_new_tokens": 1, "do_sample": False},
-            reference_response=reference_response,
+        """Capture the same prompt vector in one forward pass, generating no answer."""
+        result = self._generate_multiturn(
+            turns, generation, capture_cop_vector=True,
+            reference_response=reference_response, feature_only=True,
         )
         return result.cop_vector
