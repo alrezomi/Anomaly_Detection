@@ -216,7 +216,14 @@ def _save_inputs(
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    return parser.parse_args()
+    parser.add_argument("--verify-feature-only", action="store_true",
+                        help="Compare generation and direct features for test_bag without retraining or overwriting evaluation outputs.")
+    parser.add_argument("--baseline-dir", type=Path,
+                        help="With --verify-feature-only, inspect saved vectors and bag selection in an earlier benchmark directory.")
+    arguments = parser.parse_args()
+    if arguments.baseline_dir and not arguments.verify_feature_only:
+        parser.error("--baseline-dir requires --verify-feature-only")
+    return arguments
 
 
 def _print_exchange(title: str, prompt: str, response: str) -> None:
@@ -826,6 +833,11 @@ def run_test_multiturn(arguments: argparse.Namespace) -> None:
     No need for saved nominal description - model uses visual understanding.
     """
     config, vlm, frame_count, generation = _common_config(arguments)
+    if getattr(arguments, "verify_feature_only", False):
+        from .feature_verification import run_verification
+        run_verification(config, vlm, frame_count, generation,
+                         baseline_dir=getattr(arguments, "baseline_dir", None))
+        return
     vision_output_directory = Path(config["output_dir"])
     output_directory = Path(vlm.get("output_dir", vision_output_directory / "rynnbrain_multiturn"))
     with record_run(output_directory, "inference") as update:

@@ -97,7 +97,7 @@ class FailureTimingTests(unittest.TestCase):
 
     def test_disabled_and_invalid_timeline_do_not_produce_timing_errors(self):
         disabled = self.evaluate({"status": "disabled"})
-        self.assertEqual(disabled["failure_timing_status"], "timeline_unavailable")
+        self.assertEqual(disabled["failure_timing_status"], "timeline_disabled")
         self.assertIsNone(disabled["failure_time_error_sec"])
         invalid = self.evaluate(self.timeline(times=(1, 4, 3)))
         self.assertEqual(invalid["failure_timing_status"], "invalid_timeline")

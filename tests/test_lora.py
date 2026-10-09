@@ -336,15 +336,17 @@ class LoraGradientTests(unittest.TestCase):
                     ids.append(7)
                     for item in message["content"]:
                         if item["type"] == "image":
-                            ids.extend([4, 3, 5])
+                            # Four merged image tokens retain a real 2-D spatial
+                            # grid. One-token images cannot expose bad mRoPE positions.
+                            ids.extend([4, 3, 3, 3, 3, 5])
                             image_count += 1
                         else:
                             ids.append(8 + sum(map(ord, item["text"])) % 24)
                 return BatchFeature({
                     "input_ids": torch.tensor([ids]),
                     "attention_mask": torch.ones((1, len(ids)), dtype=torch.long),
-                    "pixel_values": prefix["pixel_values"].repeat(image_count, 1),
-                    "image_grid_thw": prefix["image_grid_thw"].repeat(image_count, 1),
+                    "pixel_values": prefix["pixel_values"].repeat(image_count * 4, 1),
+                    "image_grid_thw": torch.tensor([[1, 4, 4]]).repeat(image_count, 1),
                 })
 
             def decode(self, tokens, **kwargs):

@@ -852,10 +852,12 @@ table includes `classifier_decision` and `classifier_correct` separately. A
 temporal adapter does not generate an onset timestamp in this mode; classifier
 timeline alerts and their existing timing evaluation remain available.
 
-For the quickest per-bag comparison, manually set
-`rynnbrain.cop_classifier.plot_timeline` to false. Timelines otherwise require
-additional prefix forward passes; feature-only mode does not disable them for
-you. Optional logistic onset-classifier preparation is also separate startup
+Keep `rynnbrain.cop_classifier.plot_timeline` true when evaluating failure onset.
+Setting it to false disables **prefix scoring as well as the timeline plot**:
+there is then no first threshold-crossing time and no classifier timing-error
+comparison. This faster setting is appropriate only for full-execution scoring.
+Feature-only mode itself does not disable timelines. Optional logistic
+onset-classifier preparation is also separate startup
 work. Use raw rosbag input and skip DINO for a VLM/classifier benchmark:
 
 ```bash
@@ -869,6 +871,38 @@ honor feature-only mode. Switching this mode alone does not change the feature
 comparison signature or require classifier retraining. Changing the adapter,
 camera inputs or prompts does. Missing preparation vectors are extracted without
 execution-answer generation when feature-only mode is enabled.
+
+If results differ after switching modes, check a single held-out `test_bag`
+before rerunning the benchmark. This command uses the **already trained**
+classifier and compares normal generation with direct extraction before and
+after generation, using identical images, prompts, LoRA weights and reference
+text. It does not retrain anything or overwrite existing evaluation outputs:
+
+```bash
+docker compose run --rm --build rynnbrain-test-multiturn \
+  --config /config/pipeline_config.json --verify-feature-only \
+  --baseline-dir /outputs/experiments/pick_place_dino728_v116/rynnbrain_benchmark
+```
+
+`--baseline-dir` is optional; set it to your earlier benchmark directory. The
+configured `test_bag` should be a held-out bag present in both experiments.
+Results go into a new timestamped directory under
+`rynnbrain.output_dir/feature_verification/<bag>/`, with `comparison.json`, three
+vectors and a persistent log. The report includes vector cosine similarity and
+relative error, both paths' classifier scores/decisions, generated text and
+timings. A numerical match requires relative vector L2 error at most 0.001,
+absolute classifier-score difference at most 0.001, and identical classifier
+decisions. These are diagnostic tolerances, not an accuracy guarantee. The
+timings include first-call effects and are not a warmed-up throughput benchmark.
+
+When a baseline is supplied, the report also lists differences in saved feature
+settings (including adapter hash, cameras and prompts) and added/removed bags
+from the two saved `benchmark_summary.csv` files. A baseline with different
+settings or classifiers is not a controlled speed-only comparison. Missing
+baseline artifacts are reported explicitly. No images need to be uploaded to
+inspect these reports. Do not discard the first-turn reference text as a speed
+optimization: it changes the trained context, whereas caching the same text
+preserves it.
 
 Timing columns are saved in each bag's result CSV/JSON and the benchmark tables:
 

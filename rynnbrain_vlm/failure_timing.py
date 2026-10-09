@@ -56,6 +56,9 @@ def evaluate_failure_timing(annotation, timeline, *, source, mode, ground_truth,
     if source != "rosbag" or mode != "raw":
         return {**result, "failure_timing_status": "unaligned_timebase",
                 "failure_timing_error": "Timing evaluation requires raw rosbag frames on the stage topic's bag-relative clock."}
+    if timeline.get("status") == "disabled":
+        return {**result, "failure_timing_status": "timeline_disabled",
+                "failure_timing_error": "plot_timeline=false disabled prefix scoring. Enable cop_classifier.plot_timeline for failure timing."}
     if timeline.get("status") not in {"created", "partial"} or not timeline.get("csv"):
         return {**result, "failure_timing_error": timeline.get("error")}
     try:
@@ -211,7 +214,14 @@ def _plot_timing_report(data, stats, path):
         axis.spines[["top", "right", "left"]].set_visible(False)
         axis.spines["bottom"].set_color("#c5ced6")
         if not len(plotted):
-            axis.text(.5, .5, "No valid failure timing differences to plot", transform=axis.transAxes,
+            counts = Counter(data.loc[failures, "failure_timing_status"])
+            reasons = "; ".join(f"{str(key).replace('_', ' ')}: {value}" for key, value in sorted(counts.items()))
+            message = "No valid failure timing differences to plot"
+            if reasons:
+                message += "\n" + "\n".join(textwrap.wrap(reasons, width=90))
+            if counts.get("timeline_disabled"):
+                message += "\nEnable cop_classifier.plot_timeline to compute threshold-crossing times."
+            axis.text(.5, .5, message, transform=axis.transAxes,
                       ha="center", color="#607080")
         excluded = int(failures.sum()) - len(plotted)
         figure.text(.04, .26 / height, f"Failure cases only. {excluded} failure cases without a valid timing difference are excluded from the mean.\n"
