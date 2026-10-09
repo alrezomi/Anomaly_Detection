@@ -133,6 +133,8 @@ class ClassifierPreparationTests(unittest.TestCase):
         bags = [self.root / "data" / name for name in self.names + ["reference", "normal_test", "failure_test"]]
         with patch.object(sys, "argv", ["benchmark", "--config", str(self.config_path), "--skip-dino"]), \
              patch.object(benchmark, "RynnBrainModel", return_value=self.model), \
+             patch.object(benchmark, "evaluate_multiturn", self.run.evaluate_multiturn), \
+             patch.object(benchmark, "write_multiturn_outputs", self.run.write_multiturn_outputs), \
              patch.object(benchmark, "discover_bags", return_value=bags), \
              patch.object(benchmark, "infer_bag_record", side_effect=lambda path, *a: {
                  "bag_name": path.name, "bag_path": str(path), "label": "fail" if path.name.startswith("failure") else "normal"}):
