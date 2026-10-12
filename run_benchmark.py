@@ -111,7 +111,7 @@ def parse_arguments() -> argparse.Namespace:
     dino_options.add_argument("--skip-dino", action="store_true", help="Skip DINO; video/heatmap input modes require existing files.")
     dino_options.add_argument("--with-dino", action="store_true", help="Also run DINO when the VLM uses raw rosbag images (otherwise skipped automatically).")
     parser.add_argument("--skip-vlm", action="store_true", help="Only run the DINO stage.")
-    parser.add_argument("--prepare-classifier", action="store_true", help="Enable classifier preparation/scoring for this run even if disabled in config; otherwise preparation is automatic when cop_classifier.enabled=true.")
+    parser.add_argument("--prepare-classifier", action="store_true", help="Train/prepare and enable the classifier for this run, overriding train_on_benchmark=false.")
     return parser.parse_args()
 
 
@@ -123,6 +123,48 @@ def _should_run_dino(arguments, vlm):
     if arguments.skip_dino:
         return False
     return bool(getattr(arguments, "with_dino", False) or arguments.skip_vlm or not _raw_rosbag_inputs(vlm))
+
+
+def _load_reused_classifiers(vlm):
+    """Load existing artifacts only; never create missing models or vectors."""
+    from rynnbrain_vlm.cop_classifier import load_classifier
+    from rynnbrain_vlm.cop_knn import CoPKNNDetector
+    config = vlm["cop_classifier"]
+    paths = classifier_model_paths(config)
+    classifiers = {}
+    for mode in vlm.get("input_modes", ["raw"]):
+        if not paths.get(mode):
+            raise ValueError(f"Set cop_classifier.model_paths.{mode} to the existing classifier file.")
+        try:
+            classifier = load_classifier(Path(paths[mode]))
+        except FileNotFoundError as error:
+            raise FileNotFoundError(
+                f"Saved classifier is unavailable for {mode}: {paths[mode]}. "
+                f"Set cop_classifier.model_paths.{mode} to the trained file (keep its .json sidecar). "
+                "train_on_benchmark=false will not train a replacement."
+            ) from error
+        if classifier.input_mode != mode or isinstance(classifier, CoPKNNDetector) != (classifier_method(config) == "knn"):
+            raise ValueError(f"Saved classifier for {mode} does not match the configured method/input mode.")
+        if not isinstance(classifier.comparison_signature.get("nominal_response"), str):
+            raise ValueError("Saved classifier has no nominal reference text; train a compatible classifier first.")
+        classifiers[mode] = classifier
+        print(f"Reusing saved {classifier_method(config)} classifier: {paths[mode]}")
+    references = {classifier.comparison_signature["nominal_response"] for classifier in classifiers.values()}
+    if len(references) != 1:
+        raise ValueError("Saved classifiers must use the same nominal reference response for one benchmark.")
+    return classifiers, references.pop()
+
+
+def _validate_reused_classifiers(classifiers, model, config, vlm, reference_response, frame_count, generation):
+    from rynnbrain_vlm.run import cop_comparison_signature
+    from rynnbrain_vlm.model import COP_REPRESENTATION_ID
+    for mode, classifier in classifiers.items():
+        expected = cop_comparison_signature(model, config, vlm, mode, reference_response, frame_count, generation)
+        if classifier.representation_id != COP_REPRESENTATION_ID or classifier.comparison_signature != expected:
+            raise ValueError(
+                f"Saved {mode} classifier is incompatible with this model/LoRA, cameras, prompts or sampling settings. "
+                "Select its matching settings or explicitly train a new classifier; reuse will not retrain it."
+            )
 
 
 def _excluded_bag_names(
@@ -385,21 +427,30 @@ def _run_benchmark(arguments, config, update) -> None:
 
     model: RynnBrainModel | None = None
     reference_response = None
+    reused_classifiers = {}
     if arguments.prepare_classifier and arguments.skip_vlm:
         raise ValueError("--prepare-classifier requires VLM evaluation; remove --skip-vlm.")
-    prepare_classifier = not arguments.skip_vlm and (
-        arguments.prepare_classifier or bool(vlm.get("cop_classifier", {}).get("enabled", False))
-    )
+    classifier_config = vlm.get("cop_classifier", {})
+    train_on_benchmark = classifier_config.get("train_on_benchmark", True)
+    if not isinstance(train_on_benchmark, bool):
+        raise ValueError("cop_classifier.train_on_benchmark must be true or false.")
+    score_classifier = not arguments.skip_vlm and (arguments.prepare_classifier or bool(classifier_config.get("enabled", False)))
+    prepare_classifier = score_classifier and (arguments.prepare_classifier or train_on_benchmark)
+    if score_classifier:
+        vlm["cop_classifier"] = {**classifier_config, "enabled": True}
+        vlm["cop_vectors"] = {**vlm.get("cop_vectors", {}), "enabled": True}
+        config["rynnbrain"] = vlm
+    if score_classifier and not prepare_classifier:
+        update(phase="classifier_loading", classifier_mode="reuse", classifier_preparation_sec=0.0)
+        started = clock()
+        reused_classifiers, reference_response = _load_reused_classifiers(vlm)
+        update(classifier_load_sec=clock() - started)
     if prepare_classifier:
-        update(phase="classifier_preparation")
+        update(phase="classifier_preparation", classifier_mode="train")
         preparation_started = clock()
         from rynnbrain_vlm.cop_classifier import (
             configured_training_settings, prepare_training_vectors, train_from_saved_vectors,
         )
-        # Enable scoring only in this run; do not rewrite the user's config.
-        vlm["cop_classifier"] = {**vlm.get("cop_classifier", {}), "enabled": True}
-        vlm["cop_vectors"] = {**vlm.get("cop_vectors", {}), "enabled": True}
-        config["rynnbrain"] = vlm
         settings_by_mode = [configured_training_settings(arguments.config, mode)
                             for mode in vlm.get("input_modes", ["raw"])]
         for settings in settings_by_mode:
@@ -459,6 +510,10 @@ def _run_benchmark(arguments, config, update) -> None:
         started = clock()
         model = RynnBrainModel(vlm["model"])
         update(model_load_sec=clock() - started)
+
+    if reused_classifiers:
+        _validate_reused_classifiers(reused_classifiers, model, config, vlm, reference_response, frame_count, generation)
+        print("Saved classifier settings verified; reusing its nominal reference text. No classifier training performed.")
 
     master_rows: list[dict[str, Any]] = []
     _write_tables(master_rows, benchmark_root)

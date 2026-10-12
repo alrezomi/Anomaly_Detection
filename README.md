@@ -859,6 +859,40 @@ timestamped execution prefixes and failure-onset answer targets from the
 recorded error marker. `inference.feature_only` does not disable this training.
 Keep `cop_classifier.plot_timeline: true` to evaluate classifier onset times.
 
+To change the output folder for each evaluation **without retraining the
+classifier**, keep its artifact path fixed and disable benchmark training:
+
+```json
+"cop_classifier": {
+  "enabled": true,
+  "method": "logistic",
+  "train_on_benchmark": false,
+  "model_paths": {
+    "raw": "/outputs/experiments/pick_place_dino728_v130/cop_classifier/raw_logistic.npz"
+  }
+}
+```
+
+Merge these keys into your existing classifier object, retaining its other
+settings. Now the top-level `output_dir` can be `v131`, `v132`, etc., while the
+LoRA path and classifier path continue pointing to the trained v130 artifacts.
+The benchmark loads the classifier without extracting training vectors, fitting
+weights, or writing its model files. It reuses the exact nominal-reference text
+saved with that classifier and verifies model/adapter and representation
+settings before evaluating bags. Missing or incompatible classifiers cause an
+error, never an automatic replacement. The `.json` sidecar must remain beside
+the `.npz`; any trained timeline/onset models are also loaded from that original
+classifier directory. New test vectors, reports and timelines go to the new
+experiment folder. This applies to kNN too: select `method: "knn"` and its saved
+`raw_knn.npz` file. Saved thresholds and weights remain in effect.
+
+`train_on_benchmark` defaults to true for compatibility with the automatic
+first-run training workflow. The explicit `cop-classifier-train` command still
+trains when this flag is false; `benchmark --prepare-classifier` also explicitly
+overrides it. Both can replace the configured classifier artifact, so choose a
+new artifact path when intentionally training a separate version. Setting
+`enabled: false` disables scoring entirely; it is not the reuse option.
+
 Raw rosbag benchmarks (`source: "rosbag"`, `input_modes: ["raw"]`) now skip
 DINO automatically. The ordinary command is sufficient:
 
@@ -1424,7 +1458,7 @@ cannot identify separate training bags and are rejected during preparation.
 
 With `rynnbrain.cop_classifier.enabled: true` and your existing explicit
 classifier training lists, the **normal benchmark command** now prepares the
-classifier automatically:
+classifier automatically when `train_on_benchmark` is true (the default):
 
 ```bash
 docker compose run --rm --build benchmark
@@ -1435,7 +1469,9 @@ evaluates each test bag once with probabilities already available. One VLM
 instance serves both phases. Compatible training vectors are reused; missing or
 stale vectors are refreshed. It enables vector capture for classifier scoring
 without editing the config. Training output paths must match `model_paths`.
-The selected classifier is fitted on each run; the VLM/LoRA is not retrained.
+With `train_on_benchmark: true`, the selected classifier is fitted on each run;
+the VLM/LoRA is not retrained. With `train_on_benchmark: false`, it loads the
+existing `model_paths` artifacts and skips all classifier preparation/training.
 Setting `cop_classifier.enabled: false` disables automatic classifier preparation
 and scoring. The older `--prepare-classifier` flag remains an optional way to
 enable them for one run. `--skip-vlm` does not prepare a classifier. Raw-rosbag-only
