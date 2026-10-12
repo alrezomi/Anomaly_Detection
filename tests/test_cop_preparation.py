@@ -328,11 +328,43 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.assertTrue((self.root / "outputs/cop_classifier/raw_logistic.npz").is_file())
         self.assertTrue((self.root / "outputs/rynnbrain_benchmark/normal_1/rynnbrain_multiturn/cop_vectors/raw.npy").is_file())
 
-    def _check_benchmark_workflow(self, knn=False, dino_requested=False, dino_success=True):
+    def test_reuse_logistic_keeps_artifacts_and_skips_all_preparation(self):
+        self._check_classifier_reuse(knn=False)
+
+    def test_reuse_knn_keeps_artifacts_and_skips_all_preparation(self):
+        self._check_classifier_reuse(knn=True)
+
+    def _check_classifier_reuse(self, knn):
+        classifier = self.config["rynnbrain"]["cop_classifier"]
+        if knn:
+            classifier.update(method="knn", knn={"n_neighbors": 1, "threshold_quantile": .95})
+            self.model.adapter_training_bags = set(self.names[:2])
+        self.config_path.write_text(json.dumps(self.config))
+        self.settings = configured_training_settings(self.config_path)
+        paths, _ = prepare_training_vectors(self.config, self.settings, model=self.model)
+        train_from_saved_vectors(**self.settings, metadata_paths=paths)
+        artifact_dir = self.settings["output_file"].parent
+        artifacts = {path: path.read_bytes() for path in artifact_dir.rglob("*") if path.is_file()}
+        classifier["train_on_benchmark"] = False
+        self.config["output_dir"] = str(self.root / "new_run")
+        self.config_path.write_text(json.dumps(self.config))
+        self.model.generate_nominal.reset_mock()
+        output = self.root / "new_run/rynnbrain_benchmark"
+        with patch("rynnbrain_vlm.cop_classifier.prepare_training_vectors", side_effect=AssertionError("No vector preparation in reuse mode")), \
+             patch("rynnbrain_vlm.cop_classifier.train_from_saved_vectors", side_effect=AssertionError("No training in reuse mode")):
+            self._check_benchmark_workflow(knn=knn, output=output)
+        self.model.generate_nominal.assert_not_called()
+        self.assertEqual(artifacts, {path: path.read_bytes() for path in artifact_dir.rglob("*") if path.is_file()})
+        runtime = json.loads((output / "benchmark_runtime.json").read_text())
+        self.assertEqual(runtime["classifier_mode"], "reuse")
+        self.assertEqual(runtime["classifier_preparation_sec"], 0.)
+        self.assertFalse((self.root / "new_run/cop_classifier").exists())
+
+    def _check_benchmark_workflow(self, knn=False, dino_requested=False, dino_success=True, output=None):
         import run_benchmark as benchmark
         # Exercise real preparation, fitting, scoring, and CSV/JSON output; only
         # the expensive VLM/ROS reads and unrelated PCA/ROC rendering are mocked.
-        output = self.root / "benchmark"
+        output = output or self.root / "benchmark"
         all_bags = [self.root / "data" / name for name in self.names + ["normal_test", "failure_test"]]
         argv = ["benchmark", "--config", str(self.config_path), "--data-root", str(self.root / "data"),
                 "--benchmark-dir", str(output)]
