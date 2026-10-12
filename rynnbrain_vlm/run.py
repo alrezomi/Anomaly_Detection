@@ -17,6 +17,7 @@ import pandas as pd
 from PIL import Image, ImageDraw
 
 from rosbag_io import RosbagImageSource, sample_rosbag_image_frames_uniform
+from pipeline_settings import load_pipeline_config
 from .cop_classifier import classifier_method, classifier_model_paths, load_classifier
 from .cop_analysis import save_cop_vector
 from .model import COP_REPRESENTATION_ID, RynnBrainModel
@@ -242,7 +243,7 @@ def _print_inputs(title: str, images: list[tuple[str, Image.Image]]) -> None:
 
 
 def _common_config(arguments: argparse.Namespace) -> tuple[dict, dict, int, dict]:
-    config = json.loads(arguments.config.read_text(encoding="utf-8"))
+    config = load_pipeline_config(arguments.config)
     vlm = dict(config.get("rynnbrain", {}))
     if not vlm:
         raise ValueError("Add a 'rynnbrain' section to pipeline_config.json")

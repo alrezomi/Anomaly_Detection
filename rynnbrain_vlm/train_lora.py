@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import random
 from typing import Any
+from pipeline_settings import load_pipeline_config
 
 from .lora import answer_loss, attach_lora, resolve_bag_selection, supervised_example
 from .prompts import evaluation_prompt_multiturn, task_context_prompt
@@ -293,7 +294,7 @@ def main() -> None:
     parser.add_argument("--data-root", type=Path, default=Path(os.environ.get("ANOMALY_DATA_ROOT", "/data")))
     parser.add_argument("--validate-only", action="store_true", help="Check explicit bag lists without loading the model or training.")
     args = parser.parse_args()
-    config = json.loads(args.config.read_text(encoding="utf-8"))
+    config = load_pipeline_config(args.config)
     settings = training_settings(config)
     rows = resolve_bag_selection(settings, args.data_root, config["rynnbrain"]["reference_bags"])
     print(json.dumps({"bags": rows, "output_dir": settings["output_dir"]}, indent=2))

@@ -819,6 +819,61 @@ it is not the time at which an online system raised an alert. This supervision
 can help localization, but sparse frames and button timing still limit accuracy;
 evaluate improvement on bags held out from both training and validation.
 
+### One experiment output directory and shared cameras
+
+The RynnBrain training, test, classifier-training and benchmark commands now
+resolve missing paths from the top-level `output_dir`, without rewriting your
+JSON. Keep that experiment directory and one top-level `camera_topics` list.
+Remove these redundant keys from your personal config to use inheritance:
+
+- `rynnbrain.output_dir`
+- `rynnbrain.camera_topics` and `rynnbrain.memory_camera_topics`
+- `rynnbrain.lora.training.output_dir`
+- `rynnbrain.cop_classifier.training.input_dir`
+- `rynnbrain.cop_classifier.model_paths`
+
+For an experiment root such as `/outputs/experiments/pick_place_dino728_v130`,
+the resulting defaults are:
+
+| Setting | Relative to the experiment root |
+| --- | --- |
+| Single-test outputs | `rynnbrain/` |
+| Benchmark and classifier-training vectors | `rynnbrain_benchmark/` |
+| Temporal LoRA training output | `rynnbrain/lora_temporal_adapter/` |
+| Ordinary LoRA training output | `rynnbrain/lora_adapter/` |
+| Logistic classifier, raw mode | `cop_classifier/raw_logistic.npz` |
+| kNN classifier, raw mode | `cop_classifier/raw_knn.npz` |
+
+Explicit overrides still take precedence. An omitted or null individual output
+path selects its default; an omitted camera list inherits. Reference cameras
+inherit the VLM camera list, which inherits the top-level list. If you retain an
+old explicit path, changing the experiment root will **not** override it. LoRA
+and classifier training bag lists remain separate and are never inferred from
+one another. The shared DINO nominal cache stays at its configured location.
+
+`rynnbrain.model.lora_adapter_path` remains explicit: set it to null while
+training a new adapter, then set it to the path printed by training before
+evaluation. It is never selected automatically from the experiment folder.
+With `temporal_supervision: true`, a single top-camera topic still trains
+timestamped execution prefixes and failure-onset answer targets from the
+recorded error marker. `inference.feature_only` does not disable this training.
+Keep `cop_classifier.plot_timeline: true` to evaluate classifier onset times.
+
+Raw rosbag benchmarks (`source: "rosbag"`, `input_modes: ["raw"]`) now skip
+DINO automatically. The ordinary command is sufficient:
+
+```bash
+docker compose run --rm --build benchmark
+```
+
+Use `--with-dino` if you also want independent DINO results. Heatmap/video
+input modes continue running DINO by default, and `--skip-dino` still allows
+reuse of existing videos. `--skip-vlm` runs DINO only. If explicitly requested
+DINO processing fails, raw-rosbag VLM evaluation still proceeds; video/heatmap
+evaluation remains blocked by that failure. `benchmark_summary.csv` records
+`dino_status` separately from VLM results. Bag selection and training exclusions
+are unchanged; `--include-nominal-bags` remains optional and explicit.
+
 ### Feature-only classifier inference and runtime measurements
 
 To score CoP features without generating the execution answer, manually add this
@@ -1383,9 +1438,8 @@ without editing the config. Training output paths must match `model_paths`.
 The selected classifier is fitted on each run; the VLM/LoRA is not retrained.
 Setting `cop_classifier.enabled: false` disables automatic classifier preparation
 and scoring. The older `--prepare-classifier` flag remains an optional way to
-enable them for one run. `--skip-vlm` does not prepare a classifier. The normal
-command continues to run DINO as before; `--skip-dino` remains optional for
-raw ROS inputs if only VLM results are wanted.
+enable them for one run. `--skip-vlm` does not prepare a classifier. Raw-rosbag-only
+VLM benchmarks skip DINO automatically; use `--with-dino` to include its results.
 Classifier-training bags (including those recorded in the saved classifier)
 are excluded from benchmark test results, even with `--include-nominal-bags`.
 The clean table includes `failure_probability`; statistics include a separate
@@ -1505,12 +1559,13 @@ different NVIDIA platform.
 
 ## Benchmark across every demonstration
 
-`run_benchmark.py` scores the full DINO + RynnBrain (multi-turn) setup against
+`run_benchmark.py` scores the configured RynnBrain (multi-turn) setup against
 every bag under the data root that was **not** used as a DINO nominal bag
 (`nominal_bags`) or a RynnBrain nominal-demonstration bag
 (`rynnbrain.reference_bags`) — both are read straight from `pipeline_config.json`
-and automatically excluded. It reuses the existing DINO nominal cache, so build
-that once first:
+and automatically excluded. For raw rosbag-only VLM inputs, no DINO memory is
+needed. For heatmap/video inputs or an explicit `--with-dino` run, build the
+DINO nominal cache for the configured cameras once first:
 
 ```bash
 docker compose run --rm vision-memory
