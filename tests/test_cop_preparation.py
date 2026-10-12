@@ -315,7 +315,20 @@ class ClassifierPreparationTests(unittest.TestCase):
             self.assertEqual(saved["sample_role"], "classifier_training")
             self.assertEqual(saved["lora_adapter_sha256"], "adapter_v1")
 
-    def _check_benchmark_workflow(self, knn=False):
+    def test_optional_dino_failure_does_not_block_raw_vlm_results(self):
+        self._check_benchmark_workflow(dino_requested=True, dino_success=False)
+
+    def test_compact_config_prepares_classifier_and_writes_benchmark(self):
+        classifier = self.config["rynnbrain"]["cop_classifier"]
+        del classifier["model_paths"]
+        del classifier["training"]["input_dir"]
+        self.config_path.write_text(json.dumps(self.config))
+        self.settings = configured_training_settings(self.config_path)
+        self._check_benchmark_workflow()
+        self.assertTrue((self.root / "outputs/cop_classifier/raw_logistic.npz").is_file())
+        self.assertTrue((self.root / "outputs/rynnbrain_benchmark/normal_1/rynnbrain_multiturn/cop_vectors/raw.npy").is_file())
+
+    def _check_benchmark_workflow(self, knn=False, dino_requested=False, dino_success=True):
         import run_benchmark as benchmark
         # Exercise real preparation, fitting, scoring, and CSV/JSON output; only
         # the expensive VLM/ROS reads and unrelated PCA/ROC rendering are mocked.
@@ -323,6 +336,8 @@ class ClassifierPreparationTests(unittest.TestCase):
         all_bags = [self.root / "data" / name for name in self.names + ["normal_test", "failure_test"]]
         argv = ["benchmark", "--config", str(self.config_path), "--data-root", str(self.root / "data"),
                 "--benchmark-dir", str(output)]
+        if dino_requested:
+            argv.append("--with-dino")
         # run_benchmark may have been imported by dependency-light selection tests.
         with patch("sys.argv", argv), patch.object(benchmark, "RynnBrainModel", return_value=self.model) as factory, \
              patch.object(benchmark, "discover_bags", return_value=all_bags), \
@@ -331,13 +346,13 @@ class ClassifierPreparationTests(unittest.TestCase):
                  "label": "fail" if path.name.startswith("failure") else "normal"}), \
              patch.object(benchmark, "evaluate_multiturn", self.run.evaluate_multiturn), \
              patch.object(benchmark, "write_multiturn_outputs", self.run.write_multiturn_outputs), \
-             patch.object(benchmark, "_run_dino_test", return_value=True) as dino, \
+             patch.object(benchmark, "_run_dino_test", return_value=dino_success) as dino, \
              patch.object(benchmark, "analyze_saved_vectors", return_value=None), \
              patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
             benchmark.main()
         factory.assert_called_once_with(self.config["rynnbrain"]["model"])
         test_names = ["normal_test", "failure_test"] + (self.names[2:] if knn else [])
-        self.assertEqual(dino.call_count, len(test_names))
+        self.assertEqual(dino.call_count, len(test_names) if dino_requested else 0)
         self.assertEqual(self.extractions, Counter(self.names + ["normal_test", "failure_test"]))
         clean = pd.read_csv(output / "benchmark_clean.csv")
         self.assertEqual(set(clean.bag_name), set(test_names))
@@ -349,6 +364,8 @@ class ClassifierPreparationTests(unittest.TestCase):
         else:
             self.assertTrue(clean.failure_probability.notna().all())
         summary = pd.read_csv(output / "benchmark_summary.csv")
+        expected_dino = ("succeeded" if dino_success else "failed") if dino_requested else "skipped"
+        self.assertTrue((summary.dino_status == expected_dino).all())
         self.assertTrue((summary.lora_adapter_sha256 == "adapter_v1").all())
         self.assertTrue((summary.response_source == "lora_adapted_model").all())
         for name in test_names:

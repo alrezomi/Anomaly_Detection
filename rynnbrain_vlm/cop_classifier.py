@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from pipeline_settings import load_pipeline_config
 
 from .cop_analysis import SavedCoPVector, discover_saved_vectors
 
@@ -618,7 +619,7 @@ def _resolved_training_settings(arguments: argparse.Namespace) -> dict[str, Any]
     classifier_config: dict[str, Any] = {}
     training_config: dict[str, Any] = {}
     if arguments.config is not None:
-        config = json.loads(arguments.config.read_text(encoding="utf-8"))
+        config = load_pipeline_config(arguments.config)
         classifier_config = dict(config.get("rynnbrain", {}).get("cop_classifier", {}))
         training_config = dict(classifier_config.get("training", {}))
 
@@ -873,7 +874,7 @@ def main() -> None:
     if arguments.refresh_vectors and arguments.config is None:
         raise ValueError("--refresh-vectors needs --config to extract using the current model settings.")
     if arguments.config is not None and not arguments.saved_vectors_only:
-        config = json.loads(arguments.config.read_text(encoding="utf-8"))
+        config = load_pipeline_config(arguments.config)
         paths, _ = prepare_training_vectors(
             config, settings, data_root=arguments.data_root, refresh=arguments.refresh_vectors
         )

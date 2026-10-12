@@ -3,11 +3,10 @@
 For every ROS 2 bag under the data root that was not used to build the DINO
 nominal memory or the RynnBrain task memory, this:
 
-1. Runs DINO test mode (`run_rosbag_vision.py --mode test`) against that bag,
-   reusing the existing nominal cache and task memory unchanged.
-2. Runs the RynnBrain multi-turn evaluation against the videos DINO produced,
-   reusing one already-loaded VLM across every bag instead of reloading it
-   per bag.
+1. Runs DINO test mode when videos/heatmaps are needed or --with-dino is
+   requested. Raw rosbag-only VLM evaluation automatically skips DINO.
+2. Runs RynnBrain multi-turn evaluation using the configured images, reusing
+   one already-loaded VLM across every bag instead of reloading it per bag.
 3. Writes each bag's full output (videos, CSVs, VLM responses) into its own
    folder, and appends one row per (bag, input_mode) to a single benchmark
    summary table.
@@ -28,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from pipeline_settings import load_pipeline_config
 
 from build_dataset_manifest import discover_bags, infer_bag_record
 from rynnbrain_vlm.benchmark_roc import failure_category, write_roc_report, write_probability_roc_report, write_anomaly_roc_report
@@ -107,10 +107,22 @@ def parse_arguments() -> argparse.Namespace:
             "RynnBrain reference bags remain excluded to prevent direct leakage."
         ),
     )
-    parser.add_argument("--skip-dino", action="store_true", help="Reuse already-generated per-bag videos/CSVs.")
+    dino_options = parser.add_mutually_exclusive_group()
+    dino_options.add_argument("--skip-dino", action="store_true", help="Skip DINO; video/heatmap input modes require existing files.")
+    dino_options.add_argument("--with-dino", action="store_true", help="Also run DINO when the VLM uses raw rosbag images (otherwise skipped automatically).")
     parser.add_argument("--skip-vlm", action="store_true", help="Only run the DINO stage.")
     parser.add_argument("--prepare-classifier", action="store_true", help="Enable classifier preparation/scoring for this run even if disabled in config; otherwise preparation is automatic when cop_classifier.enabled=true.")
     return parser.parse_args()
+
+
+def _raw_rosbag_inputs(vlm):
+    return vlm.get("source") == "rosbag" and list(vlm.get("input_modes", ["raw"])) == ["raw"]
+
+
+def _should_run_dino(arguments, vlm):
+    if arguments.skip_dino:
+        return False
+    return bool(getattr(arguments, "with_dino", False) or arguments.skip_vlm or not _raw_rosbag_inputs(vlm))
 
 
 def _excluded_bag_names(
@@ -356,6 +368,8 @@ def _run_benchmark(arguments, config, update) -> None:
     camera_topics = list(config.get("camera_topics", []))
     frame_count = int(vlm.get("num_frames", 4))
     generation = dict(vlm.get("generation", {}))
+    run_dino = _should_run_dino(arguments, vlm)
+    print("DINO: enabled" if run_dino else "DINO: skipped; raw rosbag VLM inputs do not need DINO. Heatmap/video modes use existing files when explicitly skipped.")
 
     data_root = arguments.data_root or Path(os.environ.get("ANOMALY_DATA_ROOT", "/data"))
     stage_topic = config.get("stage_topic", "/recording_stage")
@@ -461,13 +475,18 @@ def _run_benchmark(arguments, config, update) -> None:
         update(phase="evaluation", current_bag=bag_name, selected_bags=len(candidates))
 
         dino_ok = True
-        if not arguments.skip_dino:
+        if run_dino:
             dino_ok = _run_dino_test(config, bag_path, bag_output_dir)
-        dino_summary = _dino_summary(camera_topics, bag_output_dir) if dino_ok else {}
+        # Keep the explicit --skip-dino option's legacy saved-summary behavior.
+        # Automatic skipping must not present stale DINO metrics as newly run.
+        dino_summary = (_dino_summary(camera_topics, bag_output_dir)
+                        if dino_ok and (run_dino or arguments.skip_dino) else {})
+        dino_summary.update(dino_status="succeeded" if run_dino and dino_ok else "failed" if run_dino else "skipped")
 
         rows: list[dict[str, Any]] = []
-        evaluation_error = None if dino_ok else "DINO processing failed; VLM evaluation was not run."
-        if model is not None and dino_ok:
+        inputs_ready = dino_ok or _raw_rosbag_inputs(vlm)
+        evaluation_error = None if inputs_ready else "DINO processing failed; VLM evaluation was not run."
+        if model is not None and inputs_ready:
             vlm_bag = dict(vlm)
             vlm_bag["output_dir"] = str(bag_output_dir / "rynnbrain_multiturn")
             vlm_bag["ground_truth_label"] = ground_truth
@@ -669,7 +688,7 @@ def _run_benchmark(arguments, config, update) -> None:
 
 def main() -> None:
     arguments = parse_arguments()
-    config = json.loads(arguments.config.read_text(encoding="utf-8"))
+    config = load_pipeline_config(arguments.config)
     base = config.get("rynnbrain", {}).get("output_dir", str(Path(config.get("output_dir", "outputs")) / "rynnbrain"))
     directory = arguments.benchmark_dir or Path(f"{base}_benchmark")
     with record_run(directory, "benchmark") as update:
