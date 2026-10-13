@@ -29,6 +29,41 @@ SAMPLING_NOTE = ("Live elapsed-time sampling differs from whole-bag training sam
                  "Scores are diagnostic; online accuracy and thresholds are not yet validated.")
 
 
+def signature_differences(saved, current, prefix="comparison_signature"):
+    """Explain the existing strict comparison without weakening compatibility."""
+    missing = object()
+    def display(value):
+        if value is missing:
+            return "<missing>"
+        text = json.dumps(value, ensure_ascii=False)
+        return text if len(text) <= 240 else text[:237] + "..."
+    if isinstance(saved, dict) and isinstance(current, dict):
+        differences = []
+        for key in sorted(saved.keys() | current.keys()):
+            before, after = saved.get(key, missing), current.get(key, missing)
+            path = f"{prefix}.{key}"
+            if before is missing or after is missing:
+                differences.append(f"{path}: saved={display(before)}; current={display(after)}")
+            else:
+                differences.extend(signature_differences(before, after, path))
+        return differences
+    if saved == current:
+        return []
+    return [f"{prefix}: saved={display(saved)}; current={display(current)}"]
+
+
+def validate_online_classifier(classifier, signature, representation_id, path):
+    differences = signature_differences(classifier.comparison_signature, signature)
+    differences += signature_differences(classifier.representation_id, representation_id, "representation_id")
+    if differences:
+        raise ValueError(
+            f"Saved classifier does not match the current feature extractor: {path}\n"
+            + "\n".join("- " + item for item in differences)
+            + "\nBoth kNN and logistic replay are supported. Use the feature settings saved with this classifier, "
+              "or train a new classifier and its prefix companion with the current settings in a new output path. "
+              "Replay does not train models; train_on_benchmark applies only to benchmarks.")
+
+
 def finish_verification(check, cached_score, uncached_score, threshold):
     """Keep independent feature, score and decision checks visible."""
     difference = abs(uncached_score - cached_score)
@@ -149,10 +184,7 @@ class OnlineDetector:
         generation = vlm.get("generation", {})
         self.signature = cop_comparison_signature(self.model, config, vlm, "raw", self.response,
                                                  self.frame_count, generation)
-        if (self.complete.representation_id != COP_REPRESENTATION_ID or
-                self.complete.comparison_signature != self.signature):
-            raise ValueError("Classifier does not match the selected LoRA, reference, cameras or feature settings. "
-                             "Online replay never retrains or replaces classifiers.")
+        validate_online_classifier(self.complete, self.signature, COP_REPRESENTATION_ID, self.path)
         self.prefix = load_prefix_detector(self.path, self.complete) if self.knn else None
         self.onset = onset_enabled(settings)
         self.classifier = self.complete
@@ -281,7 +313,7 @@ class ReplayApplication:
 
     def snapshot(self):
         with self.lock:
-            return json.loads(json.dumps(self.state))
+            return json.loads(json.dumps({**self.state, "model_ready": bool(getattr(self, "detector", None))}))
 
     def start(self, index, interval=None, mode=None):
         with self.lock:
@@ -525,7 +557,9 @@ def main():
     app = ReplayApplication(config, bags, args.interval_sec, args.verify_cache, args.diagnose_cache)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
     print(f"Replay HTTP server listening on {args.host}:{args.port}. Open http://127.0.0.1:{args.port} on the lab PC.", flush=True)
-    print("From another PC, forward this port through SSH or VS Code first. The page is available while the model loads.", flush=True)
+    print("From another PC, forward this port through SSH or VS Code first. Open the LOCAL forwarded port in your browser "
+          "(e.g. http://127.0.0.1:18765 for a tunnel from local 18765 to lab 8765). "
+          "The page is available while the model loads.", flush=True)
     print(SAMPLING_NOTE, flush=True)
     app.worker.start()
     # Compose sends SIGTERM, whereas an interactive Python session gets SIGINT.
