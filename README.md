@@ -903,18 +903,12 @@ existing final-normalized prompt-end vector, and updates a browser video/score
 view. It stops at `rynnbrain.num_frames` (at most eight), or at the end of the
 bag. This first version is recorded-bag replay, not a live ROS subscriber.
 
-No config changes or new Compose service are required. Use your existing,
-trained LoRA and classifier paths. This command **never trains** either model,
-regardless of `train_on_benchmark`. It does not run DINO. Start with the cache
-verification enabled on the lab PC:
+No config changes are required. Use your existing trained LoRA and classifier
+paths. This command **never trains** either model, regardless of
+`train_on_benchmark`. It does not run DINO. Start the service on the lab PC:
 
 ```bash
-docker compose run --rm --build \
-  -p 127.0.0.1:8765:8765 --entrypoint python \
-  rynnbrain-test-multiturn \
-  -m rynnbrain_vlm.online_replay \
-  --config /config/pipeline_config.json --host 0.0.0.0 \
-  --interval-sec 10 --verify-cache
+docker compose up --build online-replay
 ```
 
 On the lab PC open `http://localhost:8765`. From a different PC, forward port
@@ -924,16 +918,41 @@ On the lab PC open `http://localhost:8765`. From a different PC, forward port
 ssh -N -L 8765:127.0.0.1:8765 steribot@172.17.21.63
 ```
 
-Then open `http://localhost:8765` locally. Wait for **ready**, select a bag,
-and click **Start execution**. The default bag is `test_bag`. Add repeated
+Then open `http://127.0.0.1:8765` locally (or the actual forwarded address shown
+by VS Code if it chose another local port). Windows localhost is not the lab PC
+unless the tunnel is running. Wait for **ready**, select a bag, set the interval
+and processing mode in the browser, and click **Start execution**:
+
+- **Cached only (fast)**: default; no uncached pass, checks shown as not checked.
+- **Diagnostics (compare all observations)**: checks every observation and uses
+  the uncached score if a check fails, retaining both results for investigation.
+- **Strict verification (stop on mismatch)**: stops at the first failed check.
+
+Settings apply to the next execution and stay selected for this server session;
+they do not edit the config or retrain/reload the model. After restarting the
+service, the defaults are cached-only replay and a 10-second interval.
+The default bag is `test_bag`. Advanced CLI usage still supports repeated
 `--bag /data/path/to/bag` arguments to the application command to list several
 executions without reloading the model. Training/reference bags are rejected;
 the application reads the adapter and classifier artifact training manifests.
 **Stop** takes effect between model updates; it cannot cancel a GPU kernel.
 Leave the terminal open to retain the model. Ctrl+C shuts down after the current
-update and saves its results.
+update and saves its results. For a Compose-managed service, allow an in-flight
+model call time to finish when stopping: `docker compose stop -t 120 online-replay`.
 
-`--interval-sec 10` selects observations at least ten seconds apart, starting
+If the page is blank, test the server in a second **lab PC** terminal:
+
+```bash
+curl --max-time 5 http://127.0.0.1:8765/state
+```
+
+If this returns `"status": "ready"`, the model is waiting for the browser's
+Start button; check SSH/VS Code port forwarding. If it returns `loading`, the
+JSON and browser show the initialization phase. If it fails, inspect
+`docker compose logs --tail 80 online-replay`. Startup failures also print their
+traceback. The HTTP page is served independently of model initialization.
+
+The browser's interval (default 10 seconds) selects observations at least that far apart, starting
 at `sampling_start_sec`. Selection uses only frames that have already arrived;
 it does not look at the bag end or error-button annotation. If inference takes
 longer, the worker uses the latest available eligible frame. The producer uses
@@ -943,7 +962,7 @@ cover only part of a long bag. Change the interval deliberately for your task;
 it is not automatically chosen from the bag duration. There is no rolling
 window or cache eviction in this version.
 
-With `--verify-cache`, every selected prefix is also evaluated by the original
+With strict verification (also available as `--verify-cache`), every selected prefix is also evaluated by the original
 uncached feature extractor. The application saves both vectors, relative L2
 error, cosine similarity, score difference, and separate feature timings. It
 stops on relative L2 error above `1e-3`, score difference above `1e-3`, or a
@@ -952,6 +971,19 @@ passes on your real adapter/hardware, omit `--verify-cache` for the normal fast
 path. Local regression coverage uses a small real Qwen3-VL with active LoRA,
 multi-token images, varying image grids, and DeepStack features; it is not a
 speed or accuracy measurement on the lab GPU.
+
+If strict verification stops, select **Diagnostics** in the browser (CLI:
+`--diagnose-cache`) to investigate all available observations (up to eight). This mode retains the
+same limits and checks every prefix. On a mismatch it displays/saves the
+**uncached** score and vector, while retaining the cached candidate separately
+as `frame_*_cached.npy`. Failed checks remain failed: the JSON has
+`cache_verification_status: "failed"` even if replay completes. Each row records
+`score_computation`, the separate feature/score/decision checks, and both scores.
+The browser explicitly labels fallback rows and reports the failed limits.
+This mode collects diagnostics; it neither fixes nor approves a mismatching
+cache, and is not a measurement of cached-only end-to-end latency. Missing,
+invalid, or non-finite baseline outputs still stop the run. Config, classifier,
+LoRA and tolerance values are not changed.
 
 The reference text is reused from the saved classifier. Its KV cache is built
 with the active inference LoRA, matching the existing second-turn computation;
@@ -980,8 +1012,9 @@ Every execution has a unique directory under
   scores, verification results and elapsed times, including partial/error runs.
 - `online_scores.csv`: per-observation score, threshold, cached feature time,
   classifier time, observation-to-result delay and peak allocated GPU bytes.
-- `frame_*.jpg` and `frame_*.npy`: selected observations and cached vectors;
-  `frame_*_uncached.npy` is added during verification.
+- `frame_*.jpg` and `frame_*.npy`: selected observations and scored vectors;
+  `frame_*_uncached.npy` is added during verification. Diagnostic fallback rows
+  use the uncached vector in the primary file and retain `frame_*_cached.npy`.
 - `online_timeline.png`: score/threshold plot after completion or stopping.
 
 The graph uses observation timestamps. The interface separately reports when

@@ -14,8 +14,10 @@ import json
 import math
 from pathlib import Path
 import queue
+import signal
 import threading
 import time
+import traceback
 from uuid import uuid4
 
 import numpy as np
@@ -25,6 +27,35 @@ from pipeline_settings import load_pipeline_config
 
 SAMPLING_NOTE = ("Live elapsed-time sampling differs from whole-bag training sampling. "
                  "Scores are diagnostic; online accuracy and thresholds are not yet validated.")
+
+
+def finish_verification(check, cached_score, uncached_score, threshold):
+    """Keep independent feature, score and decision checks visible."""
+    difference = abs(uncached_score - cached_score)
+    check.update(vector_within_tolerance=bool(check["within_tolerance"]),
+                 cached_score=cached_score, uncached_score=uncached_score,
+                 score_difference=difference, score_tolerance=.001,
+                 score_within_tolerance=difference <= .001,
+                 cached_above_threshold=cached_score >= threshold,
+                 uncached_above_threshold=uncached_score >= threshold,
+                 decisions_match=(cached_score >= threshold) == (uncached_score >= threshold))
+    check["failed_checks"] = [name for name, key in (
+        ("feature_vector", "vector_within_tolerance"), ("classifier_score", "score_within_tolerance"),
+        ("threshold_decision", "decisions_match")) if not check[key]]
+    check["within_tolerance"] = not check["failed_checks"]
+    return check
+
+
+def verification_failure_message(check):
+    detail = []
+    if "relative_l2_difference" in check:
+        detail.append(f"feature difference {check['relative_l2_difference']:.3%} "
+                      f"(limit {check['relative_l2_tolerance']:.3%})")
+    if "score_difference" in check:
+        detail.append(f"score difference {check['score_difference']:.6g} (limit {check['score_tolerance']:.6g})")
+    if "decisions_match" in check:
+        detail.append("decisions match" if check["decisions_match"] else "DECISIONS DIFFER")
+    return "Cached/uncached verification failed" + (": " + "; ".join(detail) if detail else "")
 
 
 class ReplayFeed:
@@ -82,7 +113,7 @@ def synchronized_time():
 
 class OnlineDetector:
     """Load once, reset execution cache between bags, never train artifacts."""
-    def __init__(self, config):
+    def __init__(self, config, progress=lambda message: None):
         from .model import RynnBrainModel, COP_REPRESENTATION_ID
         from .cop_classifier import classifier_model_paths, classifier_method, load_classifier
         from .cop_knn import CoPKNNDetector
@@ -113,6 +144,7 @@ class OnlineDetector:
         self.response = self.complete.comparison_signature.get("nominal_response")
         if not isinstance(self.response, str):
             raise ValueError("The classifier must contain its saved nominal-reference response.")
+        progress("Loading VLM and LoRA adapter")
         self.model = RynnBrainModel(vlm["model"])
         generation = vlm.get("generation", {})
         self.signature = cop_comparison_signature(self.model, config, vlm, "raw", self.response,
@@ -132,6 +164,7 @@ class OnlineDetector:
         self.excluded.update(self.complete.metadata.get("training_bags", []))
         self.excluded.update(self.classifier.metadata.get("training_bags", []))
         self.excluded.update(Path(value).name for value in vlm.get("reference_bags", []))
+        progress("Reading nominal reference images")
         nominal = []
         temporal = bool(self.model.temporal_profile)
         for bag in vlm.get("reference_bags", []):
@@ -142,6 +175,7 @@ class OnlineDetector:
         if not nominal:
             raise ValueError("No nominal reference images were loaded.")
         task = vlm.get("task_description", "Robot manipulation task")
+        progress("Preparing reusable reference cache (first model inference)")
         self.cache = CachedExecution(self.model,
             dict(role="user", images=nominal, text=task_context_prompt(task, temporal=temporal)),
             self.response, evaluation_prompt_multiturn(task, "raw", temporal=temporal), generation,
@@ -189,11 +223,8 @@ class OnlineDetector:
             uncached_sec = synchronized_time() - started
             check = vector_difference(baseline, vector)
             baseline_score, _ = self.score(baseline, index)
-            difference = abs(baseline_score - score)
-            check.update(uncached_feature_sec=uncached_sec, uncached_score=baseline_score,
-                         score_difference=difference, score_tolerance=.001)
-            check["within_tolerance"] = bool(check["within_tolerance"] and difference <= .001 and
-                                              (baseline_score >= threshold) == (score >= threshold))
+            check["uncached_feature_sec"] = uncached_sec
+            finish_verification(check, score, baseline_score, threshold)
         self.last_timestamp = timestamp
         return dict(sample_index=index, timestamp_sec=timestamp, anomaly_score=score,
                     threshold=threshold, above_threshold=score >= threshold,
@@ -214,9 +245,10 @@ def save_plot(rows, path, probability):
     times = [row["timestamp_sec"] for row in rows]
     axis.plot(times, [row["anomaly_score"] * scale for row in rows], "o-", label="Score", color="#2f78c4")
     axis.plot(times, [row["threshold"] * scale for row in rows], "--", label="Threshold", color="#c27524")
+    fallback = any(row.get("score_computation") == "uncached_verification_fallback" for row in rows)
     axis.set(xlabel="Observation time from bag start (s)",
              ylabel="Failure score (%)" if probability else "Anomaly distance",
-             title="Online replay · cached execution history")
+             title="Online replay · uncached fallback on failed checks" if fallback else "Online replay · cached execution history")
     axis.spines[["top", "right"]].set_visible(False)
     axis.grid(alpha=.15)
     axis.legend(frameon=False)
@@ -227,15 +259,19 @@ def save_plot(rows, path, probability):
 
 
 class ReplayApplication:
-    def __init__(self, config, bags, interval, verify):
-        self.config, self.bags, self.interval, self.verify = config, bags, interval, verify
+    def __init__(self, config, bags, interval, verify, diagnose=False):
+        self.config, self.bags, self.interval = config, bags, interval
+        self.verify, self.diagnose = bool(verify or diagnose), diagnose
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.shutdown = threading.Event()
         self.jobs = queue.Queue(maxsize=1)
         self.state = dict(status="loading", rows=[], bags=[str(bag) for bag in bags],
-                          note=SAMPLING_NOTE, verification_mode=verify, video_time_sec=None,
+                          note=SAMPLING_NOTE, verification_mode=self.verify, diagnostic_mode=diagnose,
+                          warning=None, cache_verification_status="not_requested", video_time_sec=None,
                           interval_sec=interval, output_directory=None)
+        self.state["replay_mode"] = "diagnostic" if diagnose else "strict" if verify else "cached"
+        self.state["initialization_phase"] = "Starting model worker"
         self.jpeg = None
         self.worker = threading.Thread(target=self._worker, daemon=True)
 
@@ -247,7 +283,7 @@ class ReplayApplication:
         with self.lock:
             return json.loads(json.dumps(self.state))
 
-    def start(self, index):
+    def start(self, index, interval=None, mode=None):
         with self.lock:
             if self.state["status"] not in {"ready", "completed", "stopped", "error"}:
                 raise ValueError("Wait for initialization or stop the current execution first.")
@@ -255,10 +291,20 @@ class ReplayApplication:
                 raise ValueError("Model initialization failed; inspect the error and restart the application.")
             if type(index) is not int or not 0 <= index < len(self.bags):
                 raise ValueError("Select a listed bag.")
+            interval = self.interval if interval is None else interval
+            mode = self.state["replay_mode"] if mode is None else mode
+            if type(interval) not in (int, float) or not math.isfinite(interval) or interval <= 0:
+                raise ValueError("Observation interval must be a finite positive number of seconds.")
+            if mode not in ("cached", "diagnostic", "strict"):
+                raise ValueError("Select cached replay, diagnostics, or strict verification.")
+            self.interval = float(interval)
+            self.verify, self.diagnose = mode != "cached", mode == "diagnostic"
             self.stop.clear()
             self.jpeg = None
             self.state.update(status="starting", rows=[], error=None, video_time_sec=None,
-                              output_directory=None, bag=str(self.bags[index]))
+                              output_directory=None, warning=None, cache_verification_status="pending" if self.verify else "not_requested",
+                              bag=str(self.bags[index]), interval_sec=self.interval,
+                              replay_mode=mode, verification_mode=self.verify, diagnostic_mode=self.diagnose)
             self.jobs.put_nowait(index)
 
     def publish(self, image, timestamp):
@@ -271,15 +317,22 @@ class ReplayApplication:
             self.state["video_time_sec"] = timestamp
 
     def _worker(self):
+        def progress(message):
+            self.update(initialization_phase=message)
+            print(f"Initialization: {message}", flush=True)
         try:
+            progress("Loading inference libraries")
             started = synchronized_time()
-            self.detector = OnlineDetector(self.config)
+            self.detector = OnlineDetector(self.config, progress=progress)
             self.update(status="ready", initialization_sec=synchronized_time() - started,
+                        initialization_phase="Ready — choose a bag and click Start execution",
                         score_source=self.detector.score_source,
                         score_kind="knn_distance" if self.detector.knn else "failure_probability",
                         max_frames=self.detector.frame_count)
+            print("Model ready. Waiting for Start execution in the browser; no bag runs automatically.", flush=True)
         except Exception as error:
             self.update(status="error", error=str(error))
+            traceback.print_exc()
             return
         while not self.shutdown.is_set():
             try:
@@ -290,6 +343,7 @@ class ReplayApplication:
                 self.run_bag(self.bags[index])
             except Exception as error:
                 self.update(status="error", error=str(error))
+                traceback.print_exc()
 
     def run_bag(self, bag):
         from rosbag_io import RosbagImageSource, iter_rosbag_image_frames
@@ -307,10 +361,17 @@ class ReplayApplication:
         metadata = dict(bag=str(bag), protocol="online_elapsed_time_latest_frame_v1", interval_sec=self.interval,
             max_frames=self.detector.frame_count, note=SAMPLING_NOTE, classifier_path=str(self.detector.path),
             score_source=self.detector.score_source, comparison_signature=self.detector.signature,
-            verification_mode=self.verify)
+            verification_mode=self.verify, diagnostic_mode=self.diagnose)
+
+        def verification_status():
+            checks = [row["verification"] for row in rows if row.get("verification")]
+            if any(not check["within_tolerance"] for check in checks):
+                return "failed"
+            return "passed_observed_prefixes" if checks else "pending" if self.verify else "not_requested"
 
         def persist():
             data = {**metadata, "status": status, "error": error, "rows": rows,
+                    "cache_verification_status": verification_status(),
                     "elapsed_sec": time.monotonic() - feed.origin}
             temporary = output / "online_results.tmp"
             temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -329,6 +390,23 @@ class ReplayApplication:
                     frame_id, timestamp, image = packet
                     self.update(status="scoring", scoring_time_sec=timestamp)
                     row, vector, baseline = self.detector.append(image, timestamp, self.verify)
+                    check = row.get("verification")
+                    failed = bool(check and not check["within_tolerance"])
+                    row["score_computation"] = "cached"
+                    # Diagnostics may continue, but a rejected cached score is
+                    # never used as the displayed/recorded detector result.
+                    if failed and self.diagnose:
+                        fallback_score = check.get("uncached_score")
+                        if baseline is None or fallback_score is None or not math.isfinite(fallback_score):
+                            raise RuntimeError("Cannot continue diagnostics without a finite uncached baseline.")
+                        row["cached_vector_file"] = f"frame_{len(rows) + 1:02d}_cached.npy"
+                        np.save(output / row["cached_vector_file"], vector)
+                        vector = baseline
+                        row.update(anomaly_score=fallback_score,
+                                   above_threshold=fallback_score >= row["threshold"],
+                                   score_computation="uncached_verification_fallback")
+                    else:
+                        row["cached_vector_file"] = None
                     row.update(frame_id=frame_id, result_time_sec=time.monotonic() - feed.origin,
                                observation_to_result_sec=time.monotonic() - feed.origin - timestamp)
                     row["vector_file"] = f"frame_{len(rows) + 1:02d}.npy"
@@ -348,8 +426,14 @@ class ReplayApplication:
                     print(f"{Path(bag).name}: {len(rows)}/{self.detector.frame_count}, "
                           f"t={timestamp:.3f}s, score={row['anomaly_score']:.5f}, "
                           f"threshold={row['threshold']:.5f}, cache={row['cached_feature_sec']:.3f}s", flush=True)
-                    if row["verification"] and not row["verification"]["within_tolerance"]:
-                        raise RuntimeError("Cached/uncached verification failed. See online_results.json; replay stopped.")
+                    if failed:
+                        message = verification_failure_message(check)
+                        if not self.diagnose:
+                            raise RuntimeError(message + ". Replay stopped. Select Diagnostics in the browser to collect all checks with uncached fallback scores.")
+                        warning = message + ". Diagnostic replay continues using the uncached score; cache remains UNVERIFIED."
+                        self.update(warning=warning)
+                        print(warning, flush=True)
+                    self.update(cache_verification_status=verification_status())
                     earliest = timestamp + self.interval
             status = "stopped" if self.stop.is_set() else "completed"
             if not rows and not self.stop.is_set():
@@ -366,7 +450,8 @@ class ReplayApplication:
                 error = f"{error or ''} Plot export failed: {failure}".strip()
                 status = "error"
                 persist()
-            self.update(status=status, error=error, rows=rows, scoring_time_sec=None)
+            self.update(status=status, error=error, rows=rows, scoring_time_sec=None,
+                        cache_verification_status=verification_status())
 
 
 def make_handler(app):
@@ -412,7 +497,7 @@ def make_handler(app):
                 if not isinstance(data, dict):
                     raise ValueError("Expected a JSON object")
                 if self.path == "/start":
-                    app.start(data.get("bag_index"))
+                    app.start(data.get("bag_index"), data.get("interval_sec"), data.get("mode"))
                 elif self.path == "/stop":
                     app.stop.set()
                 else:
@@ -429,6 +514,7 @@ def main():
     parser.add_argument("--bag", type=Path, action="append", help="Repeat to offer several bags without reloading the model; defaults to test_bag.")
     parser.add_argument("--interval-sec", type=float, default=10., help="Minimum elapsed time between selected observations; default 10 s.")
     parser.add_argument("--verify-cache", action="store_true", help="Recompute each prefix and stop on feature/score/decision mismatch. Adds diagnostic runtime.")
+    parser.add_argument("--diagnose-cache", action="store_true", help="Check every prefix, continuing mismatches with uncached scores. Cache remains unverified if any check fails.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
@@ -436,11 +522,17 @@ def main():
         parser.error("--interval-sec must be finite and positive")
     config = load_pipeline_config(args.config)
     bags = args.bag or [Path(config["test_bag"])]
-    app = ReplayApplication(config, bags, args.interval_sec, args.verify_cache)
+    app = ReplayApplication(config, bags, args.interval_sec, args.verify_cache, args.diagnose_cache)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
-    app.worker.start()
-    print(f"Online replay interface: http://{args.host}:{args.port} (model initializes once)", flush=True)
+    print(f"Replay HTTP server listening on {args.host}:{args.port}. Open http://127.0.0.1:{args.port} on the lab PC.", flush=True)
+    print("From another PC, forward this port through SSH or VS Code first. The page is available while the model loads.", flush=True)
     print(SAMPLING_NOTE, flush=True)
+    app.worker.start()
+    # Compose sends SIGTERM, whereas an interactive Python session gets SIGINT.
+    # Route both through the same cleanup so in-flight results can be saved.
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt
+    previous_sigterm = signal.signal(signal.SIGTERM, terminate)
     try:
         server.serve_forever(poll_interval=.2)
     except KeyboardInterrupt:
@@ -450,6 +542,7 @@ def main():
         app.stop.set()
         server.server_close()
         app.worker.join()
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

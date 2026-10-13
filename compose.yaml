@@ -84,6 +84,16 @@ services:
     entrypoint: ["python", "-m", "rynnbrain_vlm.run"]
     command: ["--config", "/config/pipeline_config.json"]
 
+  # Persistent model and browser controls for recorded-bag replay.
+  # `docker compose up --build online-replay` publishes the local-only port.
+  online-replay:
+    <<: *rynnbrain-common
+    stop_grace_period: 120s
+    entrypoint: ["python", "-u", "-m", "rynnbrain_vlm.online_replay"]
+    command: ["--config", "/config/pipeline_config.json", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:8765:8765"
+
   # Run DINO + RynnBrain multi-turn against every non-nominal demonstration,
   # one folder per bag plus one combined benchmark_summary.csv.
   benchmark:
