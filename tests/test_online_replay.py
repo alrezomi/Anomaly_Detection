@@ -14,10 +14,46 @@ import numpy as np
 from PIL import Image
 
 from rynnbrain_vlm.online_replay import (ReplayFeed, ReplayApplication, OnlineDetector, make_handler,
-                                       finish_verification, verification_failure_message)
+                                       finish_verification, verification_failure_message,
+                                       signature_differences, validate_online_classifier)
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_compatibility_reports_exact_fields_and_still_rejects_mismatch(self):
+        saved = {"model_config": {"lora_adapter_path": "/v102/adapter"},
+                 "enable_thinking": True, "test_camera_topics": ["top"], "legacy": None}
+        current = {"model_config": {"lora_adapter_path": "/v120/adapter"},
+                   "enable_thinking": False, "test_camera_topics": ["top"], "new": 8}
+        classifier = SimpleNamespace(comparison_signature=saved, representation_id="norm")
+        validate_online_classifier(classifier, saved, "norm", "raw_knn.npz")
+        with self.assertRaises(ValueError) as error:
+            validate_online_classifier(classifier, current, "norm2", "raw_knn.npz")
+        message = str(error.exception)
+        self.assertIn('comparison_signature.model_config.lora_adapter_path: saved="/v102/adapter"; current="/v120/adapter"', message)
+        self.assertIn("enable_thinking: saved=true; current=false", message)
+        self.assertIn("legacy: saved=null; current=<missing>", message)
+        self.assertIn("new: saved=<missing>; current=8", message)
+        self.assertIn('representation_id: saved="norm"; current="norm2"', message)
+        self.assertNotIn("test_camera_topics", message)
+        self.assertEqual(signature_differences(saved, saved), [])
+
+    def test_online_knn_uses_memory_and_threshold_for_current_prefix(self):
+        from rynnbrain_vlm.cop_knn import CoPKNNDetector
+        from rynnbrain_vlm.cop_timeline import PrefixDetector, timeline_sampling
+        signature = {"num_frames": 8}
+        complete = CoPKNNDetector(np.array([[-1., 0.], [0., -1.]]), 1, .9, "raw", "norm", signature, {})
+        memories = np.repeat(complete.nominal_vectors[None], 8, axis=0)
+        memories[0] = np.array([[1., 0.], [0., 1.]])
+        thresholds = np.linspace(.2, .9, 8)
+        detector = OnlineDetector.__new__(OnlineDetector)
+        detector.knn, detector.complete, detector.signature = True, complete, signature
+        detector.prefix = PrefixDetector(memories, thresholds, timeline_sampling({}, 8))
+        first_score, first_threshold = detector.score(np.array([1., 0.]), 0)
+        self.assertEqual((first_score, first_threshold), (0., .2))
+        final_score, final_threshold = detector.score(np.array([1., 0.]), 7)
+        self.assertAlmostEqual(final_score, np.sqrt(2))
+        self.assertEqual(final_threshold, .9)
+
     def test_report_identifies_feature_only_failure_without_relaxing_limits(self):
         report = finish_verification(dict(relative_l2_difference=.003925737583476273,
             relative_l2_tolerance=.001, within_tolerance=False),

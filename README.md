@@ -915,11 +915,13 @@ On the lab PC open `http://localhost:8765`. From a different PC, forward port
 8765 using VS Code's Ports panel, or establish an SSH tunnel:
 
 ```bash
-ssh -N -L 8765:127.0.0.1:8765 steribot@172.17.21.63
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:18765:127.0.0.1:8765 steribot@172.17.21.63
 ```
 
-Then open `http://127.0.0.1:8765` locally (or the actual forwarded address shown
-by VS Code if it chose another local port). Windows localhost is not the lab PC
+For this SSH command, open **http://127.0.0.1:18765** on Windows. The server
+still uses **8765** on the lab PC; **18765** is only the local tunnel entrance.
+If using VS Code forwarding instead, open the actual forwarded address shown
+in its Ports panel. Windows localhost is not the lab PC
 unless the tunnel is running. Wait for **ready**, select a bag, set the interval
 and processing mode in the browser, and click **Start execution**:
 
@@ -1004,6 +1006,24 @@ is not validated task-progress alignment, and a logistic score is not a
 guaranteed calibrated onset probability. Cache equivalence checks verify the
 computation for identical inputs, not online detection accuracy. No automatic
 classifier retraining or threshold adjustment is performed.
+
+Both logistic regression and kNN work with incremental cached observations.
+The selected classifier must match the feature extractor that produced its
+training vectors: LoRA identity, reference, camera inputs, prompts and other
+recorded feature settings. A mismatch now lists each differing field and its
+saved/current values. Experiment folder numbers need not match, but switching
+to an unrelated saved classifier does not make its feature space compatible.
+The application keeps this check strict for both methods.
+
+kNN additionally needs the matching `raw_knn_timeline.npz` and JSON companion
+beside `raw_knn.npz`. It compares each observed prefix with nominal memories
+for the same observation count; it does not wait for all eight test images.
+To prepare a new compatible kNN memory, choose a **new** `model_paths.raw`
+destination, keep `method: "knn"` and `plot_timeline: true`, then run
+`docker compose run --rm --build cop-classifier-train`. This uses the current
+LoRA and nominal training list and prepares the prefix memories too. Replay
+never invokes training, even if `train_on_benchmark` is true. Stop the replay
+service before training, then restart it to load the new artifacts.
 
 Every execution has a unique directory under
 `<output_dir>/online_replay/<timestamp_uuid>/<bag>/` containing:
