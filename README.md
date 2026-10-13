@@ -893,6 +893,102 @@ overrides it. Both can replace the configured classifier artifact, so choose a
 new artifact path when intentionally training a separate version. Setting
 `enabled: false` disables scoring entirely; it is not the reuse option.
 
+### Online replay interface (eight observations)
+
+The separate replay application keeps RynnBrain, the selected LoRA, the saved
+classifier, and a nominal-reference KV cache alive between executions. It reads
+one camera from a recorded bag on its original timestamp clock. A separate
+inference worker appends selected frames to the execution cache, extracts the
+existing final-normalized prompt-end vector, and updates a browser video/score
+view. It stops at `rynnbrain.num_frames` (at most eight), or at the end of the
+bag. This first version is recorded-bag replay, not a live ROS subscriber.
+
+No config changes or new Compose service are required. Use your existing,
+trained LoRA and classifier paths. This command **never trains** either model,
+regardless of `train_on_benchmark`. It does not run DINO. Start with the cache
+verification enabled on the lab PC:
+
+```bash
+docker compose run --rm --build \
+  -p 127.0.0.1:8765:8765 --entrypoint python \
+  rynnbrain-test-multiturn \
+  -m rynnbrain_vlm.online_replay \
+  --config /config/pipeline_config.json --host 0.0.0.0 \
+  --interval-sec 10 --verify-cache
+```
+
+On the lab PC open `http://localhost:8765`. From a different PC, forward port
+8765 using VS Code's Ports panel, or establish an SSH tunnel:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 steribot@172.17.21.63
+```
+
+Then open `http://localhost:8765` locally. Wait for **ready**, select a bag,
+and click **Start execution**. The default bag is `test_bag`. Add repeated
+`--bag /data/path/to/bag` arguments to the application command to list several
+executions without reloading the model. Training/reference bags are rejected;
+the application reads the adapter and classifier artifact training manifests.
+**Stop** takes effect between model updates; it cannot cancel a GPU kernel.
+Leave the terminal open to retain the model. Ctrl+C shuts down after the current
+update and saves its results.
+
+`--interval-sec 10` selects observations at least ten seconds apart, starting
+at `sampling_start_sec`. Selection uses only frames that have already arrived;
+it does not look at the bag end or error-button annotation. If inference takes
+longer, the worker uses the latest available eligible frame. The producer uses
+up to 15 camera frames/s for preview, with a one-frame mailbox, so inference
+never accumulates a queue of old frames. The eight selected observations may
+cover only part of a long bag. Change the interval deliberately for your task;
+it is not automatically chosen from the bag duration. There is no rolling
+window or cache eviction in this version.
+
+With `--verify-cache`, every selected prefix is also evaluated by the original
+uncached feature extractor. The application saves both vectors, relative L2
+error, cosine similarity, score difference, and separate feature timings. It
+stops on relative L2 error above `1e-3`, score difference above `1e-3`, or a
+changed threshold decision. Verification increases observed latency; after it
+passes on your real adapter/hardware, omit `--verify-cache` for the normal fast
+path. Local regression coverage uses a small real Qwen3-VL with active LoRA,
+multi-token images, varying image grids, and DeepStack features; it is not a
+speed or accuracy measurement on the lab GPU.
+
+The reference text is reused from the saved classifier. Its KV cache is built
+with the active inference LoRA, matching the existing second-turn computation;
+the base-model reference-generation cache is never substituted. Each new image
+alone goes through the vision encoder. The execution-frame KV history is
+retained, while temporary evaluation-instruction states are cropped after each
+score. Image coordinates and masks are derived from the same full prompt.
+Current prompt tokenization/image preprocessing still prepares the selected
+history; the expensive old-image vision/decoder computations are reused. A new
+execution gets a fresh copy of the fixed reference cache. Weights remain fixed.
+
+Logistic scoring uses the saved onset classifier when `logistic_onset.enabled`
+is true, otherwise the saved complete-execution classifier. kNN uses the saved
+prefix memories/thresholds by observation index; its timeline companion must
+exist. **These scores are diagnostic:** elapsed-time live sampling differs from
+the completed-bag sampling used for existing training. A kNN observation index
+is not validated task-progress alignment, and a logistic score is not a
+guaranteed calibrated onset probability. Cache equivalence checks verify the
+computation for identical inputs, not online detection accuracy. No automatic
+classifier retraining or threshold adjustment is performed.
+
+Every execution has a unique directory under
+`<output_dir>/online_replay/<timestamp_uuid>/<bag>/` containing:
+
+- `online_results.json`: incrementally saved status, source/model identity,
+  scores, verification results and elapsed times, including partial/error runs.
+- `online_scores.csv`: per-observation score, threshold, cached feature time,
+  classifier time, observation-to-result delay and peak allocated GPU bytes.
+- `frame_*.jpg` and `frame_*.npy`: selected observations and cached vectors;
+  `frame_*_uncached.npy` is added during verification.
+- `online_timeline.png`: score/threshold plot after completion or stopping.
+
+The graph uses observation timestamps. The interface separately reports when
+the result became available and how far its observation lags the camera view.
+These files do not overwrite benchmark reports or model artifacts. Frame
+preprocessing and inference errors remain visible in the interface.
+
 Raw rosbag benchmarks (`source: "rosbag"`, `input_modes: ["raw"]`) now skip
 DINO automatically. The ordinary command is sufficient:
 
