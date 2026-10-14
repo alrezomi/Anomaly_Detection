@@ -50,6 +50,8 @@ class CachedExecution:
         self.cached_ids = self.reference_ids.clone()
         self.images = []
         self.failed = False
+        self.last_visual_descriptor = None
+        self.last_visual_error = None
 
     @staticmethod
     def _validate(inputs):
@@ -81,7 +83,7 @@ class CachedExecution:
                               pixel_values=inputs["pixel_values"][pixel_start:pixel_end])
         return result
 
-    def append(self, label, image):
+    def append(self, label, image, *, capture_visual=False):
         if self.failed:
             raise RuntimeError("The online cache failed; reset before starting another execution.")
         if len(self.images) >= self.max_frames:
@@ -105,10 +107,25 @@ class CachedExecution:
             raise ValueError("Expected new image tokens followed by the evaluation prompt.")
         positions = self._positions(inputs)
         captured = []
+        self.last_visual_descriptor = None
+        self.last_visual_error = None
         try:
             with torch.inference_mode():
-                output = self.wrapper.model(**self._chunk(inputs, positions, start, boundary,
-                    image_count - 1, 1), past_key_values=self.cache, use_cache=True, logits_to_keep=1)
+                visual_hook = None
+                if capture_visual:
+                    from .visual_matching import pool_visual_tokens
+                    def capture_image(_module, _args, output):
+                        try:
+                            self.last_visual_descriptor = pool_visual_tokens(output[0])
+                        except (ValueError, RuntimeError) as error:
+                            self.last_visual_error = str(error)
+                    visual_hook = self.base.visual.register_forward_hook(capture_image)
+                try:
+                    output = self.wrapper.model(**self._chunk(inputs, positions, start, boundary,
+                        image_count - 1, 1), past_key_values=self.cache, use_cache=True, logits_to_keep=1)
+                finally:
+                    if visual_hook is not None:
+                        visual_hook.remove()
                 self.cache = output.past_key_values
                 def capture(_module, _args, hidden):
                     captured.append(hidden[0, -1].detach().float().cpu().clone())

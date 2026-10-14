@@ -1049,6 +1049,47 @@ processes its selected bag set and exports combined tables/plots. The GUI
 processes only the bag you start, saving each execution under `online_replay/`.
 It does not launch or monitor a benchmark, nor automatically combine its results.
 
+The GUI's **Stage match preview** displays the exact scored observation beside
+its closest nominal image in the recorded stage. This is an experimental
+retrieval preview; it does **not** replace the CoP classifier memory, change the
+anomaly score, or recalibrate thresholds. A history-dependent CoP vector cannot
+simply be replaced by an independent image descriptor.
+
+The descriptor is the float32 mean of one image's Qwen3-VL visual-merger tokens,
+L2-normalized for cosine comparison. It is not a learned CLS token. Replay
+captures these tokens from the existing new-image forward pass, so it adds no
+second vision/VLM pass per observation. Retrieval quality still needs checking
+on your images. The preview reports the selected stage, nominal bag/time,
+cosine distance and candidate count. Lower distance means greater visual
+similarity, not a calibrated failure probability.
+
+On the first execution with this preview enabled, the worker prepares up to
+eight nominal images **per stage per nominal bag**, using the existing
+`cop_classifier.training.normal_bags` list, or `reference_bags` if that list is
+empty. It encodes these images once without language decoding. The page remains
+responsive and shows preparation progress; Stop also cancels preparation.
+Memory is reused in the session and cached under
+`<output_dir>/online_replay/visual_memory/`. Recording identity, stage annotations
+and feature settings invalidate stale cache entries. This cache is separate
+from the trained kNN/logistic artifacts. No new config paths are required.
+
+The preview uses corrected stage annotations from the recorded bag, so it is
+retrospective alignment, not a live stage estimator. Unknown stages or missing
+nominal candidates are reported instead of searching a different stage. Replay
+continues with the original classifier if preview preparation is unavailable.
+Specifically, it takes the final three **numbered** messages and requires
+`1, 2, 3` in increasing timestamp order. Sequences such as `1, Error, 2, 3` and
+`1, 2, Error, 3` have the same stage-boundary rule: Error/Fail does not advance
+the stage. Earlier numbered markers are ignored. Frames before the corrected
+stage-1 start have unknown stage; missing or invalid boundaries disable the
+preview instead of borrowing an old marker or dividing the bag into thirds.
+The first Error/Fail at or after that corrected stage-1 start is saved separately
+as the failure-time annotation; it is never used to select a match or score.
+Saved results include the matching metadata, top three candidates, visual
+descriptor and matched thumbnail for each available observation, plus separate
+preparation/search timings. Visual pooling time is included in cached feature
+time. The benchmark is unchanged.
+
 Every execution has a unique directory under
 `<output_dir>/online_replay/<timestamp_uuid>/<bag>/` containing:
 

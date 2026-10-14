@@ -172,6 +172,7 @@ class OnlineDetector:
         from .temporal_lora import timestamped_images
         from .prompts import task_context_prompt, evaluation_prompt_multiturn
         from .online_cache import CachedExecution
+        from .visual_matching import nominal_matching_bags
 
         self.config = config
         self.vlm = vlm = config["rynnbrain"]
@@ -210,6 +211,10 @@ class OnlineDetector:
         self.excluded.update(self.complete.metadata.get("training_bags", []))
         self.excluded.update(self.classifier.metadata.get("training_bags", []))
         self.excluded.update(Path(value).name for value in vlm.get("reference_bags", []))
+        self.excluded.update(Path(value).name for value in nominal_matching_bags(config))
+        self.visual_memory = None
+        self.capture_visual = False
+        self.matching_stages = None
         progress("Reading nominal reference images")
         nominal = []
         temporal = bool(self.model.temporal_profile)
@@ -233,6 +238,19 @@ class OnlineDetector:
         self.cache.reset()
         self.last_timestamp = None
 
+    def prepare_matching(self, bag, progress, stop):
+        from .visual_matching import read_recorded_stages, build_visual_memory
+        self.capture_visual = False
+        self.matching_stages = None
+        if self.config.get("stage_count", 3) != 3 or self.config.get("ignore_recorded_stages", False):
+            raise ValueError("Stage preview requires three recorded stages and ignore_recorded_stages=false.")
+        stages = read_recorded_stages(bag, self.config.get("stage_topic", "/recording_stage"))
+        if self.visual_memory is None:
+            self.visual_memory = build_visual_memory(self, progress, stop)
+        self.matching_stages = stages
+        self.capture_visual = True
+        return {"status": "ready", "stage_annotation": stages.metadata(), "memory": self.visual_memory.report}
+
     def score(self, vector, step):
         classifier = self.prefix.at_step(step, self.complete) if self.knn else self.classifier
         predict = classifier.predict_anomaly_score if self.knn else classifier.predict_failure_probability
@@ -254,13 +272,24 @@ class OnlineDetector:
         if torch.cuda.is_available():
             for device in range(torch.cuda.device_count()):
                 torch.cuda.reset_peak_memory_stats(device)
-        vector = self.cache.append(label, image).numpy()
+        vector = self.cache.append(label, image, capture_visual=self.capture_visual).numpy()
         feature_sec = synchronized_time() - started
         memory = {str(device): torch.cuda.max_memory_allocated(device)
                   for device in range(torch.cuda.device_count())} if torch.cuda.is_available() else {}
         started = time.monotonic()
         score, threshold = self.score(vector, index)
         classifier_sec = time.monotonic() - started
+        matching = {"status": "disabled"}
+        matching_started = time.monotonic()
+        if self.capture_visual:
+            try:
+                descriptor = self.cache.last_visual_descriptor
+                if descriptor is None:
+                    raise ValueError(self.cache.last_visual_error or "No visual descriptor was captured.")
+                matching = self.visual_memory.match(descriptor, self.matching_stages.at(timestamp))
+            except (ValueError, RuntimeError) as error:
+                matching = {"status": "unavailable", "reason": str(error)}
+        matching_sec = time.monotonic() - matching_started
         check = None
         baseline = None
         if verify:
@@ -277,6 +306,7 @@ class OnlineDetector:
                     cached_feature_sec=feature_sec, classifier_sec=classifier_sec,
                     peak_gpu_allocated_bytes=memory,
                     score_kind="knn_distance" if self.knn else "failure_probability",
+                    visual_matching=matching, visual_matching_sec=matching_sec,
                     verification=check), vector, baseline
 
 
@@ -319,7 +349,11 @@ class ReplayApplication:
         self.state["replay_mode"] = "diagnostic" if diagnose else "strict" if verify else "cached"
         self.state["initialization_phase"] = "Starting model worker"
         self.state["excluded_bag_indices"] = []
+        self.state["match_preview"] = True
+        self.state["matching_status"] = "Not prepared"
         self.jpeg = None
+        self.matched_jpeg = None
+        self.observed_jpeg = None
         self.worker = threading.Thread(target=self._worker, daemon=True)
 
     def update(self, **values):
@@ -330,7 +364,7 @@ class ReplayApplication:
         with self.lock:
             return json.loads(json.dumps({**self.state, "model_ready": bool(getattr(self, "detector", None))}))
 
-    def start(self, index, interval=None, mode=None):
+    def start(self, index, interval=None, mode=None, match_preview=None):
         with self.lock:
             if self.state["status"] not in {"ready", "completed", "stopped", "error"}:
                 raise ValueError("Wait for initialization or stop the current execution first.")
@@ -346,13 +380,18 @@ class ReplayApplication:
                 raise ValueError("Observation interval must be a finite positive number of seconds.")
             if mode not in ("cached", "diagnostic", "strict"):
                 raise ValueError("Select cached replay, diagnostics, or strict verification.")
+            match_preview = self.state["match_preview"] if match_preview is None else match_preview
+            if not isinstance(match_preview, bool):
+                raise ValueError("Stage match preview must be true or false.")
             self.interval = float(interval)
             self.verify, self.diagnose = mode != "cached", mode == "diagnostic"
             self.stop.clear()
             self.jpeg = None
+            self.matched_jpeg = self.observed_jpeg = None
             self.state.update(status="starting", rows=[], error=None, video_time_sec=None,
                               output_directory=None, warning=None, cache_verification_status="pending" if self.verify else "not_requested",
                               bag=str(self.bags[index]), interval_sec=self.interval,
+                              match_preview=match_preview, matching_status="Not prepared",
                               replay_mode=mode, verification_mode=self.verify, diagnostic_mode=self.diagnose)
             self.jobs.put_nowait(index)
 
@@ -406,6 +445,35 @@ class ReplayApplication:
         output = Path(self.config["output_dir"]) / "online_replay" / run_id / Path(bag).stem
         output.mkdir(parents=True, exist_ok=False)
         vlm = self.config["rynnbrain"]
+        matching_metadata = {"status": "disabled"}
+        self.detector.capture_visual = False
+        preparation_started = time.monotonic()
+        if self.state["match_preview"] and hasattr(self.detector, "prepare_matching"):
+            def matching_progress(message):
+                self.update(status="preparing", matching_status=message, output_directory=str(output))
+                print(message, flush=True)
+            try:
+                matching_progress("Preparing stage-matched visual preview")
+                matching_metadata = self.detector.prepare_matching(bag, matching_progress, self.stop)
+                self.update(matching_status="Ready: corrected recorded stages (retrospective preview)")
+            except InterruptedError:
+                (output / "online_results.json").write_text(json.dumps({
+                    "bag": str(bag), "status": "stopped", "rows": [],
+                    "visual_matching": {"status": "preparation_stopped"},
+                    "matching_preparation_sec": time.monotonic() - preparation_started,
+                }, indent=2), encoding="utf-8")
+                self.update(status="stopped", matching_status="Preparation stopped")
+                return
+            except Exception as failure:
+                self.detector.capture_visual = False
+                matching_metadata = {"status": "unavailable", "reason": str(failure)}
+                self.update(matching_status=f"Stage preview unavailable: {failure}")
+                print(f"Stage preview unavailable; classifier replay continues: {failure}", flush=True)
+        else:
+            self.update(matching_status="Disabled")
+        # Annotation is saved only for evaluation, never passed into matching/scoring.
+        from .visual_matching import read_corrected_failure_annotation
+        failure_annotation = read_corrected_failure_annotation(bag, self.config.get("stage_topic", "/recording_stage"))
         frames = iter_rosbag_image_frames(RosbagImageSource(bag, vlm["camera_topics"][0]),
             sample_fps=15., start_sec=vlm.get("sampling_start_sec", 0.), end_sec=vlm.get("sampling_end_sec"))
         feed = ReplayFeed(frames, self.publish, self.stop)
@@ -416,6 +484,8 @@ class ReplayApplication:
             max_frames=self.detector.frame_count, note=SAMPLING_NOTE, classifier_path=str(self.detector.path),
             score_source=self.detector.score_source, comparison_signature=self.detector.signature,
             verification_mode=self.verify, diagnostic_mode=self.diagnose)
+        metadata.update(visual_matching=matching_metadata, recorded_failure_annotation=failure_annotation,
+                        matching_preparation_sec=time.monotonic() - preparation_started)
 
         def verification_status():
             checks = [row["verification"] for row in rows if row.get("verification")]
@@ -466,17 +536,36 @@ class ReplayApplication:
                     row["vector_file"] = f"frame_{len(rows) + 1:02d}.npy"
                     np.save(output / row["vector_file"], vector)
                     image.save(output / f"frame_{len(rows) + 1:02d}.jpg")
+                    match = row.get("visual_matching", {})
+                    if match.get("status") == "matched":
+                        try:
+                            matched_bytes = Path(match["best"]["image_file"]).read_bytes()
+                            match["saved_preview"] = f"frame_{len(rows) + 1:02d}_nominal.jpg"
+                            (output / match["saved_preview"]).write_bytes(matched_bytes)
+                        except OSError as failure:
+                            matched_bytes = None
+                            match["preview_error"] = str(failure)
+                    else:
+                        matched_bytes = None
+                    observed = image.copy()
+                    observed.thumbnail((640, 480))
+                    buffer = io.BytesIO()
+                    observed.save(buffer, format="JPEG", quality=85)
+                    if getattr(self.detector, "capture_visual", False) and self.detector.cache.last_visual_descriptor is not None:
+                        np.save(output / f"frame_{len(rows) + 1:02d}_visual.npy", self.detector.cache.last_visual_descriptor)
                     if baseline is not None:
                         np.save(output / f"frame_{len(rows) + 1:02d}_uncached.npy", baseline)
                     rows.append(row)
                     if writer is None:
                         writer = csv.DictWriter(stream, fieldnames=list(row))
                         writer.writeheader()
-                    writer.writerow({**row, "verification": json.dumps(row["verification"]),
-                                     "peak_gpu_allocated_bytes": json.dumps(row["peak_gpu_allocated_bytes"])})
+                    writer.writerow({key: json.dumps(value) if isinstance(value, (dict, list)) else value
+                                     for key, value in row.items()})
                     stream.flush()
                     persist()
-                    self.update(status="observing", rows=list(rows), scoring_time_sec=None)
+                    with self.lock:
+                        self.observed_jpeg, self.matched_jpeg = buffer.getvalue(), matched_bytes
+                        self.state.update(status="observing", rows=list(rows), scoring_time_sec=None)
                     print(f"{Path(bag).name}: {len(rows)}/{self.detector.frame_count}, "
                           f"t={timestamp:.3f}s, score={row['anomaly_score']:.5f}, "
                           f"threshold={row['threshold']:.5f}, cache={row['cached_feature_sec']:.3f}s", flush=True)
@@ -530,9 +619,10 @@ def make_handler(app):
                 self.send(200, Path(__file__).with_name("online_replay.html").read_bytes(), "text/html; charset=utf-8")
             elif path == "/state":
                 self.send(200, json.dumps(app.snapshot()).encode(), "application/json")
-            elif path == "/frame":
+            elif path in {"/frame", "/observed-frame", "/matched-frame"}:
                 with app.lock:
-                    jpeg = app.jpeg
+                    jpeg = getattr(app, {"/frame": "jpeg", "/observed-frame": "observed_jpeg",
+                                         "/matched-frame": "matched_jpeg"}[path])
                 self.send(200 if jpeg else 204, jpeg or b"", "image/jpeg")
             else:
                 self.send(404, b"Not found", "text/plain")
@@ -551,7 +641,7 @@ def make_handler(app):
                 if not isinstance(data, dict):
                     raise ValueError("Expected a JSON object")
                 if self.path == "/start":
-                    app.start(data.get("bag_index"), data.get("interval_sec"), data.get("mode"))
+                    app.start(data.get("bag_index"), data.get("interval_sec"), data.get("mode"), data.get("match_preview"))
                 elif self.path == "/stop":
                     app.stop.set()
                 else:

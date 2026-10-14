@@ -67,9 +67,18 @@ class OnlineCacheTests(unittest.TestCase):
         with patch.object(wrapper.model, "generate", side_effect=AssertionError("No answer generation")):
             for step in range(8):
                 with patch.object(visual, "forward", wraps=visual.forward) as vision:
-                    vector = engine.append(f"Frame {step}", Image.new("RGB", (4, 4), (step + 2, 0, 0)))
+                    vector = engine.append(f"Frame {step}", Image.new("RGB", (4, 4), (step + 2, 0, 0)), capture_visual=True)
                 self.assertEqual(vision.call_count, 1)
                 self.assertEqual(len(vision.call_args.kwargs["grid_thw"]), 1)
+                self.assertEqual(engine.last_visual_descriptor.shape, (16,))
+                self.assertAlmostEqual(float(np.linalg.norm(engine.last_visual_descriptor)), 1., places=6)
+                # The descriptor comes from this image, independent of conversation history.
+                from rynnbrain_vlm.visual_matching import _visual_descriptor
+                from types import SimpleNamespace
+                standalone = _visual_descriptor(SimpleNamespace(model=wrapper, cache=engine, vlm={}),
+                                               Image.new("RGB", (4, 4), (step + 2, 0, 0)))
+                np.testing.assert_allclose(engine.last_visual_descriptor, standalone, atol=1e-6)
+                self.assertFalse(visual._forward_hooks)
                 full = engine.uncached_vector()
                 torch.testing.assert_close(vector, full, rtol=2e-4, atol=2e-5)
                 for classifier, predict in ((logistic, logistic.predict_failure_probability),
@@ -84,6 +93,7 @@ class OnlineCacheTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "limit"):
                 engine.append("extra", Image.new("RGB", (4, 4)))
             engine.reset()
+            self.assertIsNone(engine.last_visual_descriptor)
             repeated = engine.append("Frame 0", Image.new("RGB", (4, 4), (2, 0, 0)))
             torch.testing.assert_close(first, repeated)
             engine.evaluation_text = "A changed suffix is recomputed"

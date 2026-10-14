@@ -162,13 +162,21 @@ class OnlineReplayTests(unittest.TestCase):
             with urlopen(address + "/frame") as response:
                 self.assertEqual(response.headers["Content-Type"], "image/jpeg")
                 self.assertEqual(response.read()[:2], b"\xff\xd8")
-            request = Request(address + "/start", data=b'{"bag_index":0,"interval_sec":5,"mode":"diagnostic"}', headers={"Origin": address})
+            for endpoint, attribute in (("/observed-frame", "observed_jpeg"), ("/matched-frame", "matched_jpeg")):
+                with urlopen(address + endpoint) as response:
+                    self.assertEqual(response.status, 204)
+                setattr(app, attribute, app.jpeg)
+                with urlopen(address + endpoint) as response:
+                    self.assertEqual(response.read(), app.jpeg)
+            request = Request(address + "/start", data=b'{"bag_index":0,"interval_sec":5,"mode":"diagnostic","match_preview":false}', headers={"Origin": address})
             with urlopen(request) as response:
                 self.assertEqual(response.status, 200)
             self.assertEqual(app.jobs.get_nowait(), 0)
             self.assertEqual(app.interval, 5.)
             self.assertTrue(app.diagnose)
             self.assertTrue(app.verify)
+            self.assertFalse(app.snapshot()['match_preview'])
+            self.assertIsNone(app.matched_jpeg)
             with urlopen(Request(address + "/stop", data=b"{}")):
                 self.assertTrue(app.stop.is_set())
             with self.assertRaises(HTTPError) as error:
@@ -223,6 +231,8 @@ class OnlineReplayTests(unittest.TestCase):
         app = ReplayApplication(config, [Path("test")], 10., False)
         app.detector = Mock()
         app.update(status="ready")
+        with self.assertRaisesRegex(ValueError, "preview"):
+            app.start(0, match_preview="false")
         for interval, mode in [(0, "cached"), (float("nan"), "cached"), (True, "cached"),
                                ("10", "cached"), (10, "unknown")]:
             with self.assertRaises(ValueError):
@@ -337,6 +347,56 @@ class OnlineReplayTests(unittest.TestCase):
             saved = json.loads(next(Path(directory).glob("online_replay/*/test/online_results.json")).read_text())
             self.assertEqual(saved["status"], "error")
             self.assertIn("verification failed", saved["error"])
+
+    def test_matching_preview_is_saved_without_changing_classifier_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            thumbnail = root / 'nominal.jpg'
+            Image.new('RGB', (4, 4), 'green').save(thumbnail)
+            config = {'output_dir': directory, 'rynnbrain': {'camera_topics': ['top']}}
+            app = ReplayApplication(config, [Path('test')], 1., False)
+            match = {'status': 'matched', 'stage': 1, 'best': {'image_file': str(thumbnail)}}
+            def append(image, timestamp, verify):
+                return dict(timestamp_sec=timestamp, anomaly_score=.2, threshold=.5,
+                            above_threshold=False, cached_feature_sec=.001, verification=None,
+                            visual_matching=match), np.ones(2), None
+            detector = SimpleNamespace(reset=Mock(), append=append, frame_count=1,
+                path=Path('existing.npz'), score_source='test', signature={}, knn=False,
+                cache=SimpleNamespace(last_visual_descriptor=np.array([1., 0.])))
+            def prepare(bag, progress, stop):
+                detector.capture_visual = True
+                return {'status': 'ready'}
+            detector.prepare_matching = prepare
+            app.detector = detector
+            with patch('rosbag_io.iter_rosbag_image_frames', return_value=iter([(0, 0., Image.new('RGB', (4, 4)))])), \
+                 patch('rynnbrain_vlm.online_replay.save_plot'), \
+                 patch('rynnbrain_vlm.visual_matching.read_corrected_failure_annotation', return_value={'status': 'available', 'time_sec': 0.}):
+                app.run_bag(Path('test'))
+            saved_path = next(root.glob('online_replay/*/test/online_results.json'))
+            saved = json.loads(saved_path.read_text())
+            self.assertEqual(saved['status'], 'completed')
+            self.assertEqual(saved['rows'][0]['anomaly_score'], .2)
+            self.assertFalse(saved['rows'][0]['above_threshold'])
+            self.assertEqual(app.matched_jpeg, thumbnail.read_bytes())
+            self.assertTrue((saved_path.parent / 'frame_01_nominal.jpg').is_file())
+            np.testing.assert_array_equal(np.load(saved_path.parent / 'frame_01_visual.npy'), [1., 0.])
+
+    def test_missing_stages_disable_preview_but_not_scoring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = ReplayApplication({'output_dir': directory, 'rynnbrain': {'camera_topics': ['top']}},
+                                    [Path('test')], 1., False)
+            row = dict(timestamp_sec=0., anomaly_score=.2, threshold=.5, cached_feature_sec=.001,
+                       verification=None)
+            app.detector = SimpleNamespace(reset=Mock(), prepare_matching=Mock(side_effect=ValueError('Missing stage')),
+                append=Mock(return_value=(row, np.ones(2), None)), frame_count=1,
+                path=Path('existing.npz'), score_source='test', signature={}, knn=False)
+            with patch('rosbag_io.iter_rosbag_image_frames', return_value=iter([(0, 0., Image.new('RGB', (4, 4)))])), \
+                 patch('rynnbrain_vlm.online_replay.save_plot'):
+                app.run_bag(Path('test'))
+            self.assertEqual(app.snapshot()['status'], 'completed')
+            self.assertFalse(app.detector.capture_visual)
+            self.assertIn('Missing stage', app.snapshot()['matching_status'])
+            app.detector.append.assert_called_once()
 
     def test_start_rejects_overlap_and_unknown_bags(self):
         app = ReplayApplication({}, [Path("test")], 10., False)
