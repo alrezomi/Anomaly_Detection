@@ -15,10 +15,44 @@ from PIL import Image
 
 from rynnbrain_vlm.online_replay import (ReplayFeed, ReplayApplication, OnlineDetector, make_handler,
                                        finish_verification, verification_failure_message,
-                                       signature_differences, validate_online_classifier)
+                                       signature_differences, validate_online_classifier, replay_bags)
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_bag_discovery_keeps_default_first_deduplicates_and_honors_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("normal/a", "failure/b", "reference/c"):
+                bag = root / name
+                bag.mkdir(parents=True)
+                (bag / "metadata.yaml").write_text("rosbag2_bagfile_information: {}")
+            (root / "not_a_bag").mkdir()
+            selected = root / "failure/b"
+            config = {"test_bag": str(selected)}
+            bags = replay_bags(config, data_root=root)
+            self.assertEqual(bags[0], selected.resolve())
+            self.assertEqual(len(bags), 3)
+            self.assertEqual(set(bags), {root.resolve() / p for p in ("normal/a", "failure/b", "reference/c")})
+            self.assertEqual(replay_bags(config, [selected, selected], root), [selected.resolve()])
+            self.assertEqual(config, {"test_bag": str(selected)})
+            with self.assertRaisesRegex(ValueError, "one bag-path string"):
+                replay_bags({"test_bag": [str(selected)]}, data_root=root)
+
+    def test_discovered_training_bags_disabled_but_dino_only_bags_remain_available(self):
+        app = ReplayApplication({"nominal_bags": ["dino_only"]},
+                                [Path("reference"), Path("train"), Path("dino_only"), Path("heldout")], 10., False)
+        detector = SimpleNamespace(excluded={"reference", "train"}, knn=True, frame_count=8, score_source="test")
+        # Initialize without entering the job loop, just as a shutdown during startup would do.
+        app.shutdown.set()
+        with patch("rynnbrain_vlm.online_replay.OnlineDetector", return_value=detector), \
+             patch("rynnbrain_vlm.online_replay.synchronized_time", side_effect=time.monotonic):
+            app._worker()
+        self.assertEqual(app.snapshot()["excluded_bag_indices"], [0, 1])
+        with self.assertRaisesRegex(ValueError, "training/reference"):
+            app.start(1)
+        app.start(2)
+        self.assertEqual(app.jobs.get_nowait(), 2)
+
     def test_compatibility_reports_exact_fields_and_still_rejects_mismatch(self):
         saved = {"model_config": {"lora_adapter_path": "/v102/adapter"},
                  "enable_thinking": True, "test_camera_topics": ["top"], "legacy": None}
