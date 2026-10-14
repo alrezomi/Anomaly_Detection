@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import math
+import os
 from pathlib import Path
 import queue
 import signal
@@ -27,6 +28,19 @@ from pipeline_settings import load_pipeline_config
 
 SAMPLING_NOTE = ("Live elapsed-time sampling differs from whole-bag training sampling. "
                  "Scores are diagnostic; online accuracy and thresholds are not yet validated.")
+
+
+def replay_bags(config, explicit=None, data_root=None):
+    """Offer recorded bags without changing the shared single-test config."""
+    if explicit:
+        return list(dict.fromkeys(Path(bag).resolve() for bag in explicit))
+    selected = config.get("test_bag")
+    if not isinstance(selected, str) or not selected.strip():
+        raise ValueError("Keep test_bag as one bag-path string. Replay automatically lists ROS bags "
+                         "under the mounted data folder; do not replace test_bag with a list.")
+    root = Path(data_root if data_root is not None else os.environ.get("ANOMALY_DATA_ROOT", "/data"))
+    discovered = sorted({path.parent.resolve() for path in root.glob("**/metadata.yaml")})
+    return list(dict.fromkeys([Path(selected).resolve(), *discovered]))
 
 
 def signature_differences(saved, current, prefix="comparison_signature"):
@@ -304,6 +318,7 @@ class ReplayApplication:
                           interval_sec=interval, output_directory=None)
         self.state["replay_mode"] = "diagnostic" if diagnose else "strict" if verify else "cached"
         self.state["initialization_phase"] = "Starting model worker"
+        self.state["excluded_bag_indices"] = []
         self.jpeg = None
         self.worker = threading.Thread(target=self._worker, daemon=True)
 
@@ -323,6 +338,8 @@ class ReplayApplication:
                 raise ValueError("Model initialization failed; inspect the error and restart the application.")
             if type(index) is not int or not 0 <= index < len(self.bags):
                 raise ValueError("Select a listed bag.")
+            if index in self.state["excluded_bag_indices"]:
+                raise ValueError("This is a training/reference bag; select a held-out execution.")
             interval = self.interval if interval is None else interval
             mode = self.state["replay_mode"] if mode is None else mode
             if type(interval) not in (int, float) or not math.isfinite(interval) or interval <= 0:
@@ -356,11 +373,16 @@ class ReplayApplication:
             progress("Loading inference libraries")
             started = synchronized_time()
             self.detector = OnlineDetector(self.config, progress=progress)
+            excluded = getattr(self.detector, "excluded", set())
+            excluded_indices = [index for index, bag in enumerate(self.bags) if Path(bag).name in excluded]
             self.update(status="ready", initialization_sec=synchronized_time() - started,
                         initialization_phase="Ready — choose a bag and click Start execution",
                         score_source=self.detector.score_source,
                         score_kind="knn_distance" if self.detector.knn else "failure_probability",
+                        excluded_bag_indices=excluded_indices,
                         max_frames=self.detector.frame_count)
+            print(f"Replay selector: {len(self.bags) - len(excluded_indices)} available bags; "
+                  f"{len(excluded_indices)} training/reference bags disabled.", flush=True)
             print("Model ready. Waiting for Start execution in the browser; no bag runs automatically.", flush=True)
         except Exception as error:
             self.update(status="error", error=str(error))
@@ -543,7 +565,7 @@ def make_handler(app):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--bag", type=Path, action="append", help="Repeat to offer several bags without reloading the model; defaults to test_bag.")
+    parser.add_argument("--bag", type=Path, action="append", help="Optional explicit selection; otherwise lists test_bag and all ROS bags under ANOMALY_DATA_ROOT (/data).")
     parser.add_argument("--interval-sec", type=float, default=10., help="Minimum elapsed time between selected observations; default 10 s.")
     parser.add_argument("--verify-cache", action="store_true", help="Recompute each prefix and stop on feature/score/decision mismatch. Adds diagnostic runtime.")
     parser.add_argument("--diagnose-cache", action="store_true", help="Check every prefix, continuing mismatches with uncached scores. Cache remains unverified if any check fails.")
@@ -553,7 +575,7 @@ def main():
     if not math.isfinite(args.interval_sec) or args.interval_sec <= 0:
         parser.error("--interval-sec must be finite and positive")
     config = load_pipeline_config(args.config)
-    bags = args.bag or [Path(config["test_bag"])]
+    bags = replay_bags(config, args.bag)
     app = ReplayApplication(config, bags, args.interval_sec, args.verify_cache, args.diagnose_cache)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
     print(f"Replay HTTP server listening on {args.host}:{args.port}. Open http://127.0.0.1:{args.port} on the lab PC.", flush=True)

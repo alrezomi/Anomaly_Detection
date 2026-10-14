@@ -933,10 +933,15 @@ and processing mode in the browser, and click **Start execution**:
 Settings apply to the next execution and stay selected for this server session;
 they do not edit the config or retrain/reload the model. After restarting the
 service, the defaults are cached-only replay and a 10-second interval.
-The default bag is `test_bag`. Advanced CLI usage still supports repeated
-`--bag /data/path/to/bag` arguments to the application command to list several
-executions without reloading the model. Training/reference bags are rejected;
-the application reads the adapter and classifier artifact training manifests.
+The selector automatically lists the configured `test_bag` first, followed by
+ROS bag directories containing `metadata.yaml` under the mounted data folder
+(`ANOMALY_DATA_ROOT`, default `/data`). **Keep `test_bag` as a single string**;
+no new config list is needed. Training/reference bags are disabled after the
+model loads, using the saved adapter/classifier training manifests; the backend
+also rejects them. Bags used only for DINO memory are not excluded for that reason.
+The scan reads directory names, not image streams, and does not run a benchmark.
+Restart the service to discover newly added bags. Advanced CLI usage supports
+repeated `--bag /data/path/to/bag` arguments to restrict the selector explicitly.
 **Stop** takes effect between model updates; it cannot cancel a GPU kernel.
 Leave the terminal open to retain the model. Ctrl+C shuts down after the current
 update and saves its results. For a Compose-managed service, allow an in-flight
@@ -1024,6 +1029,25 @@ destination, keep `method: "knn"` and `plot_timeline: true`, then run
 LoRA and nominal training list and prepares the prefix memories too. Replay
 never invokes training, even if `train_on_benchmark` is true. Stop the replay
 service before training, then restart it to load the new artifacts.
+
+The current kNN threshold is a training diagnostic: at each prefix length,
+leave out one nominal bag, calculate its mean distance to its k nearest other
+nominal vectors, and take the configured quantile of these distances (default
+95%, using the higher observed quantile and a minimal upward floating-point
+adjustment for ties). Each prefix has its own threshold. Replay loads those
+saved thresholds; changing `threshold_quantile` in the config does not recalibrate
+an existing artifact. This does not guarantee 5% false alarms on unseen bags or
+across a complete sequence. Offline prefixes were sampled over complete bag
+durations; replay prefixes use elapsed-time intervals, so observation count
+does not ensure the same task progress. Calibration for replay needs separate
+nominal executions processed with the intended replay sampling, and evaluation
+on other held-out executions. Do not choose a threshold from a single failure
+test graph.
+
+`benchmark` and `online-replay` are independent entry points. The benchmark
+processes its selected bag set and exports combined tables/plots. The GUI
+processes only the bag you start, saving each execution under `online_replay/`.
+It does not launch or monitor a benchmark, nor automatically combine its results.
 
 Every execution has a unique directory under
 `<output_dir>/online_replay/<timestamp_uuid>/<bag>/` containing:
