@@ -322,9 +322,13 @@ def save_plot(rows, path, probability):
     axis.plot(times, [row["anomaly_score"] * scale for row in rows], "o-", label="Score", color="#2f78c4")
     axis.plot(times, [row["threshold"] * scale for row in rows], "--", label="Threshold", color="#c27524")
     fallback = any(row.get("score_computation") == "uncached_verification_fallback" for row in rows)
+    kind = rows[0].get('score_kind', '')
+    title = ('GMR offline score playback' if kind == 'gmr_epsilon' else
+             'DINO per-image replay' if kind == 'dino_distance' else
+             'Online replay · uncached fallback on failed checks' if fallback else 'Online replay · cached execution history')
     axis.set(xlabel="Observation time from bag start (s)",
-             ylabel="Failure score (%)" if probability else "Anomaly distance",
-             title="Online replay · uncached fallback on failed checks" if fallback else "Online replay · cached execution history")
+             ylabel="Failure score (%)" if probability else 'Smoothed epsilon' if kind == 'gmr_epsilon' else "Anomaly distance",
+             title=title)
     axis.spines[["top", "right"]].set_visible(False)
     axis.grid(alpha=.15)
     axis.legend(frameon=False)
@@ -351,6 +355,8 @@ class ReplayApplication:
         self.state["excluded_bag_indices"] = []
         self.state["match_preview"] = True
         self.state["matching_status"] = "Not prepared"
+        self.state['detector_type'] = 'vlm'
+        self.state['requested_detector'] = 'vlm'
         self.jpeg = None
         self.matched_jpeg = None
         self.observed_jpeg = None
@@ -364,15 +370,17 @@ class ReplayApplication:
         with self.lock:
             return json.loads(json.dumps({**self.state, "model_ready": bool(getattr(self, "detector", None))}))
 
-    def start(self, index, interval=None, mode=None, match_preview=None):
+    def start(self, index, interval=None, mode=None, match_preview=None, detector_type=None):
         with self.lock:
             if self.state["status"] not in {"ready", "completed", "stopped", "error"}:
                 raise ValueError("Wait for initialization or stop the current execution first.")
-            if not getattr(self, "detector", None):
-                raise ValueError("Model initialization failed; inspect the error and restart the application.")
+            detector_type = detector_type or self.state['detector_type']
+            if detector_type not in {'vlm', 'dino', 'gmr'}:
+                raise ValueError('Choose VLM, DINO or GMR offline replay.')
+            switching = detector_type != self.state['detector_type']
             if type(index) is not int or not 0 <= index < len(self.bags):
                 raise ValueError("Select a listed bag.")
-            if index in self.state["excluded_bag_indices"]:
+            if not switching and index in self.state["excluded_bag_indices"]:
                 raise ValueError("This is a training/reference bag; select a held-out execution.")
             interval = self.interval if interval is None else interval
             mode = self.state["replay_mode"] if mode is None else mode
@@ -380,6 +388,8 @@ class ReplayApplication:
                 raise ValueError("Observation interval must be a finite positive number of seconds.")
             if mode not in ("cached", "diagnostic", "strict"):
                 raise ValueError("Select cached replay, diagnostics, or strict verification.")
+            if detector_type != 'vlm':
+                mode = 'cached'
             match_preview = self.state["match_preview"] if match_preview is None else match_preview
             if not isinstance(match_preview, bool):
                 raise ValueError("Stage match preview must be true or false.")
@@ -392,6 +402,8 @@ class ReplayApplication:
                               output_directory=None, warning=None, cache_verification_status="pending" if self.verify else "not_requested",
                               bag=str(self.bags[index]), interval_sec=self.interval,
                               match_preview=match_preview, matching_status="Not prepared",
+                              requested_detector=detector_type,
+                              detector_preparation_sec=None,
                               replay_mode=mode, verification_mode=self.verify, diagnostic_mode=self.diagnose)
             self.jobs.put_nowait(index)
 
@@ -426,17 +438,43 @@ class ReplayApplication:
         except Exception as error:
             self.update(status="error", error=str(error))
             traceback.print_exc()
-            return
         while not self.shutdown.is_set():
             try:
                 index = self.jobs.get(timeout=.2)
             except queue.Empty:
                 continue
             try:
+                kind = self.state['requested_detector']
+                if kind != self.state['detector_type'] or not getattr(self, 'detector', None):
+                    self.switch_detector(kind)
                 self.run_bag(self.bags[index])
             except Exception as error:
                 self.update(status="error", error=str(error))
                 traceback.print_exc()
+
+    def switch_detector(self, kind):
+        """Release the previous model before loading another GPU detector."""
+        import gc
+        self.detector = None
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.update(status='starting', detector_type=kind, excluded_bag_indices=[],
+                    initialization_phase=f'Loading {kind.upper()}')
+        def progress(message):
+            self.update(initialization_phase=message, matching_status=message)
+            print(message, flush=True)
+        if kind == 'vlm':
+            detector = OnlineDetector(self.config, progress=progress)
+        else:
+            from .replay_detectors import DinoReplayDetector, GmrReplayDetector
+            detector = (DinoReplayDetector if kind == 'dino' else GmrReplayDetector)(self.config, progress)
+        self.detector = detector
+        self.update(note=getattr(detector, 'note', SAMPLING_NOTE), score_source=detector.score_source,
+                    score_kind=getattr(detector, 'score_kind', 'knn_distance' if detector.knn else 'failure_probability'),
+                    max_frames=detector.frame_count,
+                    excluded_bag_indices=[i for i, bag in enumerate(self.bags) if Path(bag).name in detector.excluded])
 
     def run_bag(self, bag):
         from rosbag_io import RosbagImageSource, iter_rosbag_image_frames
@@ -445,10 +483,27 @@ class ReplayApplication:
         output = Path(self.config["output_dir"]) / "online_replay" / run_id / Path(bag).stem
         output.mkdir(parents=True, exist_ok=False)
         vlm = self.config["rynnbrain"]
+        kind = self.state['detector_type']
+        preparation_metadata = {}
+        if hasattr(self.detector, 'prepare_replay'):
+            def preparation_progress(message):
+                self.update(status='preparing', matching_status=message, output_directory=str(output))
+                print(message, flush=True)
+            started = time.monotonic()
+            try:
+                preparation_metadata = self.detector.prepare_replay(preparation_progress, self.stop)
+            except Exception as failure:
+                status = 'stopped' if isinstance(failure, InterruptedError) else 'error'
+                (output / 'online_results.json').write_text(json.dumps(dict(bag=str(bag), detector_type=kind,
+                    status=status, error=str(failure), rows=[]), indent=2), encoding='utf-8')
+                self.update(status=status, error=None if status == 'stopped' else str(failure))
+                return
+            preparation_metadata['duration_sec'] = time.monotonic() - started
+            self.update(detector_preparation_sec=preparation_metadata['duration_sec'])
         matching_metadata = {"status": "disabled"}
         self.detector.capture_visual = False
         preparation_started = time.monotonic()
-        if self.state["match_preview"] and hasattr(self.detector, "prepare_matching"):
+        if kind == 'vlm' and self.state["match_preview"] and hasattr(self.detector, "prepare_matching"):
             def matching_progress(message):
                 self.update(status="preparing", matching_status=message, output_directory=str(output))
                 print(message, flush=True)
@@ -470,21 +525,25 @@ class ReplayApplication:
                 self.update(matching_status=f"Stage preview unavailable: {failure}")
                 print(f"Stage preview unavailable; classifier replay continues: {failure}", flush=True)
         else:
-            self.update(matching_status="Disabled")
+            self.update(matching_status='DINO uses its native nearest-frame matching for scoring.' if kind == 'dino'
+                        else 'GMR offline scores prepared; no image matching.' if kind == 'gmr' else 'Disabled')
         # Annotation is saved only for evaluation, never passed into matching/scoring.
         from .visual_matching import read_corrected_failure_annotation
         failure_annotation = read_corrected_failure_annotation(bag, self.config.get("stage_topic", "/recording_stage"))
+        start_sec = max(float(vlm.get('sampling_start_sec') or 0.), getattr(self.detector, 'start_sec', 0.))
+        ends = [value for value in (vlm.get('sampling_end_sec'), getattr(self.detector, 'end_sec', None)) if value is not None]
         frames = iter_rosbag_image_frames(RosbagImageSource(bag, vlm["camera_topics"][0]),
-            sample_fps=15., start_sec=vlm.get("sampling_start_sec", 0.), end_sec=vlm.get("sampling_end_sec"))
+            sample_fps=15., start_sec=start_sec, end_sec=min(ends) if ends else None)
         feed = ReplayFeed(frames, self.publish, self.stop)
         producer = threading.Thread(target=feed.run, daemon=True)
         rows, status, error = [], "running", None
         self.update(status=status, output_directory=str(output))
         metadata = dict(bag=str(bag), protocol="online_elapsed_time_latest_frame_v1", interval_sec=self.interval,
-            max_frames=self.detector.frame_count, note=SAMPLING_NOTE, classifier_path=str(self.detector.path),
+            max_frames=self.detector.frame_count, note=self.state['note'], classifier_path=str(self.detector.path),
             score_source=self.detector.score_source, comparison_signature=self.detector.signature,
             verification_mode=self.verify, diagnostic_mode=self.diagnose)
         metadata.update(visual_matching=matching_metadata, recorded_failure_annotation=failure_annotation,
+                        detector_type=kind, detector_preparation=preparation_metadata,
                         matching_preparation_sec=time.monotonic() - preparation_started)
 
         def verification_status():
@@ -506,7 +565,7 @@ class ReplayApplication:
         try:
             with (output / "online_scores.csv").open("w", newline="", encoding="utf-8") as stream:
                 writer = None
-                earliest = float(vlm.get("sampling_start_sec", 0.))
+                earliest = start_sec
                 for _ in range(self.detector.frame_count):
                     packet = feed.next_frame(earliest)
                     if packet is None:
@@ -516,7 +575,7 @@ class ReplayApplication:
                     row, vector, baseline = self.detector.append(image, timestamp, self.verify)
                     check = row.get("verification")
                     failed = bool(check and not check["within_tolerance"])
-                    row["score_computation"] = "cached"
+                    row["score_computation"] = 'cached' if kind == 'vlm' else 'single_image' if kind == 'dino' else 'offline_lookup'
                     # Diagnostics may continue, but a rejected cached score is
                     # never used as the displayed/recorded detector result.
                     if failed and self.diagnose:
@@ -539,7 +598,12 @@ class ReplayApplication:
                     match = row.get("visual_matching", {})
                     if match.get("status") == "matched":
                         try:
-                            matched_bytes = Path(match["best"]["image_file"]).read_bytes()
+                            if getattr(self.detector, 'matched_image', None) is not None:
+                                match_buffer = io.BytesIO()
+                                self.detector.matched_image.save(match_buffer, format='JPEG', quality=85)
+                                matched_bytes = match_buffer.getvalue()
+                            else:
+                                matched_bytes = Path(match["best"]["image_file"]).read_bytes()
                             match["saved_preview"] = f"frame_{len(rows) + 1:02d}_nominal.jpg"
                             (output / match["saved_preview"]).write_bytes(matched_bytes)
                         except OSError as failure:
@@ -547,7 +611,10 @@ class ReplayApplication:
                             match["preview_error"] = str(failure)
                     else:
                         matched_bytes = None
-                    observed = image.copy()
+                    observed = getattr(self.detector, 'preview_image', None)
+                    observed = observed.copy() if observed is not None else image.copy()
+                    if kind == 'dino':
+                        observed.save(output / f'frame_{len(rows) + 1:02d}_heatmap.jpg')
                     observed.thumbnail((640, 480))
                     buffer = io.BytesIO()
                     observed.save(buffer, format="JPEG", quality=85)
@@ -641,7 +708,7 @@ def make_handler(app):
                 if not isinstance(data, dict):
                     raise ValueError("Expected a JSON object")
                 if self.path == "/start":
-                    app.start(data.get("bag_index"), data.get("interval_sec"), data.get("mode"), data.get("match_preview"))
+                    app.start(data.get("bag_index"), data.get("interval_sec"), data.get("mode"), data.get("match_preview"), data.get('detector_type'))
                 elif self.path == "/stop":
                     app.stop.set()
                 else:

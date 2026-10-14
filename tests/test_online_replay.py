@@ -410,6 +410,26 @@ class OnlineReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "current execution"):
             app.start(0)
 
+    def test_detector_switch_recovers_from_vlm_failure_and_uses_own_exclusions(self):
+        app = ReplayApplication({}, [Path('vlm_training'), Path('dino_training')], 10., False)
+        app.update(status='error', excluded_bag_indices=[0])
+        # The selected detector can be started even if the VLM failed to load.
+        app.start(0, mode='strict', detector_type='dino')
+        self.assertEqual(app.jobs.get_nowait(), 0)
+        self.assertFalse(app.verify)
+        dino = SimpleNamespace(excluded={'dino_training'}, note='dino', score_source='dino',
+                               score_kind='dino_distance', knn=True, frame_count=8)
+        with patch('rynnbrain_vlm.replay_detectors.DinoReplayDetector', return_value=dino), \
+             patch('rynnbrain_vlm.online_replay.OnlineDetector', side_effect=AssertionError('No VLM load')):
+            app.switch_detector('dino')
+        self.assertIs(app.detector, dino)
+        self.assertEqual(app.snapshot()['excluded_bag_indices'], [1])
+        self.assertEqual(app.snapshot()['detector_type'], 'dino')
+        self.assertEqual(app.snapshot()['score_kind'], 'dino_distance')
+        app.update(status='completed')
+        with self.assertRaisesRegex(ValueError, 'training/reference'):
+            app.start(1, detector_type='dino')
+
 
 if __name__ == "__main__":
     unittest.main()
