@@ -18,7 +18,7 @@ class DinoReplayDetector:
     kind = 'dino'
     score_kind = 'dino_distance'
     score_source = 'dino_cls_attention_patch_distance'
-    note = 'DINO scores each arriving image using its existing CLS shortlist, patch distances and saved thresholds. Recorded-stage restrictions use retrospective bag annotations.'
+    note = 'DINO scores every sampled image at the existing DINO sampling rate, through the end of the recording. No VLM interval or eight-frame limit applies. If processing is slower than playback, replay falls behind instead of skipping inputs. Recorded-stage restrictions use retrospective bag annotations.'
     knn = True  # Common renderer: distance rather than probability.
     capture_visual = False
 
@@ -29,7 +29,7 @@ class DinoReplayDetector:
         from vision_dinov2.dinov2_features import DINOv2FeatureExtractor
         self.config = config
         self.topic = config['rynnbrain']['camera_topics'][0]
-        self.frame_count = config['rynnbrain'].get('num_frames', 8)
+        self.frame_count = None  # Run through the recording, independently of VLM sampling.
         self.path = Path(config.get('nominal_cache_dir', '/outputs/nominal_cache'))
         if config.get('vision_memory_name'):
             self.path /= config['vision_memory_name']
@@ -37,6 +37,7 @@ class DinoReplayDetector:
         self.signature = settings.nominal_cache_runtime_signature()
         self.signature.update(dino_input_size=config.get('dino_input_size', settings.DINO_INPUT_SIZE),
                               stage_constrained_matching=config.get('stage_constrained_matching', False))
+        self.sample_fps = self.signature['sample_fps']
         progress('Loading saved DINO nominal memory')
         loaded = load_nominal_cache(self.path, self.signature)
         if loaded is None:
@@ -155,13 +156,13 @@ class GmrReplayDetector:
     kind = 'gmr'
     score_kind = 'gmr_epsilon'
     score_source = 'offline_gmr_smoothed_epsilon'
-    note = 'GMR OFFLINE PLAYBACK: whole-bag synchronization, resampling and centered smoothing use future data. The displayed lookup time is not online inference latency. The alarm uses the existing majority-vote filter.'
+    note = 'GMR OFFLINE PLAYBACK: every prepared force/torque sample is replayed at its own timestamp, without the VLM interval or eight-frame limit. Whole-bag synchronization, resampling and centered smoothing use future data. Epsilon is distance divided by the adaptive threshold, then smoothed; its threshold is 1. The alarm uses the existing majority-vote filter. Lookup time is not online inference latency.'
     knn = True
     capture_visual = False
 
     def __init__(self, config, progress):
         self.config = config
-        self.frame_count = config['rynnbrain'].get('num_frames', 8)
+        self.frame_count = None
         self.nominals = list(dict.fromkeys(config.get('nominal_bags', [])))
         self.excluded = {Path(bag).name for bag in self.nominals}
         self.path = Path(config['output_dir']) / 'online_replay' / 'gmr_offline'
@@ -232,7 +233,8 @@ class GmrReplayDetector:
             temporary.replace(csv_path)
             csv_path.with_suffix('.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
         check_stop(stop)
-        required = ['time', 'epsilon_smooth', 'mahalanobis', 'phase', 'alarm_filtered']
+        required = ['time', 'epsilon_smooth', 'mahalanobis', 'phase', 'alarm_filtered',
+                    'adaptive_threshold_mahalanobis', 'epsilon_adaptive']
         if (not set(required).issubset(self.results.columns) or len(self.results) < 2
                 or not np.isfinite(self.results[required].to_numpy(dtype=float)).all()
                 or (np.diff(self.results.time) <= 0).any()):
@@ -251,6 +253,9 @@ class GmrReplayDetector:
         score = float(sample.epsilon_smooth)
         row = dict(sample_index=self.step, timestamp_sec=timestamp, anomaly_score=score, threshold=1.,
                    above_threshold=bool(score > 1.), alarm_filtered=bool(sample.alarm_filtered),
+                   raw_distance=float(sample.mahalanobis),
+                   adaptive_threshold=float(sample.adaptive_threshold_mahalanobis),
+                   epsilon_raw=float(sample.epsilon_adaptive),
                    signal_time_sec=float(sample.time), cached_feature_sec=time.monotonic() - started,
                    classifier_sec=0., verification=None, score_kind=self.score_kind,
                    vector_kind='gmr_mahalanobis_and_phase',
