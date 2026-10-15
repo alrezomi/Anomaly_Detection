@@ -1108,6 +1108,12 @@ Use the **Detector** selector before starting an execution:
   memory automatically. It uses the first configured RynnBrain camera; that
   camera must have compatible DINO memory. Stage-constrained replay requires
   the final numbered `1, 2, 3` boundaries instead of guessing missing stages.
+  Replay processes **every sampled image through the end of the recording**,
+  at the existing DINO `SAMPLE_FPS` rate (currently 2 fps), rather than eight
+  VLM observations. This is every detector input, not every raw camera message.
+  Each image supplies its native score, adaptive threshold and heatmap. If
+  inference cannot keep up, replay falls behind wall time rather than dropping
+  inputs; Observation → result includes this delay.
 - **GMR · offline replay** runs the existing force/torque pipeline before
   playback: force-based synchronization, resampling, nominal leave-one-run-out
   calibration, GMR, centered score smoothing and majority-vote filtering. It
@@ -1118,8 +1124,12 @@ Use the **Detector** selector before starting an execution:
   Whole-recording preprocessing uses future samples: this is **offline result
   playback, not causal online detection**. The graph shows smoothed epsilon
   and threshold 1; the status separately reports the filtered alarm. Video and
-  signal samples use bag-relative time, with the latest signal sample at or
-  before each selected video timestamp. Offline preparation time is shown
+  signal samples use bag-relative time. **Every prepared signal sample** is
+  replayed at its own timestamp (normally 500 samples after the existing
+  resampling), independently of image arrival. The accompanying image is the
+  latest camera frame at or before that time; missing camera coverage does not
+  drop signal samples. The saved rows also contain the raw Mahalanobis distance,
+  adaptive distance threshold and unsmoothed epsilon. Offline preparation time is shown
   separately; the very short result lookup time is not model inference time.
 
 GMR results and source identities are cached in
@@ -1129,6 +1139,14 @@ fitted nominal model while the GMR mode stays loaded. Existing legacy CSV files
 without a bag/timebase identity are not silently associated with another bag.
 Nominal data and default GMR parameters come from the current config and the
 existing time-series implementation; no new config fields are needed.
+
+The observation interval and eight-frame limit apply only to VLM. DINO and GMR
+ignore the VLM sampling window and continue through their own recording/signal
+window. The GUI hides the VLM interval control for them. Graphs and CSV/JSON
+include every scored sample; the visible table shows the latest 200 rows to
+keep the interface responsive. GMR remains offline playback: causal GMR would
+require different synchronization/phase estimation and trailing smoothing,
+followed by recalibration, rather than merely a faster replay loop.
 
 Only one detector is active. Switching modes releases the previous model to
 avoid competing for GPU memory; the selected detector stays loaded across

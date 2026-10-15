@@ -1,8 +1,8 @@
-"""Persistent, eight-observation bag replay with cached VLM features and a web UI.
+"""Persistent detector replay with cached VLM features and a web UI.
 
 Run with python -m rynnbrain_vlm.online_replay --config ... --interval-sec 10.
-The producer follows recorded timestamps independently of inference. The worker
-selects the latest available frame; it never drains a backlog of stale frames.
+VLM samples the latest available image up to eight times. DINO processes every
+image at its native sampling rate; GMR replays every prepared signal sample.
 """
 
 import argparse
@@ -158,6 +158,66 @@ def synchronized_time():
         for device in range(torch.cuda.device_count()):
             torch.cuda.synchronize(device)
     return time.monotonic()
+
+
+class SequentialReplayFeed:
+    """Pace every native detector sample without dropping samples when scoring lags.
+
+    Unlike the VLM latest-frame mailbox this advances on demand, so memory is
+    bounded and a slow detector makes replay slower instead of skipping inputs.
+    An optional fourth packet field gives the actual accompanying camera time.
+    """
+    def __init__(self, frames, publish, stop, clock=time.monotonic):
+        self.frames, self.publish, self.stop, self.clock = iter(frames), publish, stop, clock
+        self.origin = clock()
+        self.previous = None
+        self.camera_time = None
+
+    def run(self):
+        pass  # Consumption and pacing happen in next_frame, not a producer thread.
+
+    def next_frame(self, earliest):
+        if self.stop.is_set():
+            return None
+        packet = next(self.frames, None)
+        if packet is None:
+            return None
+        frame_id, timestamp, image = packet[:3]
+        if not math.isfinite(timestamp) or timestamp < 0 or (self.previous is not None and timestamp <= self.previous):
+            raise ValueError('Replay samples must have finite, strictly increasing bag timestamps.')
+        if self.stop.wait(max(0., self.origin + timestamp - self.clock())):
+            return None
+        self.previous = timestamp
+        camera_time = packet[3] if len(packet) == 4 else timestamp
+        if image is not None and camera_time != self.camera_time:
+            self.publish(image, camera_time)
+            self.camera_time = camera_time
+        return frame_id, timestamp, image
+
+    def close(self):
+        if hasattr(self.frames, 'close'):
+            self.frames.close()
+
+
+def gmr_sample_frames(frames, timestamps):
+    """Pair every GMR sample with the latest camera image at or before its time.
+
+    The signal clock drives scoring, even before/after camera coverage. No image
+    is required to score force/torque, and no signal sample is silently dropped.
+    """
+    frames = iter(frames)
+    try:
+        upcoming = next(frames, None)
+        latest = None
+        for timestamp in timestamps:
+            while upcoming is not None and upcoming[1] <= timestamp:
+                latest = upcoming
+                upcoming = next(frames, None)
+            yield (latest[0] if latest else None, float(timestamp),
+                   latest[2] if latest else None, latest[1] if latest else None)
+    finally:
+        if hasattr(frames, 'close'):
+            frames.close()
 
 
 class OnlineDetector:
@@ -319,7 +379,8 @@ def save_plot(rows, path, probability):
     scale = 100 if probability else 1
     figure, axis = plt.subplots(figsize=(10, 5))
     times = [row["timestamp_sec"] for row in rows]
-    axis.plot(times, [row["anomaly_score"] * scale for row in rows], "o-", label="Score", color="#2f78c4")
+    axis.plot(times, [row["anomaly_score"] * scale for row in rows], "o-", markersize=2 if len(rows) > 50 else 4,
+              label="Score", color="#2f78c4")
     axis.plot(times, [row["threshold"] * scale for row in rows], "--", label="Threshold", color="#c27524")
     fallback = any(row.get("score_computation") == "uncached_verification_fallback" for row in rows)
     kind = rows[0].get('score_kind', '')
@@ -530,16 +591,27 @@ class ReplayApplication:
         # Annotation is saved only for evaluation, never passed into matching/scoring.
         from .visual_matching import read_corrected_failure_annotation
         failure_annotation = read_corrected_failure_annotation(bag, self.config.get("stage_topic", "/recording_stage"))
-        start_sec = max(float(vlm.get('sampling_start_sec') or 0.), getattr(self.detector, 'start_sec', 0.))
-        ends = [value for value in (vlm.get('sampling_end_sec'), getattr(self.detector, 'end_sec', None)) if value is not None]
+        start_sec = (float(vlm.get('sampling_start_sec') or 0.) if kind == 'vlm'
+                     else getattr(self.detector, 'start_sec', 0.))
+        end_sec = vlm.get('sampling_end_sec') if kind == 'vlm' else getattr(self.detector, 'end_sec', None)
+        sample_fps = self.detector.sample_fps if kind == 'dino' else 15.
         frames = iter_rosbag_image_frames(RosbagImageSource(bag, vlm["camera_topics"][0]),
-            sample_fps=15., start_sec=start_sec, end_sec=min(ends) if ends else None)
-        feed = ReplayFeed(frames, self.publish, self.stop)
+            sample_fps=sample_fps, start_sec=0. if kind == 'gmr' else start_sec, end_sec=end_sec)
+        if kind == 'gmr':
+            frames = gmr_sample_frames(frames, self.detector.results.time.to_numpy())
+        feed_class = ReplayFeed if kind == 'vlm' else SequentialReplayFeed
+        feed = feed_class(frames, self.publish, self.stop)
         producer = threading.Thread(target=feed.run, daemon=True)
         rows, status, error = [], "running", None
-        self.update(status=status, output_directory=str(output))
-        metadata = dict(bag=str(bag), protocol="online_elapsed_time_latest_frame_v1", interval_sec=self.interval,
-            max_frames=self.detector.frame_count, note=self.state['note'], classifier_path=str(self.detector.path),
+        max_frames = self.detector.frame_count if kind == 'vlm' else None
+        total_samples = len(self.detector.results) if kind == 'gmr' else max_frames
+        self.update(status=status, output_directory=str(output), max_frames=max_frames,
+                    total_samples=total_samples, sample_fps=sample_fps if kind == 'dino' else None)
+        protocol = ('online_elapsed_time_latest_frame_v1' if kind == 'vlm' else
+                    'dino_all_sampled_frames_v1' if kind == 'dino' else 'gmr_all_prepared_samples_v1')
+        metadata = dict(bag=str(bag), protocol=protocol, interval_sec=self.interval if kind == 'vlm' else None,
+            sample_fps=sample_fps if kind == 'dino' else None, total_samples=total_samples,
+            max_frames=max_frames, note=self.state['note'], classifier_path=str(self.detector.path),
             score_source=self.detector.score_source, comparison_signature=self.detector.signature,
             verification_mode=self.verify, diagnostic_mode=self.diagnose)
         metadata.update(visual_matching=matching_metadata, recorded_failure_annotation=failure_annotation,
@@ -566,7 +638,7 @@ class ReplayApplication:
             with (output / "online_scores.csv").open("w", newline="", encoding="utf-8") as stream:
                 writer = None
                 earliest = start_sec
-                for _ in range(self.detector.frame_count):
+                while max_frames is None or len(rows) < max_frames:
                     packet = feed.next_frame(earliest)
                     if packet is None:
                         break
@@ -592,9 +664,10 @@ class ReplayApplication:
                         row["cached_vector_file"] = None
                     row.update(frame_id=frame_id, result_time_sec=time.monotonic() - feed.origin,
                                observation_to_result_sec=time.monotonic() - feed.origin - timestamp)
-                    row["vector_file"] = f"frame_{len(rows) + 1:02d}.npy"
-                    np.save(output / row["vector_file"], vector)
-                    image.save(output / f"frame_{len(rows) + 1:02d}.jpg")
+                    row["vector_file"] = f"frame_{len(rows) + 1:02d}.npy" if kind != 'gmr' else None
+                    if kind != 'gmr':
+                        np.save(output / row["vector_file"], vector)
+                        image.save(output / f"frame_{len(rows) + 1:02d}.jpg")
                     match = row.get("visual_matching", {})
                     if match.get("status") == "matched":
                         try:
@@ -612,12 +685,13 @@ class ReplayApplication:
                     else:
                         matched_bytes = None
                     observed = getattr(self.detector, 'preview_image', None)
-                    observed = observed.copy() if observed is not None else image.copy()
+                    observed = observed.copy() if observed is not None else image.copy() if image is not None else None
                     if kind == 'dino':
                         observed.save(output / f'frame_{len(rows) + 1:02d}_heatmap.jpg')
-                    observed.thumbnail((640, 480))
                     buffer = io.BytesIO()
-                    observed.save(buffer, format="JPEG", quality=85)
+                    if observed is not None and kind != 'gmr':
+                        observed.thumbnail((640, 480))
+                        observed.save(buffer, format="JPEG", quality=85)
                     if getattr(self.detector, "capture_visual", False) and self.detector.cache.last_visual_descriptor is not None:
                         np.save(output / f"frame_{len(rows) + 1:02d}_visual.npy", self.detector.cache.last_visual_descriptor)
                     if baseline is not None:
@@ -633,9 +707,10 @@ class ReplayApplication:
                     with self.lock:
                         self.observed_jpeg, self.matched_jpeg = buffer.getvalue(), matched_bytes
                         self.state.update(status="observing", rows=list(rows), scoring_time_sec=None)
-                    print(f"{Path(bag).name}: {len(rows)}/{self.detector.frame_count}, "
-                          f"t={timestamp:.3f}s, score={row['anomaly_score']:.5f}, "
-                          f"threshold={row['threshold']:.5f}, cache={row['cached_feature_sec']:.3f}s", flush=True)
+                    if kind == 'vlm' or len(rows) == 1 or len(rows) % 25 == 0:
+                        print(f"{Path(bag).name}: {len(rows)}/{total_samples or 'end of recording'}, "
+                              f"t={timestamp:.3f}s, score={row['anomaly_score']:.5f}, "
+                              f"threshold={row['threshold']:.5f}, processing={row['cached_feature_sec']:.3f}s", flush=True)
                     if failed:
                         message = verification_failure_message(check)
                         if not self.diagnose:
@@ -653,6 +728,8 @@ class ReplayApplication:
         finally:
             self.stop.set()
             producer.join(timeout=5)
+            if isinstance(feed, SequentialReplayFeed):
+                feed.close()
             persist()
             try:
                 save_plot(rows, output / "online_timeline.png", not self.detector.knn)

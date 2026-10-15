@@ -13,12 +13,87 @@ from urllib.error import HTTPError
 import numpy as np
 from PIL import Image
 
-from rynnbrain_vlm.online_replay import (ReplayFeed, ReplayApplication, OnlineDetector, make_handler,
+from rynnbrain_vlm.online_replay import (ReplayFeed, SequentialReplayFeed, gmr_sample_frames, ReplayApplication, OnlineDetector, make_handler,
                                        finish_verification, verification_failure_message,
                                        signature_differences, validate_online_classifier, replay_bags)
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_sequential_feed_keeps_every_sample_when_inference_falls_behind(self):
+        now = [0.]
+        stop = Mock()
+        stop.is_set.return_value = False
+        def wait(duration):
+            now[0] += duration
+            return False
+        stop.wait.side_effect = wait
+        image = Image.new('RGB', (2, 2))
+        published = Mock()
+        feed = SequentialReplayFeed(((i, i * .5, image) for i in range(12)), published, stop, clock=lambda: now[0])
+        seen = []
+        while (packet := feed.next_frame(1000.)) is not None:
+            seen.append(packet[0])
+            now[0] += 1.  # Inference takes longer than the sampling period.
+        self.assertEqual(seen, list(range(12)))
+        self.assertEqual(published.call_count, 12)
+        self.assertGreater(now[0], 5.5)
+        stop.is_set.return_value = True
+        self.assertIsNone(feed.next_frame(0.))
+
+    def test_gmr_signal_clock_does_not_drop_samples_or_select_future_images(self):
+        image = Image.new('RGB', (2, 2))
+        frames = iter([(0, .5, image), (1, 1.5, image)])
+        times = np.linspace(0., 2., 21)
+        packets = list(gmr_sample_frames(frames, times))
+        self.assertEqual(len(packets), 21)
+        np.testing.assert_array_equal([p[1] for p in packets], times)
+        self.assertIsNone(packets[0][2])
+        self.assertEqual(packets[-1][3], 1.5)
+        self.assertTrue(all(p[3] is None or p[3] <= p[1] for p in packets))
+        self.assertEqual(len(list(gmr_sample_frames(iter([]), times))), 21)
+
+    def test_non_vlm_runs_all_native_samples_despite_vlm_limit_interval_and_window(self):
+        import pandas as pd
+        for kind in ['dino', 'gmr']:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                config = {'output_dir': directory, 'rynnbrain': {'camera_topics': ['top'],
+                          'num_frames': 8, 'sampling_start_sec': 10., 'sampling_end_sec': 11.}}
+                app = ReplayApplication(config, [Path('test')], 10., False)
+                app.update(detector_type=kind, note='native sampling')
+                times = np.arange(12) * .001
+                def append(image, timestamp, verify):
+                    self.assertFalse(verify)
+                    return dict(timestamp_sec=timestamp, anomaly_score=timestamp * 2, threshold=timestamp + .1,
+                                above_threshold=False, cached_feature_sec=.001, verification=None), np.ones(2), None
+                app.detector = SimpleNamespace(reset=Mock(), append=append, frame_count=None,
+                    path=Path('existing'), score_source='test', signature={}, knn=True, sample_fps=2.,
+                    results=pd.DataFrame({'time': times}), start_sec=0., end_sec=float(times[-1]))
+                image = Image.new('RGB', (4, 4))
+                # GMR must also finish scoring after the camera ends.
+                frames = [(i, float(t), image) for i, t in enumerate(times[:3] if kind == 'gmr' else times)]
+                with patch('rosbag_io.iter_rosbag_image_frames', return_value=iter(frames)) as reader, \
+                     patch('rynnbrain_vlm.online_replay.save_plot'), \
+                     patch('rynnbrain_vlm.visual_matching.read_corrected_failure_annotation', return_value={}):
+                    app.run_bag(Path('test'))
+                state = app.snapshot()
+                self.assertEqual(state['status'], 'completed', state.get('error'))
+                self.assertEqual(len(state['rows']), 12)
+                self.assertIsNone(state['max_frames'])
+                self.assertEqual(reader.call_args.kwargs['start_sec'], 0.)
+                if kind == 'dino':
+                    self.assertEqual(reader.call_args.kwargs['sample_fps'], 2.)
+                else:
+                    self.assertEqual(state['video_time_sec'], times[2])
+                    self.assertEqual(state['total_samples'], 12)
+                saved_path = next(Path(directory).glob('online_replay/*/test/online_results.json'))
+                saved = json.loads(saved_path.read_text())
+                self.assertIsNone(saved['interval_sec'])
+                np.testing.assert_array_equal([r['timestamp_sec'] for r in saved['rows']], times)
+                np.testing.assert_allclose([r['threshold'] for r in saved['rows']], times + .1)
+                import csv
+                with saved_path.with_name('online_scores.csv').open() as stream:
+                    self.assertEqual(len(list(csv.DictReader(stream))), 12)
+
     def test_bag_discovery_keeps_default_first_deduplicates_and_honors_cli(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
