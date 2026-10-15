@@ -418,6 +418,7 @@ class ReplayApplication:
         self.state["matching_status"] = "Not prepared"
         self.state['detector_type'] = 'vlm'
         self.state['requested_detector'] = 'vlm'
+        self.state['gmr_signal'] = 'pose'
         self.jpeg = None
         self.matched_jpeg = None
         self.observed_jpeg = None
@@ -431,13 +432,16 @@ class ReplayApplication:
         with self.lock:
             return json.loads(json.dumps({**self.state, "model_ready": bool(getattr(self, "detector", None))}))
 
-    def start(self, index, interval=None, mode=None, match_preview=None, detector_type=None):
+    def start(self, index, interval=None, mode=None, match_preview=None, detector_type=None, gmr_signal=None):
         with self.lock:
             if self.state["status"] not in {"ready", "completed", "stopped", "error"}:
                 raise ValueError("Wait for initialization or stop the current execution first.")
             detector_type = detector_type or self.state['detector_type']
             if detector_type not in {'vlm', 'dino', 'gmr'}:
                 raise ValueError('Choose VLM, DINO or GMR offline replay.')
+            gmr_signal = self.state['gmr_signal'] if gmr_signal is None else gmr_signal
+            if not isinstance(gmr_signal, str) or gmr_signal not in {'pose', 'joints', 'gripper', 'pose_gripper', 'force'}:
+                raise ValueError('Select TCP pose, joint positions, gripper, pose + gripper, or force/torque.')
             switching = detector_type != self.state['detector_type']
             if type(index) is not int or not 0 <= index < len(self.bags):
                 raise ValueError("Select a listed bag.")
@@ -464,6 +468,8 @@ class ReplayApplication:
                               bag=str(self.bags[index]), interval_sec=self.interval,
                               match_preview=match_preview, matching_status="Not prepared",
                               requested_detector=detector_type,
+                              gmr_signal=gmr_signal,
+                              signal_description=None, signal_columns=[],
                               detector_preparation_sec=None,
                               replay_mode=mode, verification_mode=self.verify, diagnostic_mode=self.diagnose)
             self.jobs.put_nowait(index)
@@ -539,6 +545,8 @@ class ReplayApplication:
 
     def run_bag(self, bag):
         from rosbag_io import RosbagImageSource, iter_rosbag_image_frames
+        if self.state['detector_type'] == 'gmr':
+            self.detector.signal_mode = self.state['gmr_signal']
         self.detector.reset(bag)
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid4().hex[:8]
         output = Path(self.config["output_dir"]) / "online_replay" / run_id / Path(bag).stem
@@ -560,7 +568,9 @@ class ReplayApplication:
                 self.update(status=status, error=None if status == 'stopped' else str(failure))
                 return
             preparation_metadata['duration_sec'] = time.monotonic() - started
-            self.update(detector_preparation_sec=preparation_metadata['duration_sec'])
+            self.update(detector_preparation_sec=preparation_metadata['duration_sec'],
+                        signal_description=preparation_metadata.get('signal_description'),
+                        signal_columns=preparation_metadata.get('output_columns', []))
         matching_metadata = {"status": "disabled"}
         self.detector.capture_visual = False
         preparation_started = time.monotonic()
@@ -785,7 +795,7 @@ def make_handler(app):
                 if not isinstance(data, dict):
                     raise ValueError("Expected a JSON object")
                 if self.path == "/start":
-                    app.start(data.get("bag_index"), data.get("interval_sec"), data.get("mode"), data.get("match_preview"), data.get('detector_type'))
+                    app.start(data.get("bag_index"), data.get("interval_sec"), data.get("mode"), data.get("match_preview"), data.get('detector_type'), data.get('gmr_signal'))
                 elif self.path == "/stop":
                     app.stop.set()
                 else:
