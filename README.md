@@ -1114,31 +1114,49 @@ Use the **Detector** selector before starting an execution:
   Each image supplies its native score, adaptive threshold and heatmap. If
   inference cannot keep up, replay falls behind wall time rather than dropping
   inputs; Observation → result includes this delay.
-- **GMR · offline replay** has a **TS signal** selector in the GUI: TCP pose
-  (default), joint positions, gripper position, TCP pose + gripper position,
-  or force/torque. No new config parameters or model paths are needed. It uses
-  the current top-level `nominal_bags` for training and leave-one-run-out
-  calibration, and the selected held-out bag for scoring. Each signal selection
-  has its own model/threshold cache identity. Missing channels, different joint
-  names, and inconsistent pose reference frames are errors; a force model is
-  never used to score pose or joints. GMR scaling, conditional distance,
-  adaptive calibration, centered smoothing and majority voting are retained.
-  Force/torque mode preserves the previous force-based synchronization and
-  prefers `/tcp_force` or a unique Wrench/WrenchStamped topic. The other modes
-  require the final three numbered stage markers and align stages 1, 2, 3 to
-  thirds of normalized phase, ending at common signal coverage. Error/Fail
-  annotations do not set phase or train thresholds. Samples before common
-  coverage are not invented. A signal must cover part of every stage.
-  Whole-recording preprocessing uses future samples: this is **offline result
-  playback, not causal online detection**. The graph shows smoothed epsilon
-  and threshold 1; the status separately reports the filtered alarm. Video and
-  signal samples use bag-relative time. **Every prepared signal sample** is
-  replayed at its own timestamp (normally 500 samples after the existing
-  resampling), independently of image arrival. The accompanying image is the
-  latest camera frame at or before that time; missing camera coverage does not
-  drop signal samples. The saved rows also contain the raw Mahalanobis distance,
-  adaptive distance threshold and unsmoothed epsilon. Offline preparation time is shown
-  separately; the very short result lookup time is not model inference time.
+- **GMR online TS** has a **TS signal** selector: TCP pose (default), joint
+  positions, gripper position, TCP pose + gripper position, or force/torque.
+  It fits and calibrates a separate model for the selected signals using the
+  existing top-level `nominal_bags`. No new config fields or paths are needed.
+  The first run prepares the nominal model; subsequent runs reuse it. Test
+  scores are computed as replay advances and appear on the GUI graph immediately.
+  The original offline GMR scripts and their synchronization are unchanged.
+
+  **Stage policy:** ignore stage 2/3 until the first stage 1; stage 1 starts
+  detection, stage 2 advances progress, and the first stage 3 after that start
+  ends detection. Repeated/backward markers do not rewind the run. Error/Fail
+  markers are recorded for evaluation only and never advance progress or affect
+  scores. Since stage 3 means *end*, there are two active intervals: 1 to 2 and
+  2 to 3. Nominal runs need both intervals; a test can end early at stage 3.
+  Missing start/end markers produce an explicit error rather than an invented
+  window. If stage 2 is absent in a test, progress remains in interval 1 until
+  stage 3; no boundary is guessed. This policy applies to GMR replay only.
+
+  The current stage's end time is unknown online. Phase is estimated from elapsed
+  time within the stage divided by that stage's median nominal duration, clamped
+  to its half of the phase range. Stage 2 resets progress to the second half.
+  A slower/faster execution can still affect scores; this is an estimate, not
+  exact motion alignment. Leave-one-run-out calibration excludes the held-out
+  nominal from both model fitting and duration estimation.
+
+  Signals are sampled on a **10 Hz clock** using only the latest received values,
+  including held gripper feedback; there is no interpolation from future data.
+  All selected signals must have arrived after stage 1 before scoring starts.
+  Pose, joints and force older than 1 second stop the run with a stale-data error;
+  gripper feedback is held because it can be sparse while stationary. Camera
+  playback proceeds independently (up to 15 fps); TS scoring works without video.
+  There is no eight-observation limit. If processing falls behind, replay keeps
+  the samples and reports the delay rather than silently skipping them.
+
+  GMR scaling, conditional Mahalanobis distance and nominal adaptive threshold
+  calibration retain their existing methods. Score smoothing is now a trailing
+  11-sample median (past/current data only), followed by the existing 6-of-8
+  majority vote. These filters introduce detection delay. The graph shows
+  smoothed epsilon (distance / adaptive threshold), with threshold 1 and a
+  separate filtered-alarm status. CSV/JSON also save raw distance, its adaptive
+  threshold, raw epsilon, current stage and estimated phase. **Scoring time**
+  measures GMR scoring and filtering; **TS sample to result** includes replay
+  delay. Nominal model preparation time is reported separately.
 
 The signal readers prefer `/tcp_pose_broadcaster/pose`, `/joint_states`, and
 `/Robotiq2FGripperRobotInputMsg`. The same typed topics must exist in all nominal
@@ -1162,29 +1180,24 @@ bags without installing the custom ROS package in Docker. Embedded bag
 definitions take precedence over this fallback. Pose and joint modes work
 independently of the gripper definition.
 
-GMR results and source identities are cached in
-`<output_dir>/online_replay/gmr_offline/`, including the full result CSV. A
-repeated bag/settings combination reuses these results. Other bags reuse the
-fitted nominal model while the GMR mode stays loaded. Existing legacy CSV files
-without a bag/timebase identity are not silently associated with another bag.
-Nominal data and default GMR parameters come from the current config and the
-existing time-series implementation; no new config fields are needed.
+The causal GMR model, duration estimates, thresholds and nominal source identity
+are cached under `<output_dir>/online_replay/gmr_online/`. Only nominal artifacts
+are reused; test scores are always computed during replay. A changed nominal
+source, signal selection or training setting produces a different cache key.
+Old offline score files are not used by the new GUI GMR mode.
 
 The observation interval and eight-frame limit apply only to VLM. DINO and GMR
 ignore the VLM sampling window and continue through their own recording/signal
-window. The GUI hides the VLM interval control for them. Graphs and CSV/JSON
-include every scored sample; the visible table shows the latest 200 rows to
-keep the interface responsive. GMR remains offline playback: causal GMR would
-require different synchronization/phase estimation and trailing smoothing,
-followed by recalibration, rather than merely a faster replay loop.
+window. Graphs and CSV/JSON include every scored sample; the visible table shows
+the latest 200 rows to keep the interface responsive. CSV is flushed per sample;
+GMR JSON snapshots are updated about once per second and on completion/error.
 
 Only one detector is active. Switching modes releases the previous model to
 avoid competing for GPU memory; the selected detector stays loaded across
 executions in that mode. The initial server startup still loads the configured
 VLM. A VLM startup error does not prevent selecting DINO or GMR. Preparation
 errors remain visible, and a failed mode can be retried with Start execution.
-Each mode currently retains the configured observation count (typically eight)
-and replay interval. The output JSON records the detector type, score source
+The output JSON records the detector type, score source
 and preparation metadata. DINO adds `frame_*_heatmap.jpg`; non-VLM vector files
 are labeled by `vector_kind` (DINO CLS or GMR distance/phase), not CoP features.
 
