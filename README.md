@@ -1049,6 +1049,97 @@ processes its selected bag set and exports combined tables/plots. The GUI
 processes only the bag you start, saving each execution under `online_replay/`.
 It does not launch or monitor a benchmark, nor automatically combine its results.
 
+The GUI's **Find similar nominal frame** switch displays the exact scored observation beside
+its closest nominal image in the recorded stage. This is an experimental
+retrieval preview; it does **not** replace the CoP classifier memory, change the
+anomaly score, or recalibrate thresholds. A history-dependent CoP vector cannot
+simply be replaced by an independent image descriptor.
+
+The descriptor is the float32 mean of one image's Qwen3-VL visual-merger tokens,
+L2-normalized for cosine comparison. It is not a learned CLS token. Replay
+captures these tokens from the existing new-image forward pass, so it adds no
+second vision/VLM pass per observation. Retrieval quality still needs checking
+on your images. The preview reports the selected stage, nominal bag/time,
+cosine distance and candidate count. Lower distance means greater visual
+similarity, not a calibrated failure probability.
+
+On the first execution with this preview enabled, the worker prepares up to
+eight nominal images **per stage per nominal bag**, using the existing
+`cop_classifier.training.normal_bags` list, or `reference_bags` if that list is
+empty. It encodes these images once without language decoding. The page remains
+responsive and shows preparation progress; Stop also cancels preparation.
+Memory is reused in the session and cached under
+`<output_dir>/online_replay/visual_memory/`. Recording identity, stage annotations
+and feature settings invalidate stale cache entries. This cache is separate
+from the trained kNN/logistic artifacts. No new config paths are required.
+
+The preview uses corrected stage annotations from the recorded bag, so it is
+retrospective alignment, not a live stage estimator. Unknown stages or missing
+nominal candidates are reported instead of searching a different stage. Replay
+continues with the original classifier if preview preparation is unavailable.
+Specifically, it takes the final three **numbered** messages and requires
+`1, 2, 3` in increasing timestamp order. Sequences such as `1, Error, 2, 3` and
+`1, 2, Error, 3` have the same stage-boundary rule: Error/Fail does not advance
+the stage. Earlier numbered markers are ignored. Frames before the corrected
+stage-1 start have unknown stage; missing or invalid boundaries disable the
+preview instead of borrowing an old marker or dividing the bag into thirds.
+The first Error/Fail at or after that corrected stage-1 start is saved separately
+as the failure-time annotation; it is never used to select a match or score.
+Saved results include the matching metadata, top three candidates, visual
+descriptor and matched thumbnail for each available observation, plus separate
+preparation/search timings. Visual pooling time is included in cached feature
+time. The benchmark is unchanged.
+
+Use the **Detector** selector before starting an execution:
+
+- **VLM** uses the configured CoP kNN/logistic classifier. Turn **Find similar
+  nominal frame** off for the previous classifier-only behavior. Turning it on
+  adds the visual matching preview; it does not replace the classifier's memory.
+  Cached processing remains the default. Cache comparison controls are under
+  **Advanced: VLM cache diagnostics**.
+- **DINO vision** loads the existing named memory from
+  `<nominal_cache_dir>/<vision_memory_name>/<camera_slug>/`. Its native CLS
+  shortlist, attention-weighted patch scoring and saved adaptive thresholds
+  remain in use. It shows the scored image's heatmap and the actual selected
+  nominal bag, frame number and timestamp. Similar-frame search is intrinsic
+  to DINO scoring, so the VLM preview switch does not disable it. If memory is
+  missing or incompatible, prepare it with
+  `docker compose run --rm --build vision-memory`. Replay never rebuilds DINO
+  memory automatically. It uses the first configured RynnBrain camera; that
+  camera must have compatible DINO memory. Stage-constrained replay requires
+  the final numbered `1, 2, 3` boundaries instead of guessing missing stages.
+- **GMR · offline replay** runs the existing force/torque pipeline before
+  playback: force-based synchronization, resampling, nominal leave-one-run-out
+  calibration, GMR, centered score smoothing and majority-vote filtering. It
+  uses the current top-level `nominal_bags` for calibration and the selected
+  test bag for scoring. `/tcp_force` is preferred; otherwise a unique Wrench
+  or WrenchStamped topic is selected. Missing or ambiguous wrench topics are
+  reported explicitly. The same topic must exist in nominal recordings.
+  Whole-recording preprocessing uses future samples: this is **offline result
+  playback, not causal online detection**. The graph shows smoothed epsilon
+  and threshold 1; the status separately reports the filtered alarm. Video and
+  signal samples use bag-relative time, with the latest signal sample at or
+  before each selected video timestamp. Offline preparation time is shown
+  separately; the very short result lookup time is not model inference time.
+
+GMR results and source identities are cached in
+`<output_dir>/online_replay/gmr_offline/`, including the full result CSV. A
+repeated bag/settings combination reuses these results. Other bags reuse the
+fitted nominal model while the GMR mode stays loaded. Existing legacy CSV files
+without a bag/timebase identity are not silently associated with another bag.
+Nominal data and default GMR parameters come from the current config and the
+existing time-series implementation; no new config fields are needed.
+
+Only one detector is active. Switching modes releases the previous model to
+avoid competing for GPU memory; the selected detector stays loaded across
+executions in that mode. The initial server startup still loads the configured
+VLM. A VLM startup error does not prevent selecting DINO or GMR. Preparation
+errors remain visible, and a failed mode can be retried with Start execution.
+Each mode currently retains the configured observation count (typically eight)
+and replay interval. The output JSON records the detector type, score source
+and preparation metadata. DINO adds `frame_*_heatmap.jpg`; non-VLM vector files
+are labeled by `vector_kind` (DINO CLS or GMR distance/phase), not CoP features.
+
 Every execution has a unique directory under
 `<output_dir>/online_replay/<timestamp_uuid>/<bag>/` containing:
 
