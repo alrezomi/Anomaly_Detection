@@ -178,14 +178,39 @@ class TrailingAlarm:
         return smoothed, sum(self.alarms) >= self.votes
 
 
+def channel_diagnostics(model, scaled, component, threshold):
+    """Project the joint distance boundary onto each channel in original units.
+
+    These are diagnostic envelopes, not independently calibrated channel alarms.
+    Cross-channel correlations can cause a joint alarm while every channel is
+    inside its envelope. Use the same regularized covariance as distance scoring.
+    """
+    inputs, outputs = model._index_sets()
+    mean, covariance = model._conditional_output_distribution(scaled[inputs], component)
+    covariance = covariance + np.eye(len(outputs)) * model.reg_covar
+    std = np.sqrt(np.maximum(np.diag(covariance), 1e-12))
+    scale, offset = model.scaler.scale_[outputs], model.scaler.mean_[outputs]
+    predicted = mean * scale + offset
+    observed = scaled[outputs] * scale + offset
+    half_width = threshold * std * scale
+    residual = np.abs(scaled[outputs] - mean) / std
+    if not np.isfinite([predicted, observed, half_width, residual]).all():
+        raise ValueError('GMR channel diagnostics contain nonfinite values.')
+    return {name: dict(observed=float(observed[i]), expected=float(predicted[i]),
+                       lower=float(predicted[i] - half_width[i]), upper=float(predicted[i] + half_width[i]),
+                       standardized_deviation=float(residual[i]))
+            for i, name in enumerate(model.output_columns)}
+
+
 class GmrOnlineDetector:
     kind = 'gmr'
-    score_kind = 'gmr_epsilon'
-    score_source = 'causal_gmr_smoothed_epsilon'
+    score_kind = 'gmr_distance'
+    score_source = 'causal_gmr_mahalanobis'
     note = ('Causal GMR: stage 1 starts scoring, stage 2 advances progress, stage 3 ends it. '
             'Earlier 2/3 markers are ignored. Progress within a stage uses nominal durations. '
             'Signals use latest received values at 10 Hz and trailing smoothing; no future test samples. '
-            'Epsilon threshold is 1; the displayed alarm uses majority voting. Validate detection on held-out runs.')
+            'The graph shows joint distance and its nominal adaptive threshold. '
+            'The alarm retains trailing epsilon smoothing and majority voting. Validate detection on held-out runs.')
     knn = True
     capture_visual = False
     frame_count = None
@@ -343,10 +368,12 @@ class GmrOnlineDetector:
         smoothed, alarm = self.alarm.append(epsilon)
         if not np.isfinite([distance, threshold, smoothed]).all():
             raise ValueError('GMR produced a nonfinite score; replay stopped.')
+        channels = channel_diagnostics(self.model, scaled, component, threshold)
         row = dict(sample_index=self.step, timestamp_sec=timestamp, signal_time_sec=timestamp,
-                   anomaly_score=smoothed, threshold=1., above_threshold=bool(smoothed > 1.),
+                   anomaly_score=distance, threshold=threshold, above_threshold=bool(distance > threshold),
                    alarm_filtered=bool(alarm), raw_distance=distance, adaptive_threshold=threshold,
-                   epsilon_raw=epsilon, phase=phase, stage=sample['stage'], component=component,
+                   epsilon_raw=epsilon, epsilon_smooth=smoothed, channels=channels,
+                   phase=phase, stage=sample['stage'], component=component,
                    signal_mode=self.signal_mode, cached_feature_sec=time.monotonic() - started,
                    classifier_sec=0., verification=None, score_kind=self.score_kind,
                    vector_kind='gmr_mahalanobis_and_phase', visual_matching={'status': 'disabled'})
