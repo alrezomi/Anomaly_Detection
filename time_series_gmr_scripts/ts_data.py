@@ -18,6 +18,75 @@ SIGNAL_COLUMNS = [
     "torque_z",
 ]
 
+
+def preprocess_replay_signals(streams, stages, resample_length=500):
+    """Offline stage-aligned pose/joint/gripper inputs; never force-based trimming.
+
+    streams maps a signal kind to its bag-timestamped numeric dataframe. Error
+    markers are absent from stages. Each stage occupies one third of phase;
+    the recording's common signal endpoint supplies the retrospective end.
+    """
+    from scipy.spatial.transform import Rotation
+    if resample_length < 3:
+        raise ValueError('At least three TS samples are required.')
+    prepared = {}
+    for kind, source in streams.items():
+        data = source.sort_values('time').drop_duplicates('time', keep='last').copy()
+        if len(data) < 2 or not np.isfinite(data.time).all():
+            raise ValueError(f'{kind}: at least two finite timestamps are required.')
+        if kind == 'pose':
+            columns = ['position_x', 'position_y', 'position_z']
+            quat = data[['orientation_x', 'orientation_y', 'orientation_z', 'orientation_w']].to_numpy(float)
+            if not np.isfinite(quat).all() or (np.linalg.norm(quat, axis=1) < 1e-8).any():
+                raise ValueError('TCP pose contains an invalid orientation quaternion.')
+            # q and -q describe the same rotation. Rotation columns avoid sign
+            # flips and Euler-angle wrap discontinuities in the GMR features.
+            rotation = Rotation.from_quat(quat).as_matrix()[:, :, :2].reshape(-1, 6)
+            for i in range(6):
+                name = f'rotation_{i}'
+                data[name] = rotation[:, i]
+                columns.append(name)
+        elif kind == 'joints':
+            positions = sorted(c for c in data if c.endswith('_position'))
+            if not positions:
+                raise ValueError('JointState has no populated joint position fields.')
+            # Preserve names and native units. JointState alone cannot tell us
+            # whether a joint is revolute or prismatic, so do not assume angles.
+            columns = positions
+        elif kind == 'gripper':
+            columns = ['gripper_position']
+        else:
+            raise ValueError(f'Unsupported replay signal: {kind}')
+        if not np.isfinite(data[columns].to_numpy(float)).all():
+            raise ValueError(f'{kind}: missing or non-finite signal values; channels must be populated consistently.')
+        prepared[kind] = (data, columns)
+    if not prepared:
+        raise ValueError('Select at least one TS signal.')
+    starts = np.asarray(stages.starts, dtype=float)
+    if len(starts) != 3 or not np.isfinite(starts).all() or (np.diff(starts) <= 0).any():
+        raise ValueError('TS stage alignment requires ordered stage starts 1, 2, 3.')
+    start = max(float(starts[0]), *(float(data.time.iloc[0]) for data, _ in prepared.values()))
+    if start >= starts[1]:
+        raise ValueError('Selected TS signals have no common coverage in stage 1; no missing prefix is invented.')
+    end = min(float(data.time.iloc[-1]) for data, _ in prepared.values())
+    if end <= starts[2]:
+        raise ValueError('Selected TS signals must cover all three recorded stages.')
+    phase_start = (start - starts[0]) / (starts[1] - starts[0]) / 3
+    phase = np.linspace(phase_start, 1., resample_length)
+    timestamps = np.interp(phase, [0., 1/3, 2/3, 1.], [*starts, end])
+    output = pd.DataFrame({'time': timestamps, 'phase': phase})
+    for kind, (data, columns) in prepared.items():
+        for column in columns:
+            if kind == 'gripper':
+                # Feedback arrives much more slowly than pose. Hold the most
+                # recent reading; do not invent a gradual opening/closing ramp.
+                indices = np.searchsorted(data.time.to_numpy(), timestamps, side='right') - 1
+                output[column] = data[column].to_numpy()[indices]
+            else:
+                output[column] = np.interp(timestamps, data.time, data[column])
+    output.attrs['pose_frame'] = streams.get('pose', pd.DataFrame()).attrs.get('frame_id')
+    return output
+
 try:
     from rosbags.highlevel import AnyReader
     from rosbags.typesys import Stores, get_typestore

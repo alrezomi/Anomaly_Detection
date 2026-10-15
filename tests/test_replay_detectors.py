@@ -10,9 +10,140 @@ from PIL import Image
 
 from rynnbrain_vlm.replay_detectors import DinoReplayDetector, GmrReplayDetector, wrench_topic, synchronized_wrench
 from rynnbrain_vlm.visual_matching import RecordedStages
+from time_series_gmr_scripts.ts_data import preprocess_replay_signals
+from rosbag_io import _numeric_message_values
+from types import SimpleNamespace
 
 
 class ReplayDetectorTests(unittest.TestCase):
+    @staticmethod
+    def pose_signal(offset=0.):
+        t = np.linspace(0., 12., 90)
+        data = pd.DataFrame(dict(time=t, position_x=np.sin(t)+offset, position_y=np.cos(t),
+            position_z=t*.01, orientation_x=0., orientation_y=0.,
+            orientation_z=np.sin(t*.05), orientation_w=np.cos(t*.05)))
+        data.attrs['frame_id'] = 'base'
+        return data
+
+    def test_stage_resampling_quaternion_sign_invariance_and_gripper_hold(self):
+        pose = self.pose_signal()
+        flipped = pose.copy()
+        flipped.loc[::2, ['orientation_x', 'orientation_y', 'orientation_z', 'orientation_w']] *= -1
+        grip = pd.DataFrame({'time': [0., 5., 12.], 'gripper_position': [0., 1., 1.]})
+        stages = RecordedStages((1., 4., 8.), ((6., 'Error'),))
+        actual = preprocess_replay_signals({'pose': flipped, 'gripper': grip}, stages, 31)
+        expected = preprocess_replay_signals({'pose': pose, 'gripper': grip}, RecordedStages((1., 4., 8.)), 31)
+        pd.testing.assert_frame_equal(actual, expected)
+        self.assertEqual(actual.attrs['pose_frame'], 'base')
+        np.testing.assert_allclose(actual.time.iloc[[0, 10, 20, 30]], [1., 4., 8., 12.])
+        self.assertTrue((actual.loc[actual.time < 5., 'gripper_position'] == 0).all())
+        self.assertTrue((actual.loc[actual.time >= 5., 'gripper_position'] == 1).all())
+        grip['gripper_position'] = [0., np.nan, 1.]
+        with self.assertRaisesRegex(ValueError, 'non-finite'):
+            preprocess_replay_signals({'gripper': grip}, stages)
+
+    def test_joint_channels_are_named_and_effort_is_not_used_as_force(self):
+        def message(names, positions):
+            return SimpleNamespace(name=names, position=positions, velocity=[], effort=[10., 20.])
+        first = _numeric_message_values(message(['a', 'b'], [1., 2.]), 'sensor_msgs/msg/JointState')
+        second = _numeric_message_values(message(['b', 'a'], [2., 1.]), 'sensor_msgs/msg/JointState')
+        data = pd.DataFrame([dict(time=0., **first), dict(time=3., **second)])
+        result = preprocess_replay_signals({'joints': data}, RecordedStages((0., 1., 2.)), 10)
+        self.assertEqual(list(result), ['time', 'phase', 'a_position', 'b_position'])
+        np.testing.assert_allclose(result.a_position, 1.)
+        np.testing.assert_allclose(result.b_position, 2.)
+        data.loc[1, 'a_position'] = np.nan
+        with self.assertRaisesRegex(ValueError, 'non-finite'):
+            preprocess_replay_signals({'joints': data}, RecordedStages((0., 1., 2.)))
+
+    def test_gripper_reads_actual_position_not_command_echo(self):
+        typename = 'robotiq_hand_e_gripper_interfaces/msg/Robotiq2FGripperRobotInput'
+        values = _numeric_message_values(SimpleNamespace(gPO=128, gPR=255), typename)
+        self.assertEqual(values, {'gripper_position': 128/255})
+        with self.assertRaisesRegex(ValueError, 'actual-position'):
+            _numeric_message_values(SimpleNamespace(gPR=255), typename)
+
+    def test_custom_gripper_cdr_is_read_when_bag_embeds_its_definition(self):
+        from rosbags.rosbag2 import Writer
+        from rosbags.typesys import Stores, get_typestore, get_types_from_msg
+        from rosbag_io import read_numeric_topic
+        typename = 'robotiq_hand_e_gripper_interfaces/msg/Robotiq2FGripperRobotInput'
+        # A different embedded schema must override the lab-schema fallback.
+        store = get_typestore(Stores.ROS2_HUMBLE)
+        store.register(get_types_from_msg('uint8 g_pr\nuint8 g_po\n', typename))
+        with tempfile.TemporaryDirectory() as directory:
+            bag = Path(directory) / 'bag'
+            with Writer(bag, version=9) as writer:
+                connection = writer.add_connection('/Robotiq2FGripperRobotInputMsg', typename, typestore=store)
+                for i, position in enumerate([0, 128, 255]):
+                    message = store.types[typename](g_pr=255, g_po=position)
+                    writer.write(connection, 1_000_000_000 + i*500_000_000,
+                                 store.serialize_cdr(message, typename))
+            result = read_numeric_topic(bag, '/Robotiq2FGripperRobotInputMsg')
+            np.testing.assert_allclose(result.gripper_position, [0., 128/255, 1.])
+            np.testing.assert_allclose(result.time, [0., .5, 1.])
+
+    def test_gripper_lab_schema_decodes_sqlite_bag_without_message_definitions(self):
+        import sqlite3
+        from contextlib import closing
+        from rosbags.rosbag2 import Writer
+        from rosbag_io import read_numeric_topic, ROS2_TYPESTORE, ROBOTIQ_INPUT_TYPE, open_bag
+        with tempfile.TemporaryDirectory() as directory:
+            bag = Path(directory) / 'bag'
+            with Writer(bag, version=9) as writer:
+                connection = writer.add_connection('/Robotiq2FGripperRobotInputMsg', ROBOTIQ_INPUT_TYPE,
+                                                   typestore=ROS2_TYPESTORE)
+                for i, position in enumerate([12, 128, 240]):
+                    message = ROS2_TYPESTORE.types[ROBOTIQ_INPUT_TYPE](
+                        g_act=1, g_gto=1, g_sta=3, g_obj=2, g_flt=0,
+                        g_pr=255, g_po=position, g_cu=30)
+                    writer.write(connection, 1_000_000_000 + i*500_000_000,
+                                 ROS2_TYPESTORE.serialize_cdr(message, ROBOTIQ_INPUT_TYPE))
+            # Reproduce older bags' lack of an embedded definition.
+            with closing(sqlite3.connect(next(bag.glob('*.db3')))) as database:
+                database.execute('DELETE FROM message_definitions')
+                database.commit()
+            with open_bag(bag) as reader:
+                self.assertFalse(reader.connections[0].msgdef.data)
+            result = read_numeric_topic(bag, '/Robotiq2FGripperRobotInputMsg')
+            np.testing.assert_allclose(result.gripper_position, np.array([12, 128, 240])/255.)
+            np.testing.assert_allclose(result.time, [0., .5, 1.])
+
+    def test_pose_gmr_trains_without_wrench_and_rejects_other_reference_frame(self):
+        from time_series_gmr_scripts import run_time_series_test as settings
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bags = [root / name for name in ['n1', 'n2', 'test']]
+            for bag in bags:
+                bag.mkdir()
+                (bag / 'metadata.yaml').write_text('test')
+            topics = pd.DataFrame({'topic': ['/tcp_pose_broadcaster/pose'],
+                                   'message_type': ['geometry_msgs/msg/PoseStamped'], 'message_count': [90]})
+            def read(bag, topic):
+                return self.pose_signal(bags.index(Path(bag)) * .01)
+            config = {'output_dir': str(root / 'out'), 'nominal_bags': [str(p) for p in bags[:2]]}
+            with patch('rosbag_io.list_bag_topics', return_value=topics), \
+                 patch('rosbag_io.read_numeric_topic', side_effect=read), \
+                 patch('rynnbrain_vlm.visual_matching.read_recorded_stages', return_value=RecordedStages((1., 4., 8.))), \
+                 patch.object(settings, 'RESAMPLE_LENGTH', 32):
+                detector = GmrReplayDetector(config, Mock())
+                detector.signal_mode = 'pose'
+                detector.reset(bags[-1])
+                metadata = detector.prepare_replay(Mock(), threading.Event())
+                self.assertEqual(metadata['signal_mode'], 'pose')
+                self.assertEqual(len(metadata['output_columns']), 9)
+                self.assertEqual(metadata['pose_frame'], 'base')
+                self.assertEqual(len(detector.results), 32)
+                self.assertTrue(np.isfinite(detector.results.epsilon_smooth).all())
+                self.assertFalse(any('force' in name for name in detector.model.output_columns))
+                with patch('time_series_gmr_scripts.anomaly_detection.GMRAnomalyDetector.fit', side_effect=AssertionError('cache must be reused')):
+                    detector.prepare_replay(Mock(), threading.Event())
+                different = self.pose_signal()
+                different.attrs['frame_id'] = 'tool'
+                with patch('rosbag_io.read_numeric_topic', side_effect=lambda bag, topic: different if Path(bag) == bags[-1] else read(bag, topic)):
+                    with self.assertRaisesRegex(ValueError, 'reference frame differs'):
+                        detector.prepare_replay(Mock(), threading.Event())
+
     def test_dino_matches_existing_score_and_returns_selected_frame_and_heatmap(self):
         from vision_dinov2.anomaly_detection import compare_frame_to_nominal_memory
         detector = DinoReplayDetector.__new__(DinoReplayDetector)

@@ -1114,13 +1114,21 @@ Use the **Detector** selector before starting an execution:
   Each image supplies its native score, adaptive threshold and heatmap. If
   inference cannot keep up, replay falls behind wall time rather than dropping
   inputs; Observation → result includes this delay.
-- **GMR · offline replay** runs the existing force/torque pipeline before
-  playback: force-based synchronization, resampling, nominal leave-one-run-out
-  calibration, GMR, centered score smoothing and majority-vote filtering. It
-  uses the current top-level `nominal_bags` for calibration and the selected
-  test bag for scoring. `/tcp_force` is preferred; otherwise a unique Wrench
-  or WrenchStamped topic is selected. Missing or ambiguous wrench topics are
-  reported explicitly. The same topic must exist in nominal recordings.
+- **GMR · offline replay** has a **TS signal** selector in the GUI: TCP pose
+  (default), joint positions, gripper position, TCP pose + gripper position,
+  or force/torque. No new config parameters or model paths are needed. It uses
+  the current top-level `nominal_bags` for training and leave-one-run-out
+  calibration, and the selected held-out bag for scoring. Each signal selection
+  has its own model/threshold cache identity. Missing channels, different joint
+  names, and inconsistent pose reference frames are errors; a force model is
+  never used to score pose or joints. GMR scaling, conditional distance,
+  adaptive calibration, centered smoothing and majority voting are retained.
+  Force/torque mode preserves the previous force-based synchronization and
+  prefers `/tcp_force` or a unique Wrench/WrenchStamped topic. The other modes
+  require the final three numbered stage markers and align stages 1, 2, 3 to
+  thirds of normalized phase, ending at common signal coverage. Error/Fail
+  annotations do not set phase or train thresholds. Samples before common
+  coverage are not invented. A signal must cover part of every stage.
   Whole-recording preprocessing uses future samples: this is **offline result
   playback, not causal online detection**. The graph shows smoothed epsilon
   and threshold 1; the status separately reports the filtered alarm. Video and
@@ -1131,6 +1139,28 @@ Use the **Detector** selector before starting an execution:
   drop signal samples. The saved rows also contain the raw Mahalanobis distance,
   adaptive distance threshold and unsmoothed epsilon. Offline preparation time is shown
   separately; the very short result lookup time is not model inference time.
+
+The signal readers prefer `/tcp_pose_broadcaster/pose`, `/joint_states`, and
+`/Robotiq2FGripperRobotInputMsg`. The same typed topics must exist in all nominal
+and test bags. TCP position uses metres; orientation uses six rotation-matrix
+components so quaternion sign changes do not create artificial anomalies.
+Joint positions retain their names and native units; joint effort is not
+treated as measured TCP force. Joint angles that wrap in the recordings may
+still require separate preprocessing. `/tf` is not used as a force source.
+The existing GMR StandardScaler handles different channel scales using nominal
+training data.
+
+Gripper mode uses **actual position** (`gPO`, or its snake-case equivalent),
+normalized from 0–255 encoder counts to 0–1, not requested position (`gPR`) and
+not a claimed opening distance in millimetres. It holds the latest feedback
+between messages rather than interpolating an artificial closing motion.
+See the [Robotiq Hand-E manual](https://assets.robotiq.com/website-assets/support_archives/document_en/Hand-E_Manual_UniversalRobots_PDF_20240402.pdf)
+for the register meanings. The reader includes the exact interface supplied
+from the recording workspace: eight `uint8` fields in order `g_act`, `g_gto`,
+`g_sta`, `g_obj`, `g_flt`, `g_pr`, `g_po`, `g_cu`. This supports the older SQLite
+bags without installing the custom ROS package in Docker. Embedded bag
+definitions take precedence over this fallback. Pose and joint modes work
+independently of the gripper definition.
 
 GMR results and source identities are cached in
 `<output_dir>/online_replay/gmr_offline/`, including the full result CSV. A
