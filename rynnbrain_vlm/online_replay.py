@@ -384,7 +384,7 @@ def save_plot(rows, path, probability):
     axis.plot(times, [row["threshold"] * scale for row in rows], "--", label="Threshold", color="#c27524")
     fallback = any(row.get("score_computation") == "uncached_verification_fallback" for row in rows)
     kind = rows[0].get('score_kind', '')
-    title = ('GMR offline score playback' if kind == 'gmr_epsilon' else
+    title = (('GMR causal anomaly scores' if rows[0].get('score_computation') == 'causal_ts' else 'GMR offline score playback') if kind == 'gmr_epsilon' else
              'DINO per-image replay' if kind == 'dino_distance' else
              'Online replay · uncached fallback on failed checks' if fallback else 'Online replay · cached execution history')
     axis.set(xlabel="Observation time from bag start (s)",
@@ -438,7 +438,7 @@ class ReplayApplication:
                 raise ValueError("Wait for initialization or stop the current execution first.")
             detector_type = detector_type or self.state['detector_type']
             if detector_type not in {'vlm', 'dino', 'gmr'}:
-                raise ValueError('Choose VLM, DINO or GMR offline replay.')
+                raise ValueError('Choose VLM, DINO or GMR online TS.')
             gmr_signal = self.state['gmr_signal'] if gmr_signal is None else gmr_signal
             if not isinstance(gmr_signal, str) or gmr_signal not in {'pose', 'joints', 'gripper', 'pose_gripper', 'force'}:
                 raise ValueError('Select TCP pose, joint positions, gripper, pose + gripper, or force/torque.')
@@ -535,8 +535,9 @@ class ReplayApplication:
         if kind == 'vlm':
             detector = OnlineDetector(self.config, progress=progress)
         else:
-            from .replay_detectors import DinoReplayDetector, GmrReplayDetector
-            detector = (DinoReplayDetector if kind == 'dino' else GmrReplayDetector)(self.config, progress)
+            from .replay_detectors import DinoReplayDetector
+            from time_series_gmr_scripts.online_gmr import GmrOnlineDetector
+            detector = (DinoReplayDetector if kind == 'dino' else GmrOnlineDetector)(self.config, progress)
         self.detector = detector
         self.update(note=getattr(detector, 'note', SAMPLING_NOTE), score_source=detector.score_source,
                     score_kind=getattr(detector, 'score_kind', 'knn_distance' if detector.knn else 'failure_probability'),
@@ -553,6 +554,9 @@ class ReplayApplication:
         output.mkdir(parents=True, exist_ok=False)
         vlm = self.config["rynnbrain"]
         kind = self.state['detector_type']
+        causal_gmr = kind == 'gmr' and hasattr(self.detector, 'create_feed')
+        if causal_gmr:
+            self.update(gmr_stage=0)
         preparation_metadata = {}
         if hasattr(self.detector, 'prepare_replay'):
             def preparation_progress(message):
@@ -597,28 +601,33 @@ class ReplayApplication:
                 print(f"Stage preview unavailable; classifier replay continues: {failure}", flush=True)
         else:
             self.update(matching_status='DINO uses its native nearest-frame matching for scoring.' if kind == 'dino'
-                        else 'GMR offline scores prepared; no image matching.' if kind == 'gmr' else 'Disabled')
+                        else 'GMR nominal model ready; no image matching.' if kind == 'gmr' else 'Disabled')
         # Annotation is saved only for evaluation, never passed into matching/scoring.
         from .visual_matching import read_corrected_failure_annotation
-        failure_annotation = read_corrected_failure_annotation(bag, self.config.get("stage_topic", "/recording_stage"))
+        failure_annotation = (None if causal_gmr else
+            read_corrected_failure_annotation(bag, self.config.get("stage_topic", "/recording_stage")))
         start_sec = (float(vlm.get('sampling_start_sec') or 0.) if kind == 'vlm'
                      else getattr(self.detector, 'start_sec', 0.))
         end_sec = vlm.get('sampling_end_sec') if kind == 'vlm' else getattr(self.detector, 'end_sec', None)
         sample_fps = self.detector.sample_fps if kind == 'dino' else 15.
-        frames = iter_rosbag_image_frames(RosbagImageSource(bag, vlm["camera_topics"][0]),
-            sample_fps=sample_fps, start_sec=0. if kind == 'gmr' else start_sec, end_sec=end_sec)
-        if kind == 'gmr':
-            frames = gmr_sample_frames(frames, self.detector.results.time.to_numpy())
-        feed_class = ReplayFeed if kind == 'vlm' else SequentialReplayFeed
-        feed = feed_class(frames, self.publish, self.stop)
+        if causal_gmr:
+            feed = self.detector.create_feed(self.publish, self.stop, self.update)
+        else:
+            frames = iter_rosbag_image_frames(RosbagImageSource(bag, vlm["camera_topics"][0]),
+                sample_fps=sample_fps, start_sec=0. if kind == 'gmr' else start_sec, end_sec=end_sec)
+            if kind == 'gmr':
+                frames = gmr_sample_frames(frames, self.detector.results.time.to_numpy())
+            feed_class = ReplayFeed if kind == 'vlm' else SequentialReplayFeed
+            feed = feed_class(frames, self.publish, self.stop)
         producer = threading.Thread(target=feed.run, daemon=True)
         rows, status, error = [], "running", None
         max_frames = self.detector.frame_count if kind == 'vlm' else None
-        total_samples = len(self.detector.results) if kind == 'gmr' else max_frames
+        total_samples = len(self.detector.results) if kind == 'gmr' and not causal_gmr else max_frames
         self.update(status=status, output_directory=str(output), max_frames=max_frames,
                     total_samples=total_samples, sample_fps=sample_fps if kind == 'dino' else None)
         protocol = ('online_elapsed_time_latest_frame_v1' if kind == 'vlm' else
-                    'dino_all_sampled_frames_v1' if kind == 'dino' else 'gmr_all_prepared_samples_v1')
+                    'dino_all_sampled_frames_v1' if kind == 'dino' else
+                    self.detector.signature['protocol'] if causal_gmr else 'gmr_all_prepared_samples_v1')
         metadata = dict(bag=str(bag), protocol=protocol, interval_sec=self.interval if kind == 'vlm' else None,
             sample_fps=sample_fps if kind == 'dino' else None, total_samples=total_samples,
             max_frames=max_frames, note=self.state['note'], classifier_path=str(self.detector.path),
@@ -634,7 +643,15 @@ class ReplayApplication:
                 return "failed"
             return "passed_observed_prefixes" if checks else "pending" if self.verify else "not_requested"
 
-        def persist():
+        last_persist = [0.]
+        def persist(force=True):
+            if not force and causal_gmr and time.monotonic() - last_persist[0] < 1.:
+                return
+            last_persist[0] = time.monotonic()
+            if causal_gmr:
+                stage_clock = self.detector.sampler.clock
+                metadata['stage_boundaries_sec'] = dict(stage_clock.boundaries)
+                metadata['recorded_failure_annotation'] = list(stage_clock.failures)
             data = {**metadata, "status": status, "error": error, "rows": rows,
                     "cache_verification_status": verification_status(),
                     "elapsed_sec": time.monotonic() - feed.origin}
@@ -657,7 +674,7 @@ class ReplayApplication:
                     row, vector, baseline = self.detector.append(image, timestamp, self.verify)
                     check = row.get("verification")
                     failed = bool(check and not check["within_tolerance"])
-                    row["score_computation"] = 'cached' if kind == 'vlm' else 'single_image' if kind == 'dino' else 'offline_lookup'
+                    row["score_computation"] = 'cached' if kind == 'vlm' else 'single_image' if kind == 'dino' else 'causal_ts' if causal_gmr else 'offline_lookup'
                     # Diagnostics may continue, but a rejected cached score is
                     # never used as the displayed/recorded detector result.
                     if failed and self.diagnose:
@@ -713,7 +730,7 @@ class ReplayApplication:
                     writer.writerow({key: json.dumps(value) if isinstance(value, (dict, list)) else value
                                      for key, value in row.items()})
                     stream.flush()
-                    persist()
+                    persist(force=False)
                     with self.lock:
                         self.observed_jpeg, self.matched_jpeg = buffer.getvalue(), matched_bytes
                         self.state.update(status="observing", rows=list(rows), scoring_time_sec=None)
@@ -738,7 +755,7 @@ class ReplayApplication:
         finally:
             self.stop.set()
             producer.join(timeout=5)
-            if isinstance(feed, SequentialReplayFeed):
+            if hasattr(feed, 'close'):
                 feed.close()
             persist()
             try:

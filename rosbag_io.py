@@ -466,6 +466,47 @@ def read_selected_numeric_topics(
     return {topic: read_numeric_topic(bag_path, topic) for topic in topics}
 
 
+def iter_ts_replay_events(bag_path, topics, stage_topic, camera_topic=None):
+    """Stream selected signals and markers in bag time; never preload a test run.
+
+    Image decoding is deferred until playback reaches the image timestamp.
+    Embedded custom schemas take precedence over our verified Robotiq fallback.
+    """
+    selected = {topic: kind for kind, topic in topics.items()}
+    selected[stage_topic] = 'stage'
+    with open_bag(bag_path) as reader:
+        connections = []
+        for topic in selected:
+            connections.extend(_connection_for_topic(reader, topic))
+        if camera_topic:
+            camera_connections = [c for c in reader.connections if c.topic == camera_topic]
+            connections.extend(camera_connections)  # TS detection also works without video.
+            selected[camera_topic] = 'camera'
+        if (any(c.msgtype == ROBOTIQ_INPUT_TYPE for c in connections)
+                and ROBOTIQ_INPUT_TYPE not in reader.typestore.types):
+            reader.typestore.register(ROBOTIQ_INPUT_TYPES)
+        camera_last = -float('inf')
+        for connection, stamp, raw in reader.messages(connections=connections):
+            timestamp = (int(stamp) - int(reader.start_time)) / 1e9
+            kind = selected[connection.topic]
+            if kind == 'camera':
+                if timestamp - camera_last < 1 / 15:
+                    continue
+                camera_last = timestamp
+            message = reader.deserialize(raw, connection.msgtype)
+            if kind == 'stage':
+                if connection.msgtype != 'std_msgs/msg/String':
+                    raise TypeError('The recorded stage topic must contain std_msgs/String.')
+                payload = str(message.data).strip()
+            elif kind == 'camera':
+                payload = (message, connection.msgtype)
+            else:
+                payload = _numeric_message_values(message, connection.msgtype)
+                if kind == 'pose':
+                    payload['pose_frame'] = str(message.header.frame_id)
+            yield timestamp, kind, payload
+
+
 def read_stage_events(
     bag_path: str | Path,
     topic: str = "/recording_stage",
