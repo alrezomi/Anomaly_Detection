@@ -27,7 +27,10 @@ class DinoReplayDetector:
         from vision_dinov2 import run_vision_test as settings
         from vision_dinov2.nominal_cache import load_nominal_cache
         from vision_dinov2.dinov2_features import DINOv2FeatureExtractor
+        from vision_dinov2.threshold import validate_threshold_scale, SEQUENCE_CALIBRATION_METHOD
+        from rosbag_io import RosbagImageSource
         self.config = config
+        self.threshold_scale = validate_threshold_scale(config.get('dino_threshold_scale', 1.0))
         self.topic = config['rynnbrain']['camera_topics'][0]
         self.frame_count = None  # Run through the recording, independently of VLM sampling.
         self.path = Path(config.get('nominal_cache_dir', '/outputs/nominal_cache'))
@@ -37,6 +40,13 @@ class DinoReplayDetector:
         self.signature = settings.nominal_cache_runtime_signature()
         self.signature.update(dino_input_size=config.get('dino_input_size', settings.DINO_INPUT_SIZE),
                               stage_constrained_matching=config.get('stage_constrained_matching', False))
+        calibration_bags = config.get('dino_calibration_bags', [])
+        if calibration_bags:
+            self.signature.update(calibration_method=SEQUENCE_CALIBRATION_METHOD,
+                calibration_sources=settings.source_signatures([
+                    RosbagImageSource(path, self.topic,
+                        stage_topic=None if config.get('ignore_recorded_stages', False) else config.get('stage_topic', '/recording_stage'),
+                        stage_count=config.get('stage_count', 3)) for path in calibration_bags]))
         self.sample_fps = self.signature['sample_fps']
         progress('Loading saved DINO nominal memory')
         loaded = load_nominal_cache(self.path, self.signature)
@@ -44,6 +54,13 @@ class DinoReplayDetector:
             raise ValueError(f'No compatible DINO memory at {self.path}. Run docker compose run --rm --build vision-memory first.')
         self.memory, self.grid, self.thresholds, _ = loaded
         saved = json.loads((self.path / 'signature.json').read_text(encoding='utf-8'))
+        self.signature['calibration_method'] = saved.get('calibration_method', 'legacy_frame_quantile')
+        self.signature['calibration_sources'] = saved.get('calibration_sources', [])
+        self.signature['dino_threshold_scale'] = self.threshold_scale
+        calibration_label = ('separate nominal recordings, sequence maximum deviations'
+            if self.signature['calibration_method'] == SEQUENCE_CALIBRATION_METHOD else 'legacy frame quantile')
+        self.note += (f" Threshold calibration: {calibration_label}; "
+                      f"multiplier {self.threshold_scale:g}. Calibration recordings are excluded from evaluation.")
         self.sources = saved.get('sources', [])
         if not self.sources or any(source.get('topic') != self.topic or not source.get('bag_path') for source in self.sources):
             raise ValueError('DINO replay requires a named rosbag memory for the selected camera.')
@@ -52,6 +69,7 @@ class DinoReplayDetector:
                 for source in self.sources):
             raise ValueError('DINO memory stage settings do not match the three-stage replay annotations.')
         self.excluded = {Path(item['bag_path']).name for item in self.sources if 'bag_path' in item}
+        self.excluded.update(Path(item['bag_path']).name for item in saved.get('calibration_sources', []) if 'bag_path' in item)
         progress('Loading DINO model')
         self.extractor = DINOv2FeatureExtractor(self.signature['model_name'], self.signature['dino_input_size'])
         self.preview_image = self.matched_image = None
@@ -60,7 +78,7 @@ class DinoReplayDetector:
     def reset(self, bag):
         from .visual_matching import read_recorded_stages
         if Path(bag).name in self.excluded:
-            raise ValueError('Select a bag outside the DINO nominal memory.')
+            raise ValueError('Select a bag outside the DINO memory and threshold calibration recordings.')
         self.step = 0
         self.stages = None
         self.start_sec = 0.
@@ -103,7 +121,8 @@ class DinoReplayDetector:
             features, attention, cls, self.memory, top_k_cls=self.signature['top_k_cls'],
             attention_power=self.signature['attention_power'], min_weight=self.signature['min_weight'],
             required_stage=stage)
-        threshold = threshold_for_progress(float(best['progress']), self.thresholds)
+        base_threshold = threshold_for_progress(float(best['progress']), self.thresholds)
+        threshold = base_threshold * getattr(self, 'threshold_scale', 1.0)
         scoring_sec = time.monotonic() - started
         self.preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid))
         self.matched_image = None
@@ -117,6 +136,7 @@ class DinoReplayDetector:
             match['reason'] = str(error)
         row = dict(sample_index=self.step, timestamp_sec=timestamp, anomaly_score=float(score),
                    threshold=float(threshold), above_threshold=bool(score > threshold),
+                   base_threshold=float(base_threshold), threshold_scale=getattr(self, 'threshold_scale', 1.0),
                    cached_feature_sec=feature_sec, classifier_sec=scoring_sec, verification=None,
                    score_kind=self.score_kind, visual_matching=match,
                    vector_kind='dino_cls',

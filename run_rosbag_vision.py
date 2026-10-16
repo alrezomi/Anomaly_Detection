@@ -14,6 +14,7 @@ from rosbag_io import (
     resolve_bag_path,
 )
 from vision_dinov2 import run_vision_test
+from vision_dinov2.threshold import validate_threshold_scale
 
 
 def _slug(topic: str) -> str:
@@ -76,6 +77,18 @@ def main() -> None:
     nominal_bags = arguments.nominal_bag or [
         Path(value) for value in configuration.get("nominal_bags", [])
     ]
+    calibration_values = configuration.get("dino_calibration_bags", [])
+    if not isinstance(calibration_values, list) or any(not isinstance(x, str) or not x.strip() for x in calibration_values):
+        raise ValueError("dino_calibration_bags must be a list of successful bag paths.")
+    calibration_bags = [Path(value) for value in calibration_values]
+    calibration_keys = [str(path.resolve()) for path in calibration_bags]
+    if len(set(calibration_keys)) != len(calibration_keys):
+        raise ValueError("dino_calibration_bags contains duplicate bags.")
+    if set(calibration_keys) & {str(path.resolve()) for path in nominal_bags}:
+        raise ValueError("DINO calibration bags must be separate from nominal_bags memory.")
+    if calibration_bags and len(calibration_bags) < 18:
+        raise ValueError("Use at least 18 separate successful DINO calibration bags.")
+    run_vision_test.THRESHOLD_SCALE = validate_threshold_scale(configuration.get("dino_threshold_scale", 1.0))
     test_bag_value = arguments.test_bag or configuration.get("test_bag")
     camera_topics = arguments.camera_topic or configuration.get("camera_topics", [])
     output_value = (
@@ -146,6 +159,7 @@ def main() -> None:
     paths_to_validate = [] if arguments.mode == "build-memory" else [test_bag]
     if arguments.mode != "test" and not preview_only:
         paths_to_validate.extend(nominal_bags)
+        paths_to_validate.extend(calibration_bags)
     invalid_paths: list[str] = []
     for path in paths_to_validate:
         try:
@@ -204,6 +218,11 @@ def main() -> None:
             )
             for index, path in enumerate(nominal_bags)
         ] if arguments.mode != "test" else []
+        run_vision_test.CALIBRATION_VIDEO_PATHS = [
+            RosbagImageSource(path, topic, f"calibration_{index}",
+                             stage_topic=stage_topic, stage_count=stage_count)
+            for index, path in enumerate(calibration_bags)
+        ]
         run_vision_test.TEST_VIDEO_PATH = test_source
         run_vision_test.THRESHOLD_CSV = output_directory / f"{name}_threshold.csv"
         run_vision_test.CALIBRATION_CSV = output_directory / f"{name}_calibration.csv"

@@ -43,11 +43,31 @@ def save_nominal_cache(
         ),
         grid_size=np.asarray(grid_size),
     )
-    adaptive_threshold_df.to_csv(directory / "adaptive_threshold.csv", index=False)
-    calibration_df.to_csv(directory / "calibration.csv", index=False)
-    (directory / "signature.json").write_text(
-        json.dumps(signature, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    save_nominal_calibration(directory, adaptive_threshold_df, calibration_df, signature)
+
+
+def save_nominal_calibration(directory, threshold, calibration, signature):
+    """Replace calibration without recompressing the large feature memory.
+
+    Invalidate the signature first so interrupted writes cannot look compatible.
+    """
+    directory = Path(directory)
+    marker = directory / "signature.json"
+    marker.unlink(missing_ok=True)
+    for name, table in [("adaptive_threshold.csv", threshold), ("calibration.csv", calibration)]:
+        temporary = directory / (name + ".tmp")
+        table.to_csv(temporary, index=False)
+        temporary.replace(directory / name)
+    temporary = directory / "signature.json.tmp"
+    temporary.write_text(json.dumps(signature, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(marker)
+
+
+def memory_signature(signature):
+    """Calibration changes do not invalidate the extracted/matched memory."""
+    return {key: value for key, value in signature.items()
+            if not key.startswith("threshold_") and key not in {
+                "min_points_per_bin", "calibration_sources", "calibration_method"}}
 
 
 def load_nominal_cache(

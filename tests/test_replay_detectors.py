@@ -170,6 +170,13 @@ class ReplayDetectorTests(unittest.TestCase):
         np.testing.assert_array_equal(vector, cls)
         self.assertIsNone(baseline)
         detector.extractor.extract.assert_called_once()
+        detector.threshold_scale = 3.
+        scaled_row, _, _ = detector.append(Image.new('RGB', (8, 8)), 12.)
+        self.assertAlmostEqual(scaled_row['anomaly_score'], row['anomaly_score'])
+        self.assertAlmostEqual(scaled_row['threshold'], row['threshold'] * 3.)
+        self.assertFalse(scaled_row['above_threshold'])
+        pd.testing.assert_frame_equal(detector.thresholds,
+            pd.DataFrame({'stage_center': [0., 1.], 'adaptive_threshold': [.1, .1]}))
 
     def test_wrench_topic_never_substitutes_pose_or_arbitrary_topic(self):
         with patch('rosbag_io.list_bag_topics', return_value=pd.DataFrame({
