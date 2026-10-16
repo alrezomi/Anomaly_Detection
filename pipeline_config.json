@@ -1,6 +1,5 @@
 {
   "nominal_bags": [
-    
     "/data/Nominal/setting 1/nominal_1.1",
     "/data/Nominal/setting 1/nominal_1.2",
     "/data/Nominal/setting 1/nominal_1.3",
@@ -17,7 +16,7 @@
     "/data/Nominal/setting 1/nominal_1.14",
     "/data/Nominal/setting 1/nominal_1.15"
   ],
-  "test_bag": "/data/Failure_1_grasp_miss/failure_1.10",
+  "test_bag": "/data/Nominal/setting 1/nominal_1.31",
   "camera_topics": [
     "/top_camera/cam_135222070433/color/image_raw/compressed"
   ],
@@ -29,34 +28,28 @@
   "vision_memory_name": "pick_place_dino728_v2",
   "dino_input_size": 728,
   "nominal_cache_dir": "/outputs/nominal_cache",
-  "output_dir": "/outputs/experiments/pick_place_dino728_v102",
+  "output_dir": "/outputs/experiments/pick_place_dino728_v132",
   "rebuild_nominal_cache": false,
   "stage_constrained_matching": true,
-  
-  
   "rynnbrain": {
     "source": "rosbag",
     "task_description": "Pick the scissor from its initial location and place it inside the blue basket.",
-    "camera_topics": [
-      "/top_camera/cam_135222070433/color/image_raw/compressed"
-    ],
     "reference_bags": [
       "/data/Nominal/setting 1/nominal_1.1"
-    ],
-    "memory_camera_topics": [
-      "/top_camera/cam_135222070433/color/image_raw/compressed"
     ],
     "input_modes": [
       "raw"
     ],
+    "inference": {
+      "feature_only": true
+    },
     "num_frames": 8,
     "ground_truth_label": "fail",
-    "output_dir": "/outputs/experiments/pick_place_dino728_v102/rynnbrain",
     "sampling_start_sec": 1.0,
     "sampling_end_sec": null,
-     "model": {
+    "model": {
       "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",
-      "lora_adapter_path": null,
+      "lora_adapter_path": "/outputs/experiments/pick_place_dino728_v102/rynnbrain/lora_adapter",
       "dtype": "float16",
       "device_map": "auto",
       "max_image_size": 640,
@@ -66,20 +59,67 @@
     "generation": {
       "max_new_tokens": 280,
       "do_sample": false,
-      "enable_thinking": true
+      "enable_thinking": false
     },
     "lora": {
       "rank": 8,
       "alpha": 16,
       "dropout": 0.05,
-      "target_modules": ["q_proj", "v_proj"],
+      "target_modules": [
+        "q_proj",
+        "v_proj"
+      ],
       "training": {
-        "normal_bags": [],
-        "failure_bags": [],
+        "normal_bags": [
+          "/data/Nominal/setting 1/nominal_1.16",
+          "/data/Nominal/setting 1/nominal_1.17",
+          "/data/Nominal/setting 1/nominal_1.18",
+          "/data/Nominal/setting 1/nominal_1.19",
+          "/data/Nominal/setting 1/nominal_1.20",
+          "/data/Nominal/setting 1/nominal_1.21",
+          "/data/Nominal/setting 1/nominal_1.22",
+          "/data/Nominal/setting 1/nominal_1.23",
+          "/data/Nominal/setting 1/nominal_1.24",
+          "/data/Nominal/setting 1/nominal_1.25",
+          "/data/Nominal/setting 1/nominal_1.26",
+          "/data/Nominal/setting 1/nominal_1.27",
+          "/data/Nominal/setting 1/nominal_1.28",
+          "/data/Nominal/setting 1/nominal_1.29",
+          "/data/Nominal/setting 1/nominal_1.30",
+          "/data/Nominal/setting 2/nominal_2.1",
+          "/data/Nominal/setting 2/nominal_2.2",
+          "/data/Nominal/setting 2/nominal_2.3",
+          "/data/Nominal/setting 2/nominal_2.4",
+          "/data/Nominal/setting 2/nominal_2.5",
+          "/data/Nominal/setting 2/nominal_2.6",
+          "/data/Nominal/setting 2/nominal_2.7"
+        ],
+        "failure_bags": [
+          "/data/Failure_1_grasp_miss/failure_1.1",
+          "/data/Failure_1_grasp_miss/failure_1.2",
+          "/data/Failure_1_grasp_miss/failure_1.3",
+          "/data/Failure_1_grasp_miss/failure_1.4",
+          "/data/Failure_1_grasp_miss/failure_1.5",
+          "/data/Failure_1_grasp_miss/failure_1.6",
+          "/data/Failure_1_grasp_miss/failure_1.7",
+          "/data/Failure_1_grasp_miss/failure_1.8",
+          "/data/Failure_1_grasp_miss/failure_1.9",
+          "/data/Failure_1_grasp_miss/failure_1.10",
+          "/data/Failure_2_slip_at_start/failure_2.1",
+          "/data/Failure_2_slip_at_start/failure_2.2",
+          "/data/Failure_2_slip_at_start/failure_2.3",
+          "/data/Failure_2_slip_at_start/failure_2.4",
+          "/data/Failure_2_slip_at_start/failure_2.5",
+          "/data/Failure_2_slip_at_start/failure_2.6",
+          "/data/Failure_2_slip_at_start/failure_2.7",
+          "/data/Failure_2_slip_at_start/failure_2.8",
+          "/data/Failure_2_slip_at_start/failure_2.9",
+          "/data/Failure_2_slip_at_start/failure_2.10",
+          "/data/Failure_2_slip_at_start/failure_2.11"
+        ],
         "validation_normal_bags": [],
         "validation_failure_bags": [],
         "input_mode": "raw",
-        "output_dir": null,
         "epochs": 3,
         "learning_rate": 0.0001,
         "gradient_accumulation_steps": 8,
@@ -87,7 +127,8 @@
         "gradient_checkpointing": true,
         "max_tokens": 16384,
         "class_weight": "balanced",
-        "seed": 42
+        "seed": 42,
+        "temporal_supervision": true
       }
     },
     "cop_vectors": {
@@ -95,44 +136,45 @@
     },
     "cop_classifier": {
       "enabled": true,
-      "method": "knn",
+      "method": "logistic",
       "plot_timeline": true,
       "knn": {
         "n_neighbors": 3,
         "threshold_quantile": 0.95
       },
+      "train_on_benchmark": true,
       "model_paths": {
-        "raw": "/outputs/experiments/pick_place_dino728_v102/cop_classifier/raw_logistic.npz"
+        "raw": "/outputs/experiments/pick_place_dino728_v131/cop_classifier/raw_logistic.npz"
+      },
+      "logistic_onset": {
+        "enabled": true
       },
       "training": {
-        "input_dir": "/outputs/experiments/pick_place_dino728_v102/rynnbrain_benchmark",
         "input_mode": "raw",
         "normal_bags": [
-
-        "/data/Nominal/setting 1/nominal_1.16",
-        "/data/Nominal/setting 1/nominal_1.17",
-        "/data/Nominal/setting 1/nominal_1.18",
-        "/data/Nominal/setting 1/nominal_1.19",
-        "/data/Nominal/setting 1/nominal_1.20",
-        "/data/Nominal/setting 1/nominal_1.21",
-        "/data/Nominal/setting 1/nominal_1.22",
-        "/data/Nominal/setting 1/nominal_1.23",
-        "/data/Nominal/setting 1/nominal_1.24",
-        "/data/Nominal/setting 1/nominal_1.25",
-        "/data/Nominal/setting 1/nominal_1.26",
-        "/data/Nominal/setting 1/nominal_1.27",
-        "/data/Nominal/setting 1/nominal_1.28",
-        "/data/Nominal/setting 1/nominal_1.29",
-        "/data/Nominal/setting 1/nominal_1.30",
-
-        "/data/Nominal/setting 2/nominal_2.1",
-        "/data/Nominal/setting 2/nominal_2.2",
-        "/data/Nominal/setting 2/nominal_2.3",
-        "/data/Nominal/setting 2/nominal_2.4",
-        "/data/Nominal/setting 2/nominal_2.5",
-        "/data/Nominal/setting 2/nominal_2.6",
-        "/data/Nominal/setting 2/nominal_2.7"
-      ],
+          "/data/Nominal/setting 1/nominal_1.16",
+          "/data/Nominal/setting 1/nominal_1.17",
+          "/data/Nominal/setting 1/nominal_1.18",
+          "/data/Nominal/setting 1/nominal_1.19",
+          "/data/Nominal/setting 1/nominal_1.20",
+          "/data/Nominal/setting 1/nominal_1.21",
+          "/data/Nominal/setting 1/nominal_1.22",
+          "/data/Nominal/setting 1/nominal_1.23",
+          "/data/Nominal/setting 1/nominal_1.24",
+          "/data/Nominal/setting 1/nominal_1.25",
+          "/data/Nominal/setting 1/nominal_1.26",
+          "/data/Nominal/setting 1/nominal_1.27",
+          "/data/Nominal/setting 1/nominal_1.28",
+          "/data/Nominal/setting 1/nominal_1.29",
+          "/data/Nominal/setting 1/nominal_1.30",
+          "/data/Nominal/setting 2/nominal_2.1",
+          "/data/Nominal/setting 2/nominal_2.2",
+          "/data/Nominal/setting 2/nominal_2.3",
+          "/data/Nominal/setting 2/nominal_2.4",
+          "/data/Nominal/setting 2/nominal_2.5",
+          "/data/Nominal/setting 2/nominal_2.6",
+          "/data/Nominal/setting 2/nominal_2.7"
+        ],
         "failure_bags": [
           "/data/Failure_1_grasp_miss/failure_1.1",
           "/data/Failure_1_grasp_miss/failure_1.2",
@@ -160,5 +202,34 @@
         "threshold": 0.5
       }
     }
-  }
+  },
+  "dino_calibration_bags": [
+    "/data/Nominal/setting 1/nominal_1.16",
+    "/data/Nominal/setting 1/nominal_1.17",
+    "/data/Nominal/setting 1/nominal_1.18",
+    "/data/Nominal/setting 1/nominal_1.19",
+    "/data/Nominal/setting 1/nominal_1.20",
+    "/data/Nominal/setting 1/nominal_1.21",
+    "/data/Nominal/setting 1/nominal_1.22",
+    "/data/Nominal/setting 1/nominal_1.23",
+    "/data/Nominal/setting 1/nominal_1.24",
+    "/data/Nominal/setting 1/nominal_1.25",
+    "/data/Nominal/setting 1/nominal_1.26",
+    "/data/Nominal/setting 1/nominal_1.27",
+    "/data/Nominal/setting 1/nominal_1.28",
+    "/data/Nominal/setting 1/nominal_1.29",
+    "/data/Nominal/setting 1/nominal_1.30",
+    "/data/Nominal/setting 2/nominal_2.1",
+    "/data/Nominal/setting 2/nominal_2.2",
+    "/data/Nominal/setting 2/nominal_2.3",
+    "/data/Nominal/setting 2/nominal_2.4",
+    "/data/Nominal/setting 2/nominal_2.5",
+    "/data/Nominal/setting 2/nominal_2.6",
+    "/data/Nominal/setting 2/nominal_2.7",
+    "/data/Nominal/setting 2/nominal_2.8",
+    "/data/Nominal/setting 2/nominal_2.9",
+    "/data/Nominal/setting 2/nominal_2.10",
+    "/data/Nominal/setting 2/nominal_2.11"
+  ],
+  "dino_threshold_scale": 1.0
 }
