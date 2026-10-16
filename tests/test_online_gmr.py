@@ -10,8 +10,9 @@ import numpy as np
 
 from time_series_gmr_scripts.online_gmr import (
     CausalSamples, GmrOnlineDetector, GmrOnlineFeed, StageClock,
-    TrailingAlarm, estimate_phase, signal_values,
+    TrailingAlarm, estimate_phase, signal_values, channel_diagnostics,
 )
+from time_series_gmr_scripts.anomaly_detection import GMRAnomalyDetector
 
 
 def execution(offset=0., end=2.3, tail=0.):
@@ -23,6 +24,67 @@ def execution(offset=0., end=2.3, tail=0.):
 
 
 class OnlineGmrTests(unittest.TestCase):
+    @staticmethod
+    def correlated_model():
+        model = GMRAnomalyDetector(['phase'], ['a_position', 'b_position'], n_components=1)
+        model.scaler.mean_ = np.array([0., 10., -20.])
+        model.scaler.scale_ = np.array([1., 2., 3.])
+        model.gmm.weights_ = np.array([1.])
+        model.gmm.means_ = np.array([[0., 0., 0.]])
+        model.gmm.covariances_ = np.array([[[1., 0., 0.], [0., 1., .8], [0., .8, 1.]]])
+        return model
+
+    def test_channel_envelope_is_in_original_units_and_is_not_independent_alarm(self):
+        model = self.correlated_model()
+        scaled = np.array([.25, 1., -1.])
+        distance, component = model._score_scaled_point(scaled)
+        channels = channel_diagnostics(model, scaled, component, 2.)
+        self.assertGreater(distance, 2.)  # Opposite deviations violate the learned correlation.
+        self.assertEqual(channels['a_position']['observed'], 12.)
+        self.assertEqual(channels['b_position']['observed'], -23.)
+        self.assertEqual(channels['a_position']['expected'], 10.)
+        self.assertEqual(channels['b_position']['expected'], -20.)
+        for channel in channels.values():
+            self.assertLess(channel['lower'], channel['observed'])
+            self.assertGreater(channel['upper'], channel['observed'])
+            self.assertAlmostEqual(channel['standardized_deviation'], 1., places=4)
+        self.assertAlmostEqual(channels['b_position']['upper'] + 20.,
+                               (channels['a_position']['upper'] - 10.) * 1.5)
+        # The projected endpoint lies on the joint ellipsoid when other channels
+        # move along their correlation, not when other channels are held fixed.
+        _, covariance = model._conditional_output_distribution(scaled[:1], component)
+        covariance += np.eye(2) * model.reg_covar
+        endpoint = 2. * covariance[:, 0] / np.sqrt(covariance[0, 0])
+        self.assertAlmostEqual(float(endpoint @ np.linalg.pinv(covariance) @ endpoint), 4.)
+
+    def test_distance_display_preserves_existing_filtered_alarms(self):
+        import pandas as pd
+        from time_series_gmr_scripts import run_time_series_test as settings
+        detector = GmrOnlineDetector({'output_dir': '.', 'nominal_bags': []}, Mock())
+        detector.reset('test')
+        detector.model = self.correlated_model()
+        detector.columns = detector.model.output_columns
+        detector.durations = [1., 1.]
+        detector.thresholds = pd.DataFrame({'phase_center': [0., 1.], 'threshold_mahalanobis': [1., 3.]})
+        legacy_alarm = TrailingAlarm(settings.SCORE_SMOOTH_WINDOW, settings.MAJORITY_WINDOW, settings.MAJORITY_VOTES)
+        limits = []
+        for i in range(20):
+            t = i / 10
+            stage = 1 if t < 1 else 2
+            elapsed = t if stage == 1 else t - 1
+            detector.pending = dict(stage=stage, stage_elapsed=elapsed, a_position=12., b_position=-23.)
+            row, _, _ = detector.append(None, t)
+            smoothed, alarm = legacy_alarm.append(row['raw_distance'] / row['adaptive_threshold'])
+            self.assertEqual(row['anomaly_score'], row['raw_distance'])
+            self.assertEqual(row['threshold'], row['adaptive_threshold'])
+            self.assertEqual(row['epsilon_smooth'], smoothed)
+            self.assertEqual(row['alarm_filtered'], alarm)
+            self.assertEqual(row['score_kind'], 'gmr_distance')
+            self.assertEqual(row['above_threshold'], row['raw_distance'] > row['threshold'])
+            self.assertEqual(set(row['channels']), {'a_position', 'b_position'})
+            limits.append(row['threshold'])
+        self.assertGreater(limits[-1], limits[0])
+
     def test_stage_filter_end_and_failures(self):
         sampler = CausalSamples(['joints'])
         packets = list(sampler.packets(execution()))

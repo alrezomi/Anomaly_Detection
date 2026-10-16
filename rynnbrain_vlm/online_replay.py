@@ -384,7 +384,7 @@ def save_plot(rows, path, probability):
     axis.plot(times, [row["threshold"] * scale for row in rows], "--", label="Threshold", color="#c27524")
     fallback = any(row.get("score_computation") == "uncached_verification_fallback" for row in rows)
     kind = rows[0].get('score_kind', '')
-    title = (('GMR causal anomaly scores' if rows[0].get('score_computation') == 'causal_ts' else 'GMR offline score playback') if kind == 'gmr_epsilon' else
+    title = (('GMR causal anomaly scores' if rows[0].get('score_computation') == 'causal_ts' else 'GMR offline score playback') if kind in {'gmr_epsilon', 'gmr_distance'} else
              'DINO per-image replay' if kind == 'dino_distance' else
              'Online replay · uncached fallback on failed checks' if fallback else 'Online replay · cached execution history')
     axis.set(xlabel="Observation time from bag start (s)",
@@ -393,7 +393,10 @@ def save_plot(rows, path, probability):
     axis.spines[["top", "right"]].set_visible(False)
     axis.grid(alpha=.15)
     axis.legend(frameon=False)
-    figure.text(.1, .01, "Elapsed-time replay; offline-trained scores require online validation. Lines connect scored observations.", fontsize=8)
+    caption = ("Joint distance and nominal adaptive limit. Filtered alarm uses trailing epsilon smoothing and voting."
+               if kind == 'gmr_distance' else
+               "Elapsed-time replay; offline-trained scores require online validation. Lines connect scored observations.")
+    figure.text(.1, .01, caption, fontsize=8)
     figure.tight_layout(rect=(0, .04, 1, 1))
     figure.savefig(path, dpi=160)
     plt.close(figure)

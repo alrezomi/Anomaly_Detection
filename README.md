@@ -1151,12 +1151,34 @@ Use the **Detector** selector before starting an execution:
   GMR scaling, conditional Mahalanobis distance and nominal adaptive threshold
   calibration retain their existing methods. Score smoothing is now a trailing
   11-sample median (past/current data only), followed by the existing 6-of-8
-  majority vote. These filters introduce detection delay. The graph shows
-  smoothed epsilon (distance / adaptive threshold), with threshold 1 and a
-  separate filtered-alarm status. CSV/JSON also save raw distance, its adaptive
-  threshold, raw epsilon, current stage and estimated phase. **Scoring time**
-  measures GMR scoring and filtering; **TS sample to result** includes replay
+  majority vote. These filters introduce detection delay. The main graph shows
+  **raw joint Mahalanobis distance and its adaptive nominal threshold**, in
+  distance units. Red points mark instantaneous threshold crossings; the
+  separate filtered-alarm status still uses the trailing median of epsilon
+  (distance / threshold) and majority voting. This display change does not
+  change alarm decisions or require recalibrating an existing online model.
+  CSV/JSON save both forms: `anomaly_score`/`raw_distance`,
+  `threshold`/`adaptive_threshold`, `epsilon_raw`, `epsilon_smooth`,
+  `alarm_filtered`, current stage and estimated phase. **Scoring time**
+  includes scoring, filtering and channel diagnostics; **TS sample to result** includes replay
   delay. Nominal model preparation time is reported separately.
+
+  **Individual signal plots** show every channel used by the selected TS mode,
+  measured values, conditional nominal means, and projected joint-limit envelopes
+  in original units. Hover over a plot to inspect a timestamp. Orientation plots
+  are the six rotation-matrix features used by GMR, not Euler angles. The
+  envelopes are the projection of the joint Mahalanobis boundary onto each axis:
+  `mean_j +/- distance_threshold * sqrt(covariance_jj)`, transformed back through
+  the nominal scaler. The covariance includes the same regularization used by
+  scoring. They are diagnostic envelopes, not separately calibrated channel
+  thresholds, confidence intervals, or physical limits. A joint alarm can occur
+  with all channels inside these envelopes because GMR also models correlations.
+  The displayed scaled deviation is the absolute marginal residual divided by
+  its modeled standard deviation; it is not an additive contribution or gain.
+  Channel amplitudes alone do not determine influence: the nominal scaling and
+  covariance matter. No channel weights are changed by these plots. Each saved
+  row's `channels` dictionary contains `observed`, `expected`, `lower`, `upper`
+  and `standardized_deviation`; no additional config fields are needed.
 
 The signal readers prefer `/tcp_pose_broadcaster/pose`, `/joint_states`, and
 `/Robotiq2FGripperRobotInputMsg`. The same typed topics must exist in all nominal
