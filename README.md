@@ -362,7 +362,7 @@ the detector and threshold calibration, so build it under a new
 Memory construction and testing are deliberately separate:
 
 ```bash
-# Uses nominal_bags only; test_bag is not required and no test is run.
+# Uses nominal_bags and optional dino_calibration_bags; no test is run.
 docker compose run --rm vision-memory
 
 # Uses test_bag plus an existing named memory; nominal_bags are not read.
@@ -373,6 +373,76 @@ docker compose run --rm vision-test
 After changing Python source code pulled from Git, rebuild the shared pipeline
 image once with `docker compose build vision-memory`. Both services then use the
 same updated image. Keep only one top-level `output_dir` entry in the JSON.
+
+### DINO calibration on separate successful recordings
+
+The optional top-level `dino_calibration_bags` list enables a sequence-aware
+threshold inspired by [FIDeL, section III-E](https://arxiv.org/html/2604.13788v1#S3.SS5).
+Keep `nominal_bags` as retrieval memory. Calibration bags must be separate
+successful executions, and evaluation bags must be separate from both lists.
+Replay disables memory and calibration bags in the evaluation selector.
+This affects DINO only; LoRA, classifiers and GMR do not need retraining.
+
+The existing CLS shortlist and attention-weighted patch distance are retained.
+Calibration uses that exact same matcher, camera, sampling and stage restriction.
+It does **not** implement the paper's optimal transport or patch-level statistical
+test. It adapts the paper's independent nominal split and maximum-deviation idea
+to the existing scalar frame score, keeping inference cost unchanged.
+
+Whole calibration recordings are partitioned deterministically (seed 42): half
+estimate a mean/standard-deviation curve against matched nominal progress; half
+set the bound from each recording's **largest standardized deviation**. The
+upper order statistic uses `ceil((N + 1) * 0.90)` for N limit recordings, with
+the existing 1.10 margin on its bandwidth. At least 18 calibration bags are
+required. The mean and scale are smoothed before maxima are calculated; the
+final calibrated bound is not smoothed down afterwards. Equal recording weights
+within each progress bin prevent long recordings from dominating the shape.
+
+The old 90th percentile was over frames, which does not control alarms over an
+entire execution. The new sequence quantile is still **not a promised real-world
+false-alarm rate**: shifted conditions, correlated recordings, longer executions
+or changed sampling can invalidate exchangeability. Evaluate both normal and
+failure bags afterwards, including missed failures and detection delay.
+
+For the lab dataset, this one-time command edits your existing config in place
+(no second config). It reserves setting 1 runs 16–30 and setting 2 runs 1–11 for
+calibration, keeping setting 1 runs 31–32 and the additional evaluation runs out.
+Check that both settings are mounted under `/data/Nominal` in Docker.
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+path = Path('pipeline_config.json')
+config = json.loads(path.read_text())
+config['dino_calibration_bags'] = (
+    [f'/data/Nominal/setting 1/nominal_1.{i}' for i in range(16, 31)]
+    + [f'/data/Nominal/setting 2/nominal_2.{i}' for i in range(1, 12)]
+)
+config['dino_threshold_scale'] = 1.0
+path.write_text(json.dumps(config, indent=2) + '\n')
+PY
+docker compose run --rm --build vision-memory
+docker compose up --build online-replay
+```
+
+Stop the running replay server before rebuilding calibration. With
+`rebuild_nominal_cache: false`, compatible memory features are reused; only the
+new calibration bags are processed. Each query bag is released before the next
+one, and calibration never adds queries to retrieval memory. The existing
+`calibration.csv` records shape/limit roles, standardized deviations and bound
+crossings; `adaptive_threshold.csv` records the mean, scale, bandwidth and run
+counts. These are calibration diagnostics, not independent evaluation metrics.
+Rerunning an unchanged build reuses the complete cache.
+
+`dino_threshold_scale` is the single sensitivity adjustment: `1.0` uses the
+calibrated curve, `1.1` raises it by 10%. Higher values reduce alarms but can miss
+or delay failures; lower values do the opposite. It multiplies only the decision
+limit, not the distance or heatmap. Restart replay after changing it; no memory
+rebuild is needed. Batch tests, heatmap-video alarms and GUI replay apply the same
+multiplier. Leave it at 1.0 for the first independent evaluation. An empty or
+absent calibration list preserves compatibility with existing caches/legacy
+calibration; the GUI note reports which calibration was actually loaded.
 
 Every rosbag vision run writes two raw videos per camera:
 

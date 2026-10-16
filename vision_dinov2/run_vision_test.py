@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import pandas as pd
 from rosbag_io import RosbagImageSource
 
 from experiment_config import (
@@ -17,9 +18,11 @@ from .anomaly_detection import (
     run_video_test,
 )
 from .dinov2_features import DINOv2FeatureExtractor
-from .nominal_cache import load_nominal_cache, save_nominal_cache
+from .nominal_cache import load_nominal_cache, save_nominal_cache, save_nominal_calibration, memory_signature
 from .threshold import (
     calibrate_adaptive_threshold_leave_one_video_out,
+    build_sequence_threshold, score_calibration_memory, scaled_threshold,
+    SEQUENCE_CALIBRATION_METHOD,
 )
 from .visualization import (
     create_anomaly_heatmap_video,
@@ -36,6 +39,8 @@ from .visualization import (
 # ============================================================
 
 NOMINAL_VIDEO_PATHS = nominal_video_paths()
+CALIBRATION_VIDEO_PATHS = []
+THRESHOLD_SCALE = 1.0
 TEST_VIDEO_PATH = test_video_path()
 
 
@@ -89,10 +94,9 @@ NOMINAL_CACHE_DIRECTORY: Path | None = None
 REBUILD_NOMINAL_CACHE = False
 
 
-def nominal_cache_signature() -> dict:
-    """Describe every setting that changes reusable nominal results."""
+def source_signatures(paths) -> list:
     sources = []
-    for source in NOMINAL_VIDEO_PATHS:
+    for source in paths:
         if isinstance(source, RosbagImageSource):
             sources.append(
                 {
@@ -104,9 +108,14 @@ def nominal_cache_signature() -> dict:
             )
         else:
             sources.append({"video_path": str(Path(source).resolve())})
-    return {
+    return sources
+
+
+def nominal_cache_signature() -> dict:
+    """Describe every setting that changes reusable nominal results."""
+    signature = {
         "format_version": 1,
-        "sources": sources,
+        "sources": source_signatures(NOMINAL_VIDEO_PATHS),
         "model_name": MODEL_NAME,
         "dino_input_size": DINO_INPUT_SIZE,
         "sample_fps": SAMPLE_FPS,
@@ -124,6 +133,10 @@ def nominal_cache_signature() -> dict:
         "threshold_smooth_window": THRESHOLD_SMOOTH_WINDOW,
         "threshold_floor_quantile": THRESHOLD_FLOOR_QUANTILE,
     }
+    if CALIBRATION_VIDEO_PATHS:
+        signature.update(calibration_method=SEQUENCE_CALIBRATION_METHOD,
+                         calibration_sources=source_signatures(CALIBRATION_VIDEO_PATHS))
+    return signature
 
 
 def nominal_cache_runtime_signature() -> dict:
@@ -138,6 +151,7 @@ def check_input_paths(include_nominal: bool = True, include_test: bool = True) -
     selected_paths = []
     if include_nominal:
         selected_paths.extend(NOMINAL_VIDEO_PATHS)
+        selected_paths.extend(CALIBRATION_VIDEO_PATHS)
     if include_test:
         selected_paths.append(TEST_VIDEO_PATH)
     missing_paths = [
@@ -195,6 +209,7 @@ def main(mode: str = "all") -> None:
                 {
                     **nominal_cache_signature(),
                     "mode": mode,
+                    "dino_threshold_scale": THRESHOLD_SCALE,
                     "test_source": str(TEST_VIDEO_PATH),
                     "nominal_cache_directory": str(NOMINAL_CACHE_DIRECTORY),
                 }, indent=2, sort_keys=True
@@ -226,46 +241,62 @@ def main(mode: str = "all") -> None:
     if cached is not None:
         nominal_memory, grid_size, adaptive_threshold_df, calibration_df = cached
     else:
+        reusable = None
+        if NOMINAL_CACHE_DIRECTORY is not None and not REBUILD_NOMINAL_CACHE:
+            reusable = load_nominal_cache(NOMINAL_CACHE_DIRECTORY, memory_signature(signature))
         # ----------------------------------------------------
         # Step 2: Build nominal memory
         # ----------------------------------------------------
-        nominal_memory, grid_size = build_nominal_video_memory(
-            extractor=extractor,
-            nominal_video_paths=NOMINAL_VIDEO_PATHS,
-            sample_fps=SAMPLE_FPS,
-            start_sec=START_SEC,
-            end_sec=END_SEC,
-            max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO,
-        )
+        if reusable is not None:
+            nominal_memory, grid_size = reusable[:2]
+            print("Reusing extracted nominal memory; recalibrating only the threshold.")
+        else:
+            nominal_memory, grid_size = build_nominal_video_memory(
+                extractor=extractor, nominal_video_paths=NOMINAL_VIDEO_PATHS,
+                sample_fps=SAMPLE_FPS, start_sec=START_SEC, end_sec=END_SEC,
+                max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
 
         # ----------------------------------------------------
         # Step 3: Calibrate the adaptive threshold
         # ----------------------------------------------------
-        (
-            adaptive_threshold_df,
-            calibration_df,
-        ) = calibrate_adaptive_threshold_leave_one_video_out(
-            nominal_memory=nominal_memory,
-            quantile=THRESHOLD_QUANTILE,
-            margin=THRESHOLD_MARGIN,
-            top_k_cls=TOP_K_CLS,
-            attention_power=ATTENTION_POWER,
-            min_weight=MIN_WEIGHT,
-            n_bins=THRESHOLD_BINS,
-            min_points_per_bin=MIN_POINTS_PER_BIN,
-            smooth_window=THRESHOLD_SMOOTH_WINDOW,
-            threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE,
-            stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
-        )
-        if NOMINAL_CACHE_DIRECTORY is not None:
-            save_nominal_cache(
-                NOMINAL_CACHE_DIRECTORY,
-                nominal_memory,
-                grid_size,
-                adaptive_threshold_df,
-                calibration_df,
-                signature,
+        if CALIBRATION_VIDEO_PATHS:
+            rows = []
+            for run_id, source in enumerate(CALIBRATION_VIDEO_PATHS):
+                print(f"Independent DINO calibration: {run_id + 1}/{len(CALIBRATION_VIDEO_PATHS)}")
+                # Hold only one query bag in RAM; never add it to retrieval memory.
+                queries, query_grid = build_nominal_video_memory(extractor, [source],
+                    sample_fps=SAMPLE_FPS, start_sec=START_SEC, end_sec=END_SEC,
+                    max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
+                if query_grid != grid_size:
+                    raise ValueError("Calibration and memory patch grids differ.")
+                rows.extend(score_calibration_memory(queries, nominal_memory, run_id,
+                    top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
+                    stage_constrained_matching=STAGE_CONSTRAINED_MATCHING))
+                del queries
+            adaptive_threshold_df, calibration_df = build_sequence_threshold(pd.DataFrame(rows),
+                n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE,
+                margin=THRESHOLD_MARGIN, smooth_window=THRESHOLD_SMOOTH_WINDOW)
+        else:
+            adaptive_threshold_df, calibration_df = calibrate_adaptive_threshold_leave_one_video_out(
+                nominal_memory=nominal_memory,
+                quantile=THRESHOLD_QUANTILE,
+                margin=THRESHOLD_MARGIN,
+                top_k_cls=TOP_K_CLS,
+                attention_power=ATTENTION_POWER,
+                min_weight=MIN_WEIGHT,
+                n_bins=THRESHOLD_BINS,
+                min_points_per_bin=MIN_POINTS_PER_BIN,
+                smooth_window=THRESHOLD_SMOOTH_WINDOW,
+                threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE,
+                stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
             )
+        if NOMINAL_CACHE_DIRECTORY is not None:
+            if reusable is not None:
+                save_nominal_calibration(NOMINAL_CACHE_DIRECTORY, adaptive_threshold_df, calibration_df, signature)
+            else:
+                save_nominal_cache(
+                    NOMINAL_CACHE_DIRECTORY, nominal_memory, grid_size,
+                    adaptive_threshold_df, calibration_df, signature)
             print(f"Saved reusable nominal cache: {NOMINAL_CACHE_DIRECTORY}")
 
     print("Nominal grid size:", grid_size)
@@ -279,6 +310,7 @@ def main(mode: str = "all") -> None:
         print(f"Memory directory: {NOMINAL_CACHE_DIRECTORY}")
         return
 
+    adaptive_threshold_df = scaled_threshold(adaptive_threshold_df, THRESHOLD_SCALE)
     adaptive_threshold_df.to_csv(THRESHOLD_CSV, index=False)
     calibration_df.to_csv(CALIBRATION_CSV, index=False)
 

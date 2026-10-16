@@ -5,6 +5,109 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+
+SEQUENCE_CALIBRATION_METHOD = "split_nominal_sequence_max_v1"
+
+
+def validate_threshold_scale(value) -> float:
+    if isinstance(value, bool):
+        raise ValueError("dino_threshold_scale must be a finite positive number.")
+    value = float(value)
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError("dino_threshold_scale must be a finite positive number.")
+    return value
+
+
+def scaled_threshold(table: pd.DataFrame, scale: float) -> pd.DataFrame:
+    """Scale only the decision limit; preserve scores and the saved calibration."""
+    result = table.copy()
+    result["base_threshold"] = result["adaptive_threshold"]
+    result["threshold_scale"] = validate_threshold_scale(scale)
+    result["adaptive_threshold"] *= result["threshold_scale"]
+    return result
+
+
+def build_sequence_threshold(calibration_df, n_bins=30, quantile=.90,
+                             margin=1.10, smooth_window=3):
+    """FIDeL-inspired scalar score band, using two disjoint nominal subsets.
+
+    One subset estimates mean/scale versus *matched memory* progress. The other
+    supplies one maximum standardized deviation per complete recording. Neither
+    subset is part of retrieval memory. This is not FIDeL's patch/OT scorer.
+    """
+    required = {"held_out_video_id", "score", "matched_progress"}
+    if not required.issubset(calibration_df) or calibration_df.empty:
+        raise ValueError("Sequence calibration needs run IDs, scores and matched progress.")
+    values = calibration_df[["score", "matched_progress"]].to_numpy(float)
+    if (not np.isfinite(values).all() or (values[:, 0] < 0).any()
+            or ((values[:, 1] < 0) | (values[:, 1] > 1)).any()):
+        raise ValueError("Calibration scores/progress must be finite and in range.")
+    if n_bins < 1 or not 0 < quantile < 1 or not np.isfinite(margin) or margin < 1:
+        raise ValueError("Invalid sequence calibration bins, quantile or margin.")
+    ids = np.asarray(sorted(calibration_df.held_out_video_id.unique()))
+    # Fixed, data-independent partition. Keep complete recordings together.
+    ids = np.random.default_rng(42).permutation(ids)
+    split = len(ids) // 2
+    shape_ids, limit_ids = ids[:split], ids[split:]
+    rank = int(np.ceil((len(limit_ids) + 1) * quantile))
+    if split < 2 or rank > len(limit_ids):
+        raise ValueError("Too few independent calibration bags for the sequence quantile. "
+                         "At 0.90, provide at least 18 bags (9 for the limit subset).")
+    rows = calibration_df.copy()
+    rows["calibration_role"] = np.where(rows.held_out_video_id.isin(shape_ids), "shape", "limit")
+    shape = rows.loc[rows.calibration_role == "shape"].copy()
+    centers = (np.arange(n_bins) + .5) / n_bins
+    shape["bin"] = np.minimum((shape.matched_progress * n_bins).astype(int), n_bins - 1)
+    shape["score_squared"] = shape.score ** 2
+    # Equal run weights within each bin; a long bag must not dominate the shape.
+    moments = shape.groupby(["held_out_video_id", "bin"])[["score", "score_squared"]].mean()
+    local = moments.groupby("bin").mean().reindex(range(n_bins)).interpolate().bfill().ffill()
+    mean = local.score
+    scale = np.sqrt(np.maximum(local.score_squared - mean ** 2, 0))
+    global_moments = shape.groupby("held_out_video_id")[["score", "score_squared"]].mean().mean()
+    global_std = np.sqrt(max(0., float(global_moments.score_squared - global_moments.score ** 2)))
+    floor = max(float(global_std) * .1, 1e-8)
+    # Smooth the band shape BEFORE calibrating maxima; never lower a fitted bound afterwards.
+    window = max(1, int(smooth_window or 1))
+    mean = mean.rolling(window, center=True, min_periods=1).mean().to_numpy()
+    scale = scale.rolling(window, center=True, min_periods=1).mean().clip(lower=floor).to_numpy()
+    rows["baseline_mean"] = np.interp(rows.matched_progress, centers, mean)
+    rows["baseline_scale"] = np.interp(rows.matched_progress, centers, scale)
+    rows["standardized_deviation"] = (rows.score - rows.baseline_mean) / rows.baseline_scale
+    maxima = rows.loc[rows.calibration_role == "limit"].groupby("held_out_video_id").standardized_deviation.max()
+    bandwidth = max(0., float(np.sort(maxima.to_numpy())[rank - 1]))
+    table = pd.DataFrame(dict(stage_center=centers,
+        adaptive_threshold=np.maximum(mean + margin * bandwidth * scale, 1e-8),
+        baseline_mean=mean, baseline_scale=scale,
+        count=shape.groupby("bin").size().reindex(range(n_bins), fill_value=0).to_numpy(),
+        bandwidth=bandwidth, method=SEQUENCE_CALIBRATION_METHOD,
+        shape_runs=len(shape_ids), limit_runs=len(limit_ids), quantile=quantile, margin=margin))
+    rows["adaptive_threshold"] = np.interp(rows.matched_progress, centers, table.adaptive_threshold)
+    rows["above_threshold"] = rows.score > rows.adaptive_threshold
+    print(f"DINO sequence calibration: {len(shape_ids)} shape bags, {len(limit_ids)} limit bags; "
+          f"maximum-deviation rank {rank}/{len(limit_ids)}, bandwidth {bandwidth:.6g}")
+    print("Calibration crossings (not independent evaluation):",
+          rows.groupby("calibration_role").above_threshold.mean().to_dict())
+    return table, rows
+
+
+def score_calibration_memory(query_memory, reference_memory, run_id, *, top_k_cls=5,
+                             attention_power=1.5, min_weight=.10, stage_constrained_matching=False):
+    """Score a separate successful recording using exactly the runtime matcher."""
+    rows = []
+    for query in query_memory:
+        score, _, _, _, match, distance = compare_frame_to_nominal_memory(
+            query["features"], query["attention"], query["cls"], reference_memory,
+            top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight,
+            required_stage=int(query["stage"]) if stage_constrained_matching else None)
+        rows.append(dict(held_out_video_id=run_id, query_frame_id=int(query["frame_id"]),
+            query_progress=float(query["progress"]), matched_progress=float(match["progress"]),
+            matched_video_id=int(match["video_id"]), matched_frame_id=int(match["frame_id"]),
+            matched_timestamp_sec=float(match["timestamp_sec"]), score=float(score),
+            cls_distance=float(distance), query_stage=int(query.get("stage", -1)),
+            matched_stage=int(match.get("stage", -1))))
+    return rows
+
 from .anomaly_detection import (
     NominalItem,
     add_progress_to_nominal_memory,
