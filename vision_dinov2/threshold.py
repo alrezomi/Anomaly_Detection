@@ -24,6 +24,7 @@ def scaled_threshold(table: pd.DataFrame, scale: float) -> pd.DataFrame:
     result["base_threshold"] = result["adaptive_threshold"]
     result["threshold_scale"] = validate_threshold_scale(scale)
     result["adaptive_threshold"] *= result["threshold_scale"]
+    result.attrs['threshold_scale'] = float(scale)
     return result
 
 
@@ -92,15 +93,19 @@ def build_sequence_threshold(calibration_df, n_bins=30, quantile=.90,
 
 
 def score_calibration_memory(query_memory, reference_memory, run_id, *, top_k_cls=5,
-                             attention_power=1.5, min_weight=.10, stage_constrained_matching=False):
+                             attention_power=1.5, min_weight=.10, stage_constrained_matching=False,
+                             patch_maps=None):
     """Score a separate successful recording using exactly the runtime matcher."""
     rows = []
     for query in query_memory:
-        score, _, _, _, match, distance = compare_frame_to_nominal_memory(
+        score, patches, _, _, match, distance = compare_frame_to_nominal_memory(
             query["features"], query["attention"], query["cls"], reference_memory,
             top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight,
             required_stage=int(query["stage"]) if stage_constrained_matching else None)
+        if patch_maps is not None:
+            patch_maps.append(np.asarray(patches, dtype=np.float32))
         rows.append(dict(held_out_video_id=run_id, query_frame_id=int(query["frame_id"]),
+            query_bag=str(getattr(query.get('source'), 'bag_path', query.get('video_path', ''))),
             query_progress=float(query["progress"]), matched_progress=float(match["progress"]),
             matched_video_id=int(match["video_id"]), matched_frame_id=int(match["frame_id"]),
             matched_timestamp_sec=float(match["timestamp_sec"]), score=float(score),

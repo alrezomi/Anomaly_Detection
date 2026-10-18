@@ -454,12 +454,13 @@ def run_video_test(
         )
 
         matched_progress = float(best_match["progress"])
-
+        local_details = {}
         if adaptive_threshold_df is not None:
-            current_threshold = threshold_for_progress(
-                matched_progress,
-                adaptive_threshold_df,
-            )
+            from .local_scoring import score_matched_frame
+            decision = score_matched_frame(score, _patch_scores, matched_progress, adaptive_threshold_df)
+            score, current_threshold = decision['score'], decision['threshold']
+            local_details = {key: value for key, value in decision.items()
+                             if key not in {'score', 'threshold', 'heatmap'}}
             threshold_mode = "adaptive"
         else:
             current_threshold = fixed_threshold
@@ -473,6 +474,7 @@ def run_video_test(
             alarm = bool(epsilon > 1.0)
 
         row = {
+            **local_details,
             "frame_id": frame_id,
             "timestamp_sec": timestamp_sec,
             "score": score,

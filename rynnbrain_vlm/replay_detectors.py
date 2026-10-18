@@ -28,9 +28,13 @@ class DinoReplayDetector:
         from vision_dinov2.nominal_cache import load_nominal_cache
         from vision_dinov2.dinov2_features import DINOv2FeatureExtractor
         from vision_dinov2.threshold import validate_threshold_scale, SEQUENCE_CALIBRATION_METHOD
+        from vision_dinov2.local_scoring import LOCAL_METHOD
         from rosbag_io import RosbagImageSource
         self.config = config
         self.threshold_scale = validate_threshold_scale(config.get('dino_threshold_scale', 1.0))
+        self.score_mode = config.get('dino_score_mode', 'mean')
+        if self.score_mode not in {'mean', 'local'}:
+            raise ValueError("dino_score_mode must be 'mean' or 'local'.")
         self.topic = config['rynnbrain']['camera_topics'][0]
         self.frame_count = None  # Run through the recording, independently of VLM sampling.
         self.path = Path(config.get('nominal_cache_dir', '/outputs/nominal_cache'))
@@ -39,10 +43,13 @@ class DinoReplayDetector:
         self.path /= _slug(self.topic)
         self.signature = settings.nominal_cache_runtime_signature()
         self.signature.update(dino_input_size=config.get('dino_input_size', settings.DINO_INPUT_SIZE),
-                              stage_constrained_matching=config.get('stage_constrained_matching', False))
+                              stage_constrained_matching=config.get('stage_constrained_matching', False),
+                              score_mode=self.score_mode)
         calibration_bags = config.get('dino_calibration_bags', [])
+        if self.score_mode == 'local' and not calibration_bags:
+            raise ValueError('Local DINO scoring requires separate dino_calibration_bags.')
         if calibration_bags:
-            self.signature.update(calibration_method=SEQUENCE_CALIBRATION_METHOD,
+            self.signature.update(calibration_method=LOCAL_METHOD if self.score_mode == 'local' else SEQUENCE_CALIBRATION_METHOD,
                 calibration_sources=settings.source_signatures([
                     RosbagImageSource(path, self.topic,
                         stage_topic=None if config.get('ignore_recorded_stages', False) else config.get('stage_topic', '/recording_stage'),
@@ -58,7 +65,10 @@ class DinoReplayDetector:
         self.signature['calibration_sources'] = saved.get('calibration_sources', [])
         self.signature['dino_threshold_scale'] = self.threshold_scale
         calibration_label = ('separate nominal recordings, sequence maximum deviations'
-            if self.signature['calibration_method'] == SEQUENCE_CALIBRATION_METHOD else 'legacy frame quantile')
+            if self.signature['calibration_method'] in {SEQUENCE_CALIBRATION_METHOD, LOCAL_METHOD} else 'legacy frame quantile')
+        if self.score_mode == 'local':
+            self.score_source = 'dino_calibrated_local_regions'
+            self.note += ' Local scoring uses the region with the largest distance / local-bound ratio. The white box identifies it; the graph shows that region\'s distance and bound. It is not a semantic object detector.'
         self.note += (f" Threshold calibration: {calibration_label}; "
                       f"multiplier {self.threshold_scale:g}. Calibration recordings are excluded from evaluation.")
         self.sources = saved.get('sources', [])
@@ -110,21 +120,27 @@ class DinoReplayDetector:
 
     def append(self, image, timestamp, verify=False):
         from .online_replay import synchronized_time
-        from vision_dinov2.anomaly_detection import compare_frame_to_nominal_memory, threshold_for_progress
+        from vision_dinov2.anomaly_detection import compare_frame_to_nominal_memory
         from vision_dinov2.visualization import make_heatmap_overlay
+        from vision_dinov2.local_scoring import score_matched_frame
         started = synchronized_time()
         features, attention, cls, grid = self.extractor.extract(image)
         feature_sec = synchronized_time() - started
         started = time.monotonic()
         stage = self.stages.at(timestamp) if self.stages else None
-        score, _, weighted, _, best, distance = compare_frame_to_nominal_memory(
+        score, patches, weighted, _, best, distance = compare_frame_to_nominal_memory(
             features, attention, cls, self.memory, top_k_cls=self.signature['top_k_cls'],
             attention_power=self.signature['attention_power'], min_weight=self.signature['min_weight'],
             required_stage=stage)
-        base_threshold = threshold_for_progress(float(best['progress']), self.thresholds)
-        threshold = base_threshold * getattr(self, 'threshold_scale', 1.0)
+        decision = score_matched_frame(score, patches, float(best['progress']), self.thresholds,
+                                      getattr(self, 'threshold_scale', 1.0))
+        score, threshold, base_threshold = decision['score'], decision['threshold'], decision['base_threshold']
         scoring_sec = time.monotonic() - started
-        self.preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid))
+        if decision['heatmap'] is not None:
+            self.preview_image = Image.fromarray(make_heatmap_overlay(image, decision['heatmap'], grid,
+                calibrated=True, region=decision))
+        else:
+            self.preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid))
         self.matched_image = None
         match = {'status': 'unavailable', 'stage': stage}
         try:
@@ -141,6 +157,8 @@ class DinoReplayDetector:
                    score_kind=self.score_kind, visual_matching=match,
                    vector_kind='dino_cls',
                    epsilon=float(score / max(threshold, 1e-8)))
+        row.update({key: value for key, value in decision.items()
+                    if key in {'global_score', 'score_mode', 'region_x', 'region_y', 'region_size', 'patch_grid'}})
         self.step += 1
         return row, cls, None
 

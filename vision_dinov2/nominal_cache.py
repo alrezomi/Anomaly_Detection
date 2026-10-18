@@ -54,6 +54,10 @@ def save_nominal_calibration(directory, threshold, calibration, signature):
     directory = Path(directory)
     marker = directory / "signature.json"
     marker.unlink(missing_ok=True)
+    if 'local_profile' in threshold.attrs:
+        temporary = directory / 'local_threshold.tmp.npz'
+        np.savez_compressed(temporary, **threshold.attrs['local_profile'])
+        temporary.replace(directory / 'local_threshold.npz')
     for name, table in [("adaptive_threshold.csv", threshold), ("calibration.csv", calibration)]:
         temporary = directory / (name + ".tmp")
         table.to_csv(temporary, index=False)
@@ -67,7 +71,7 @@ def memory_signature(signature):
     """Calibration changes do not invalidate the extracted/matched memory."""
     return {key: value for key, value in signature.items()
             if not key.startswith("threshold_") and key not in {
-                "min_points_per_bin", "calibration_sources", "calibration_method"}}
+                "min_points_per_bin", "calibration_sources", "calibration_method", "score_mode"}}
 
 
 def load_nominal_cache(
@@ -86,9 +90,18 @@ def load_nominal_cache(
         return None
 
     saved_signature = json.loads(required[3].read_text(encoding="utf-8"))
-    if any(saved_signature.get(key) != value for key, value in expected_signature.items()):
+    if any(saved_signature.get(key, 'mean' if key == 'score_mode' else None) != value
+           for key, value in expected_signature.items()):
         print(f"Nominal cache settings changed; rebuilding: {directory}")
         return None
+
+    profile = None
+    if saved_signature.get('score_mode') == 'local':
+        profile_path = directory / 'local_threshold.npz'
+        if not profile_path.is_file():
+            return None
+        with np.load(profile_path, allow_pickle=False) as arrays:
+            profile = {key: arrays[key] for key in arrays.files}
 
     cache_size_gib = required[0].stat().st_size / (1024**3)
     print(
@@ -131,6 +144,8 @@ def load_nominal_cache(
     print(f"Nominal memory loaded in {elapsed:.1f}s")
 
     threshold = pd.read_csv(required[1])
+    if profile is not None:
+        threshold.attrs['local_profile'] = profile
     calibration = pd.read_csv(required[2])
     print(f"Loaded reusable nominal cache: {directory}")
     print(f"Cached nominal frames: {len(memory)}")

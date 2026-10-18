@@ -89,6 +89,11 @@ def main() -> None:
     if calibration_bags and len(calibration_bags) < 18:
         raise ValueError("Use at least 18 separate successful DINO calibration bags.")
     run_vision_test.THRESHOLD_SCALE = validate_threshold_scale(configuration.get("dino_threshold_scale", 1.0))
+    run_vision_test.SCORE_MODE = configuration.get('dino_score_mode', 'mean')
+    if run_vision_test.SCORE_MODE not in {'mean', 'local'}:
+        raise ValueError("dino_score_mode must be 'mean' or 'local'.")
+    if run_vision_test.SCORE_MODE == 'local' and not calibration_bags:
+        raise ValueError("Local DINO scoring requires separate dino_calibration_bags.")
     test_bag_value = arguments.test_bag or configuration.get("test_bag")
     camera_topics = arguments.camera_topic or configuration.get("camera_topics", [])
     output_value = (

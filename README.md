@@ -444,6 +444,89 @@ multiplier. Leave it at 1.0 for the first independent evaluation. An empty or
 absent calibration list preserves compatibility with existing caches/legacy
 calibration; the GUI note reports which calibration was actually loaded.
 
+### DINO local-region scoring for small object mismatches
+
+Set the optional top-level `"dino_score_mode": "local"` to enable local scoring.
+The default `"mean"` retains the previous whole-image attention-weighted score.
+Local mode uses the same DINO model, normalized patch features, CLS shortlist,
+stage restriction and reference-frame selection. No new network is loaded.
+
+Why this change: at input size 728, a frame has 52 x 52 = 2,704 patch tokens.
+A missing or misplaced small object can be diluted by averaging all patch
+differences. DINOv2 supplies spatial patch features, but CLS attention is not a
+task-specific object mask. Its authors document attention/feature artifacts in
+models without registers; increasing attention power does not guarantee emphasis
+on the manipulated object. See the official
+[DINOv2 model card](https://github.com/facebookresearch/dinov2/blob/main/MODEL_CARD.md)
+and [Vision Transformers Need Registers](https://arxiv.org/abs/2309.16588).
+
+After matching a nominal frame, local mode:
+
+1. Computes unweighted patch distances at the same image locations. Attention
+   still participates in the existing frame matcher, but cannot suppress a
+   region's final mismatch score.
+2. Averages each overlapping 3 x 3 patch neighborhood. This limits whole-image
+   dilution and reduces isolated patch artifacts; it is not object segmentation.
+3. Learns a separate nominal mean/scale for every neighborhood versus matched
+   nominal progress. Normal robot motion therefore does not directly set the
+   variance of a quiet object location.
+4. Uses separate limit recordings to calibrate the maximum standardized
+   deviation across **all regions and all sampled times** in each recording.
+   The final region bound is `mean + margin * bandwidth * scale`. This remains
+   a conservative sequence-level limit; missed failures must still be measured.
+5. Selects the region with the largest distance / bound ratio. The graph shows
+   that region's raw distance and its bound, both in the same units. The region
+   can change between frames; the saved row includes its coordinates, the old
+   global score, and the threshold multiplier.
+
+The GUI heatmap uses a fixed ratio scale: 0 is blue, 1 (the decision limit) is
+approximately green, and 2 or more is red. A white rectangle marks the selected
+region. Colors are no longer stretched independently for every frame. A red
+area in the old heatmap only indicated a relatively large difference in that
+frame, not a calibrated alarm.
+
+Keep the current separate `nominal_bags` and `dino_calibration_bags` lists. Using
+the same recording as query and memory permits exact self-matches, leading to
+artificially small distances/thresholds. Using all recordings is possible with
+whole-recording cross-fitting, but that calibrates against a different reference
+set than the final full memory and is not automatically more accurate. Given
+the available independent data, we keep the separate split. More *diverse*
+successful memory runs may help, but they require fresh calibration and must
+not also serve as calibration/evaluation runs. No bag-list changes are made by
+this update.
+
+To use local mode, stop replay, pull the update, and manually set:
+
+```json
+"dino_score_mode": "local",
+"dino_threshold_scale": 1.0
+```
+
+Then run:
+
+```bash
+docker compose run --rm --build vision-memory
+docker compose up --build online-replay
+```
+
+With `rebuild_nominal_cache: false`, compatible memory features are reused.
+Calibration bags must be processed again because older CSV files contain only
+whole-image scores, not spatial patch differences. The compact regional profile
+is saved automatically as `local_threshold.npz` beside the existing memory;
+there is no extra config path. Cache signatures prevent mixing mean/local
+thresholds. Returning to mean mode also requires recalibration of that cache.
+`adaptive_threshold.csv` contains the mean regional bound as a **summary only**;
+per-frame CSV/JSON results contain the actual selected-region bound used for
+the alarm. `calibration.csv` retains per-run maxima and selected-region scores
+for checking whether a particular successful recording inflated the limit.
+
+This change does not recognize the label "scissors", infer grasp intent, repair
+incorrect stage alignment, or guarantee detection under occlusion. It makes
+localized visual differences available to the decision. Validate it on separate
+successful and failed recordings before drawing accuracy conclusions. Synthetic
+tests check small-region sensitivity, location dependence, normal-motion
+variation, calibration separation, multiplier parity and replay/batch agreement.
+
 Every rosbag vision run writes two raw videos per camera:
 
 - `<camera>_model_input.mp4`: the exact square input processed by DINO.
