@@ -419,6 +419,7 @@ def create_anomaly_heatmap_video(
                 attention_power=attention_power,
                 min_weight=min_weight,
                 required_stage=execution_stage,
+                local_scoring=adaptive_threshold_df is not None and 'local_profile' in adaptive_threshold_df.attrs,
             )
 
             matched_progress = float(best_match["progress"])
@@ -428,8 +429,6 @@ def create_anomaly_heatmap_video(
                 decision = score_matched_frame(score, _patch_scores, matched_progress, adaptive_threshold_df,
                                                normalized_feature_dimension=test_features.shape[-1])
                 score, current_threshold = decision['score'], decision['threshold']
-                if decision['heatmap'] is not None:
-                    weighted_patch_scores = _patch_scores
                 threshold_mode = "adaptive"
             else:
                 current_threshold = fixed_threshold

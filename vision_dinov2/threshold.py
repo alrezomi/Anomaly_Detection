@@ -101,7 +101,8 @@ def score_calibration_memory(query_memory, reference_memory, run_id, *, top_k_cl
         score, patches, _, _, match, distance = compare_frame_to_nominal_memory(
             query["features"], query["attention"], query["cls"], reference_memory,
             top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight,
-            required_stage=int(query["stage"]) if stage_constrained_matching else None)
+            required_stage=int(query["stage"]) if stage_constrained_matching else None,
+            local_scoring=patch_maps is not None)
         if patch_maps is not None:
             patch_maps.append(np.asarray(patches, dtype=np.float32))
         rows.append(dict(held_out_video_id=run_id, query_frame_id=int(query["frame_id"]),

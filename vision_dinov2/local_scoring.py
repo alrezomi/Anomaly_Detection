@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-LOCAL_METHOD = "split_nominal_local_regions_v2_pooled_scale"
+LOCAL_METHOD = "split_nominal_local_regions_v3_attention_spatial"
 
 
 def score_matched_frame(global_score, patch_scores, progress, threshold_table, threshold_scale=1.0,
@@ -81,9 +81,9 @@ def local_decision(patch_scores, progress, profile, threshold_scale=1.0,
     result = dict(score=float(regions[selected]), threshold=float(bounds[selected] * threshold_scale),
                 base_threshold=float(bounds[selected]), epsilon=float(ratios[selected]),
                 region_x=x, region_y=y, region_size=window, patch_grid=grid,
-                max_raw_region_distance=float(regions[raw_selected]),
-                max_raw_region_threshold=float(bounds[raw_selected] * threshold_scale),
-                max_raw_region_x=raw_x, max_raw_region_y=raw_y,
+                max_region_distance=float(regions[raw_selected]),
+                max_region_threshold=float(bounds[raw_selected] * threshold_scale),
+                max_region_x=raw_x, max_region_y=raw_y,
                 max_patch_distance=float(np.max(patch_scores)),
                 heatmap=heat.reshape(-1))
     if normalized_feature_dimension is not None:

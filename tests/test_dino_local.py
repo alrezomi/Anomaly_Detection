@@ -141,7 +141,7 @@ class LocalDinoTests(unittest.TestCase):
             save_nominal_calibration(folder, self.table, self.calibration, signature)
             self.assertIsNotNone(load_nominal_cache(folder, signature))
 
-    def test_zero_attention_cannot_hide_local_difference_and_batch_replay_agree(self):
+    def test_local_batch_replay_and_raw_heatmap_agree(self):
         from vision_dinov2.anomaly_detection import run_video_test
         from vision_dinov2.visualization import create_anomaly_heatmap_video, make_heatmap_overlay
         from rynnbrain_vlm.replay_detectors import DinoReplayDetector
@@ -150,7 +150,7 @@ class LocalDinoTests(unittest.TestCase):
         patches = patches.reshape(-1)
         best = dict(progress=4 / 7, video_id=0, frame_id=0, timestamp_sec=1., stage=1,
                     _progress_locked=True)
-        match = (float(patches.mean()), patches, np.zeros(196), np.zeros(196), best, .01)
+        match = (float(patches.mean()), patches, patches.copy(), np.zeros(196), best, .01)
         image = Image.new('RGB', (140, 140))
         extractor = Mock()
         extractor.extract.return_value = (np.zeros((196, 2)), np.zeros(196), np.ones(2), 14)
@@ -177,13 +177,13 @@ class LocalDinoTests(unittest.TestCase):
         self.assertAlmostEqual(video.score, batch.score)
         self.assertAlmostEqual(video.threshold, batch.threshold)
         self.assertEqual(video.alarm, batch.alarm)
-        # A selected-region box is visible even when attention weights are zero.
+        # The raw diagnostic heatmap remains distinct from the scored metric.
         self.assertIsNotNone(detector.preview_image)
         expected = make_heatmap_overlay(image, patches, 14,
             region=local_decision(patches, 4 / 7, self.profile))
         np.testing.assert_array_equal(np.asarray(detector.preview_image), expected)
         self.assertEqual(replay['max_patch_distance'], batch.max_patch_distance)
-        self.assertEqual(video.max_raw_region_distance, batch.max_raw_region_distance)
+        self.assertEqual(video.max_region_distance, batch.max_region_distance)
 
 
 if __name__ == '__main__':
