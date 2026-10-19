@@ -41,6 +41,7 @@ from .visualization import (
 NOMINAL_VIDEO_PATHS = nominal_video_paths()
 CALIBRATION_VIDEO_PATHS = []
 THRESHOLD_SCALE = 1.0
+SCORE_MODE = "mean"
 TEST_VIDEO_PATH = test_video_path()
 
 
@@ -115,6 +116,7 @@ def nominal_cache_signature() -> dict:
     """Describe every setting that changes reusable nominal results."""
     signature = {
         "format_version": 1,
+        "score_mode": SCORE_MODE,
         "sources": source_signatures(NOMINAL_VIDEO_PATHS),
         "model_name": MODEL_NAME,
         "dino_input_size": DINO_INPUT_SIZE,
@@ -136,6 +138,9 @@ def nominal_cache_signature() -> dict:
     if CALIBRATION_VIDEO_PATHS:
         signature.update(calibration_method=SEQUENCE_CALIBRATION_METHOD,
                          calibration_sources=source_signatures(CALIBRATION_VIDEO_PATHS))
+        if SCORE_MODE == 'local':
+            from .local_scoring import LOCAL_METHOD
+            signature['calibration_method'] = LOCAL_METHOD
     return signature
 
 
@@ -185,6 +190,8 @@ def check_input_paths(include_nominal: bool = True, include_test: bool = True) -
 def main(mode: str = "all") -> None:
     if mode not in {"all", "build-memory", "test"}:
         raise ValueError("mode must be 'all', 'build-memory', or 'test'")
+    if SCORE_MODE == 'local' and not CALIBRATION_VIDEO_PATHS:
+        raise ValueError("dino_score_mode local requires separate dino_calibration_bags.")
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
     check_input_paths(include_nominal=mode != "test", include_test=mode != "build-memory")
 
@@ -261,6 +268,7 @@ def main(mode: str = "all") -> None:
         # ----------------------------------------------------
         if CALIBRATION_VIDEO_PATHS:
             rows = []
+            patch_maps = [] if SCORE_MODE == 'local' else None
             for run_id, source in enumerate(CALIBRATION_VIDEO_PATHS):
                 print(f"Independent DINO calibration: {run_id + 1}/{len(CALIBRATION_VIDEO_PATHS)}")
                 # Hold only one query bag in RAM; never add it to retrieval memory.
@@ -269,13 +277,20 @@ def main(mode: str = "all") -> None:
                     max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
                 if query_grid != grid_size:
                     raise ValueError("Calibration and memory patch grids differ.")
+                extra = {'patch_maps': patch_maps} if patch_maps is not None else {}
                 rows.extend(score_calibration_memory(queries, nominal_memory, run_id,
                     top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
-                    stage_constrained_matching=STAGE_CONSTRAINED_MATCHING))
+                    stage_constrained_matching=STAGE_CONSTRAINED_MATCHING, **extra))
                 del queries
-            adaptive_threshold_df, calibration_df = build_sequence_threshold(pd.DataFrame(rows),
-                n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE,
-                margin=THRESHOLD_MARGIN, smooth_window=THRESHOLD_SMOOTH_WINDOW)
+            if SCORE_MODE == 'local':
+                from .local_scoring import fit_local_threshold
+                adaptive_threshold_df, calibration_df = fit_local_threshold(pd.DataFrame(rows), patch_maps,
+                    n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE, margin=THRESHOLD_MARGIN)
+                del patch_maps
+            else:
+                adaptive_threshold_df, calibration_df = build_sequence_threshold(pd.DataFrame(rows),
+                    n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE,
+                    margin=THRESHOLD_MARGIN, smooth_window=THRESHOLD_SMOOTH_WINDOW)
         else:
             adaptive_threshold_df, calibration_df = calibrate_adaptive_threshold_leave_one_video_out(
                 nominal_memory=nominal_memory,
