@@ -27,14 +27,14 @@ class DinoReplayDetector:
         from vision_dinov2 import run_vision_test as settings
         from vision_dinov2.nominal_cache import load_nominal_cache
         from vision_dinov2.dinov2_features import DINOv2FeatureExtractor
-        from vision_dinov2.threshold import validate_threshold_scale, SEQUENCE_CALIBRATION_METHOD
+        from vision_dinov2.threshold import validate_threshold_scale, SEQUENCE_CALIBRATION_METHOD, NOTEBOOK_CALIBRATION_METHOD
         from vision_dinov2.local_scoring import LOCAL_METHOD, local_profile_diagnostics
         from rosbag_io import RosbagImageSource
         self.config = config
         self.threshold_scale = validate_threshold_scale(config.get('dino_threshold_scale', 1.0))
         self.score_mode = config.get('dino_score_mode', 'mean')
-        if self.score_mode not in {'mean', 'local'}:
-            raise ValueError("dino_score_mode must be 'mean' or 'local'.")
+        if self.score_mode not in {'mean', 'local', 'notebook'}:
+            raise ValueError("dino_score_mode must be 'mean', 'local', or 'notebook'.")
         self.topic = topic or config.get('camera_topics', config['rynnbrain']['camera_topics'])[0]
         self.frame_count = None  # Run through the recording, independently of VLM sampling.
         self.path = Path(config.get('nominal_cache_dir', '/outputs/nominal_cache'))
@@ -54,6 +54,11 @@ class DinoReplayDetector:
                     RosbagImageSource(path, self.topic,
                         stage_topic=None if config.get('ignore_recorded_stages', False) else config.get('stage_topic', '/recording_stage'),
                         stage_count=config.get('stage_count', 3)) for path in calibration_bags]))
+        if self.score_mode == 'notebook':
+            self.signature.update(calibration_method=NOTEBOOK_CALIBRATION_METHOD,
+                                  threshold_quantile=.95, threshold_margin=1.10)
+            if not calibration_bags:
+                self.signature['calibration_sources'] = []
         self.sample_fps = self.signature['sample_fps']
         progress('Loading saved DINO nominal memory')
         loaded = load_nominal_cache(self.path, self.signature)
@@ -66,6 +71,13 @@ class DinoReplayDetector:
         self.signature['dino_threshold_scale'] = self.threshold_scale
         calibration_label = ('separate nominal recordings, sequence maximum deviations'
             if self.signature['calibration_method'] in {SEQUENCE_CALIBRATION_METHOD, LOCAL_METHOD} else 'legacy frame quantile')
+        if self.score_mode == 'notebook':
+            self.score_source = 'dino_notebook_patch_rms'
+            calibration_label = ('separate nominal recordings' if calibration_bags else 'leave-one-recording-out') + ', frame 95th percentile x 1.10'
+            self.note += (' Notebook baseline: unweighted same-position patch RMS, averaged over the image; '
+                          'all eligible nominal frames are searched. Attention is display-only. '
+                          'A fixed empirical frame threshold does not control the chance of any alarm over a whole run. '
+                          'Full-memory comparison can be slower than the CLS shortlist.')
         if self.score_mode == 'local':
             self.score_source = 'dino_calibrated_local_regions'
             self.note += (' Local scoring uses soft attention and bidirectional nearby-patch matching with a displacement penalty. '
@@ -140,7 +152,8 @@ class DinoReplayDetector:
         score, patches, weighted, weights, best, distance = compare_frame_to_nominal_memory(
             features, attention, cls, self.memory, top_k_cls=self.signature['top_k_cls'],
             attention_power=self.signature['attention_power'], min_weight=self.signature['min_weight'],
-            required_stage=stage, local_scoring='local_profile' in self.thresholds.attrs)
+            required_stage=stage, local_scoring='local_profile' in self.thresholds.attrs,
+            notebook_scoring=self.thresholds.attrs.get('score_mode') == 'notebook')
         decision = score_matched_frame(score, patches, float(best['progress']), self.thresholds,
                                       getattr(self, 'threshold_scale', 1.0),
                                       normalized_feature_dimension=features.shape[-1])

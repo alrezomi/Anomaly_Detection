@@ -23,6 +23,7 @@ from .threshold import (
     calibrate_adaptive_threshold_leave_one_video_out,
     build_sequence_threshold, score_calibration_memory, scaled_threshold,
     SEQUENCE_CALIBRATION_METHOD,
+    NOTEBOOK_CALIBRATION_METHOD, build_notebook_threshold, calibrate_notebook_leave_one_video_out,
 )
 from .visualization import (
     create_anomaly_heatmap_video,
@@ -141,6 +142,10 @@ def nominal_cache_signature() -> dict:
         if SCORE_MODE == 'local':
             from .local_scoring import LOCAL_METHOD
             signature['calibration_method'] = LOCAL_METHOD
+    if SCORE_MODE == 'notebook':
+        signature.update(calibration_method=NOTEBOOK_CALIBRATION_METHOD,
+                         threshold_quantile=.95, threshold_margin=1.10,
+                         calibration_sources=source_signatures(CALIBRATION_VIDEO_PATHS))
     return signature
 
 
@@ -190,6 +195,8 @@ def check_input_paths(include_nominal: bool = True, include_test: bool = True) -
 def main(mode: str = "all") -> None:
     if mode not in {"all", "build-memory", "test"}:
         raise ValueError("mode must be 'all', 'build-memory', or 'test'")
+    if SCORE_MODE not in {'mean', 'local', 'notebook'}:
+        raise ValueError("dino_score_mode must be 'mean', 'local', or 'notebook'.")
     if SCORE_MODE == 'local' and not CALIBRATION_VIDEO_PATHS:
         raise ValueError("dino_score_mode local requires separate dino_calibration_bags.")
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
@@ -278,11 +285,15 @@ def main(mode: str = "all") -> None:
                 if query_grid != grid_size:
                     raise ValueError("Calibration and memory patch grids differ.")
                 extra = {'patch_maps': patch_maps} if patch_maps is not None else {}
+                if SCORE_MODE == 'notebook':
+                    extra['notebook_scoring'] = True
                 rows.extend(score_calibration_memory(queries, nominal_memory, run_id,
                     top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
                     stage_constrained_matching=STAGE_CONSTRAINED_MATCHING, **extra))
                 del queries
-            if SCORE_MODE == 'local':
+            if SCORE_MODE == 'notebook':
+                adaptive_threshold_df, calibration_df = build_notebook_threshold(pd.DataFrame(rows))
+            elif SCORE_MODE == 'local':
                 from .local_scoring import fit_local_threshold
                 adaptive_threshold_df, calibration_df = fit_local_threshold(pd.DataFrame(rows), patch_maps,
                     n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE, margin=THRESHOLD_MARGIN)
@@ -291,6 +302,9 @@ def main(mode: str = "all") -> None:
                 adaptive_threshold_df, calibration_df = build_sequence_threshold(pd.DataFrame(rows),
                     n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE,
                     margin=THRESHOLD_MARGIN, smooth_window=THRESHOLD_SMOOTH_WINDOW)
+        elif SCORE_MODE == 'notebook':
+            adaptive_threshold_df, calibration_df = calibrate_notebook_leave_one_video_out(
+                nominal_memory, stage_constrained_matching=STAGE_CONSTRAINED_MATCHING)
         else:
             adaptive_threshold_df, calibration_df = calibrate_adaptive_threshold_leave_one_video_out(
                 nominal_memory=nominal_memory,

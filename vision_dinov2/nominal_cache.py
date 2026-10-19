@@ -144,6 +144,8 @@ def load_nominal_cache(
     print(f"Nominal memory loaded in {elapsed:.1f}s")
 
     threshold = pd.read_csv(required[1])
+    if saved_signature.get('score_mode') == 'notebook':
+        threshold.attrs['score_mode'] = 'notebook'
     if profile is not None:
         threshold.attrs['local_profile'] = profile
     calibration = pd.read_csv(required[2])

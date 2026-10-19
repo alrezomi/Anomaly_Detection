@@ -7,6 +7,49 @@ import pandas as pd
 
 
 SEQUENCE_CALIBRATION_METHOD = "split_nominal_sequence_max_v1"
+NOTEBOOK_CALIBRATION_METHOD = "notebook_patch_rms_frame_quantile_v1"
+
+
+def build_notebook_threshold(calibration_df):
+    """Notebook cell 47: pooled frame 95th percentile times 1.10.
+
+    These are empirical frame statistics, not a whole-run false-alarm guarantee.
+    Queries must be held out from memory by the caller, at recording level.
+    """
+    rows = calibration_df.copy()
+    if rows.empty or not {'score', 'held_out_video_id'}.issubset(rows):
+        raise ValueError('Notebook calibration requires held-out frame scores and run IDs.')
+    scores = rows.score.to_numpy(float)
+    if not np.isfinite(scores).all() or (scores < 0).any():
+        raise ValueError('Calibration scores must be finite and nonnegative.')
+    bound = float(np.quantile(scores, .95)) * 1.10
+    rows['adaptive_threshold'] = bound
+    rows['above_threshold'] = scores > bound
+    rows['calibration_role'] = 'frame_quantile'
+    table = pd.DataFrame(dict(stage_center=[0., 1.], adaptive_threshold=bound,
+                              count=len(scores), quantile=.95, margin=1.10,
+                              method=NOTEBOOK_CALIBRATION_METHOD))
+    table.attrs['score_mode'] = 'notebook'
+    print(f'Notebook DINO calibration: {rows.held_out_video_id.nunique()} held-out runs, '
+          f'{len(rows)} frames; 95th percentile x 1.10 = {bound:.6g}.')
+    print('Calibration crossings (not independent evaluation): '
+          f'{rows.above_threshold.mean():.2%} of frames; '
+          f'{rows.groupby("held_out_video_id").above_threshold.any().mean():.2%} of runs.')
+    return table, rows
+
+
+def calibrate_notebook_leave_one_video_out(nominal_memory, stage_constrained_matching=False):
+    ids = sorted({item['video_id'] for item in nominal_memory})
+    if len(ids) < 2:
+        raise ValueError('Notebook leave-one-recording-out calibration needs at least two nominal bags.')
+    rows = []
+    for run_id in ids:
+        print(f'Notebook calibration: holding out complete nominal run {run_id}', flush=True)
+        queries = [item for item in nominal_memory if item['video_id'] == run_id]
+        references = [item for item in nominal_memory if item['video_id'] != run_id]
+        rows.extend(score_calibration_memory(queries, references, run_id,
+                    stage_constrained_matching=stage_constrained_matching, notebook_scoring=True))
+    return build_notebook_threshold(pd.DataFrame(rows))
 
 
 def validate_threshold_scale(value) -> float:
@@ -94,7 +137,7 @@ def build_sequence_threshold(calibration_df, n_bins=30, quantile=.90,
 
 def score_calibration_memory(query_memory, reference_memory, run_id, *, top_k_cls=5,
                              attention_power=1.5, min_weight=.10, stage_constrained_matching=False,
-                             patch_maps=None):
+                             patch_maps=None, notebook_scoring=False):
     """Score a separate successful recording using exactly the runtime matcher."""
     rows = []
     for query in query_memory:
@@ -102,7 +145,7 @@ def score_calibration_memory(query_memory, reference_memory, run_id, *, top_k_cl
             query["features"], query["attention"], query["cls"], reference_memory,
             top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight,
             required_stage=int(query["stage"]) if stage_constrained_matching else None,
-            local_scoring=patch_maps is not None)
+            local_scoring=patch_maps is not None, notebook_scoring=notebook_scoring)
         if patch_maps is not None:
             patch_maps.append(np.asarray(patches, dtype=np.float32))
         rows.append(dict(held_out_video_id=run_id, query_frame_id=int(query["frame_id"]),
