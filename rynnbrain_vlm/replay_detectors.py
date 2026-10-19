@@ -22,7 +22,7 @@ class DinoReplayDetector:
     knn = True  # Common renderer: distance rather than probability.
     capture_visual = False
 
-    def __init__(self, config, progress):
+    def __init__(self, config, progress, topic=None, extractor=None):
         from .run import _slug
         from vision_dinov2 import run_vision_test as settings
         from vision_dinov2.nominal_cache import load_nominal_cache
@@ -35,7 +35,7 @@ class DinoReplayDetector:
         self.score_mode = config.get('dino_score_mode', 'mean')
         if self.score_mode not in {'mean', 'local'}:
             raise ValueError("dino_score_mode must be 'mean' or 'local'.")
-        self.topic = config['rynnbrain']['camera_topics'][0]
+        self.topic = topic or config.get('camera_topics', config['rynnbrain']['camera_topics'])[0]
         self.frame_count = None  # Run through the recording, independently of VLM sampling.
         self.path = Path(config.get('nominal_cache_dir', '/outputs/nominal_cache'))
         if config.get('vision_memory_name'):
@@ -68,7 +68,9 @@ class DinoReplayDetector:
             if self.signature['calibration_method'] in {SEQUENCE_CALIBRATION_METHOD, LOCAL_METHOD} else 'legacy frame quantile')
         if self.score_mode == 'local':
             self.score_source = 'dino_calibrated_local_regions'
-            self.note += ' Local scoring uses the region with the largest distance / local-bound ratio. The white box identifies it; the graph shows that region\'s distance and bound. It is not a semantic object detector.'
+            self.note += (' Local scoring uses soft attention and bidirectional nearby-patch matching with a displacement penalty. '
+                          'The white box identifies the largest score / local-bound ratio. '
+                          'Attention weights are not a task-specific object mask.')
             health = local_profile_diagnostics(self.thresholds.attrs['local_profile'],
                 self.memory[0]['features'].shape[-1], self.threshold_scale)
             print('DINO local calibration health:', json.dumps(health), flush=True)
@@ -88,7 +90,7 @@ class DinoReplayDetector:
         self.excluded = {Path(item['bag_path']).name for item in self.sources if 'bag_path' in item}
         self.excluded.update(Path(item['bag_path']).name for item in saved.get('calibration_sources', []) if 'bag_path' in item)
         progress('Loading DINO model')
-        self.extractor = DINOv2FeatureExtractor(self.signature['model_name'], self.signature['dino_input_size'])
+        self.extractor = extractor or DINOv2FeatureExtractor(self.signature['model_name'], self.signature['dino_input_size'])
         self.preview_image = self.matched_image = None
         self.thumbnails = {}
 
@@ -135,10 +137,10 @@ class DinoReplayDetector:
         feature_sec = synchronized_time() - started
         started = time.monotonic()
         stage = self.stages.at(timestamp) if self.stages else None
-        score, patches, weighted, _, best, distance = compare_frame_to_nominal_memory(
+        score, patches, weighted, weights, best, distance = compare_frame_to_nominal_memory(
             features, attention, cls, self.memory, top_k_cls=self.signature['top_k_cls'],
             attention_power=self.signature['attention_power'], min_weight=self.signature['min_weight'],
-            required_stage=stage)
+            required_stage=stage, local_scoring='local_profile' in self.thresholds.attrs)
         decision = score_matched_frame(score, patches, float(best['progress']), self.thresholds,
                                       getattr(self, 'threshold_scale', 1.0),
                                       normalized_feature_dimension=features.shape[-1])
@@ -146,9 +148,12 @@ class DinoReplayDetector:
         scoring_sec = time.monotonic() - started
         if decision['heatmap'] is not None:
             # Show actual feature differences, independent of threshold magnitude.
-            self.preview_image = Image.fromarray(make_heatmap_overlay(image, patches, grid, region=decision))
+            self.preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid, region=decision))
+            self.scored_preview_image = Image.fromarray(make_heatmap_overlay(image, patches, grid, region=decision))
         else:
-            self.preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid))
+            self.preview_image = Image.fromarray(make_heatmap_overlay(image, patches, grid))
+            self.scored_preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid))
+        self.attention_preview_image = Image.fromarray(make_heatmap_overlay(image, weights, grid))
         self.matched_image = None
         match = {'status': 'unavailable', 'stage': stage}
         try:

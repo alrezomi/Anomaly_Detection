@@ -506,8 +506,8 @@ class OnlineReplayTests(unittest.TestCase):
         self.assertEqual(app.jobs.get_nowait(), 0)
         self.assertFalse(app.verify)
         dino = SimpleNamespace(excluded={'dino_training'}, note='dino', score_source='dino',
-                               score_kind='dino_distance', knn=True, frame_count=8)
-        with patch('rynnbrain_vlm.replay_detectors.DinoReplayDetector', return_value=dino), \
+                               score_kind='dino_distance', knn=True, frame_count=8, catalogue=lambda: [])
+        with patch('rynnbrain_vlm.dino_cameras.DinoCameraReplay', return_value=dino), \
              patch('rynnbrain_vlm.online_replay.OnlineDetector', side_effect=AssertionError('No VLM load')):
             app.switch_detector('dino')
         self.assertIs(app.detector, dino)

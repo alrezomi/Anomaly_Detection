@@ -462,9 +462,17 @@ and [Vision Transformers Need Registers](https://arxiv.org/abs/2309.16588).
 
 After matching a nominal frame, local mode:
 
-1. Computes unweighted patch distances at the same image locations. Attention
-   still participates in the existing frame matcher, but cannot suppress a
-   region's final mismatch score.
+1. After selecting the reference frame, searches a 3 x 3 neighbourhood for each
+   patch in both directions. Matching cost includes feature RMS distance and a
+   penalty for displacement in normalized image coordinates. The larger of the
+   forward/reverse nearest costs preserves evidence of missing and extra content.
+   A one-patch shift is tolerated at a nonzero cost; larger displacements cannot
+   use arbitrary distant matches. This is not optical flow or object tracking.
+   The metric cannot guarantee monotonic scores for arbitrary object movement.
+   Soft weights combine current and reference CLS attention with the existing
+   attention power and nonzero weight floor. Reference attention can retain
+   emphasis where an expected object disappeared. No manual region is needed.
+   Attention is a model signal, not a guarantee of task relevance.
 2. Averages each overlapping 3 x 3 patch neighborhood. This limits whole-image
    dilution and reduces isolated patch artifacts; it is not object segmentation.
 3. Learns a separate nominal mean/scale for every neighborhood versus matched
@@ -484,13 +492,15 @@ After matching a nominal frame, local mode:
    can change between frames; the saved row includes its coordinates, the old
    global score, and the threshold multiplier.
 
-The GUI and exported heatmap video show **raw, unweighted patch differences**,
-normalized for visibility separately in each image. Large thresholds therefore
-cannot hide differences in the heatmap. Red means a relatively large difference
-in that image, not a calibrated alarm. The white rectangle still marks the
-region with the greatest distance/bound ratio; it is not an attention or object
-mask and need not cover the largest raw difference. The GUI also displays the
-largest raw neighborhood distance and that neighborhood's own threshold.
+Each DINO camera panel provides three views: **Scored differences (attention)**,
+**All raw differences**, and **Attention weights**. Scored differences use the
+spatial metric and soft weights; raw differences compare the original aligned
+patches without weights or threshold normalization. Colors are stretched per
+image for visibility, not calibrated alarm probabilities. The white rectangle
+marks the region with the greatest score/bound ratio; it is not an object mask.
+Exported `_heatmap.jpg`/batch heatmap videos retain raw differences; replay also
+saves `_scored.jpg` and `_attention.jpg` for inspection. Spatial scoring is used
+identically for nominal calibration, replay, batch CSV and video alarms.
 
 For unit-normalized features of dimension `d`, our patch RMS distance cannot
 exceed `2 / sqrt(d)` (about **0.10206** for DINO-small's 384 dimensions). The
@@ -531,7 +541,7 @@ docker compose up --build online-replay
 ```
 
 With `rebuild_nominal_cache: false`, compatible memory features are reused.
-After this calibration update, run `vision-memory` once before replay, even if
+After this attention/spatial calibration update, run `vision-memory` once before replay, even if
 you already used local mode. Its method version changed; replay rejects the old
 local profile rather than silently reusing it. Keep your existing config and
 bag lists. Calibration bags must be processed again because the older cache
@@ -544,7 +554,7 @@ per-frame CSV/JSON results contain the actual selected-region bound used for
 the alarm. `calibration.csv` retains per-run maxima and selected-region scores;
 it also records the location, distance, mean and scale responsible for each
 maximum standardized deviation. These identify which recording/location inflated
-the limit. Replay JSON and batch CSV include the largest raw region distance,
+the limit. Replay JSON and batch CSV include the largest scored region distance,
 its threshold, and the unreachable-bound fraction.
 
 Increasing `dino_input_size` changes spatial sampling, not the pretrained patch
@@ -555,11 +565,63 @@ The current extractor requests attention matrices, so GPU memory cost matters.
 A 3 x 3 neighborhood still averages 42 x 42 model-input pixels. Thin objects
 can occupy only part of those patches. Larger inputs may help, but cannot
 recover detail absent from the camera image or repair excessive thresholds.
-For a later controlled resolution experiment, manually change `dino_input_size`
+For the higher-resolution experiment, manually change `dino_input_size`
 to 896 and give `vision_memory_name` a separate name, then rebuild both memory
 features and calibration. Compare the same held-out normal/failure bags and
 latency at both resolutions. The pooled-floor update requires no resolution
-change and keeps the current input size.
+change by itself. For the requested next experiment use 896, as shown below.
+
+### Independent top and flange DINO replay
+
+DINO uses the **top-level** `camera_topics` list, just like `vision-memory`.
+Every configured camera gets its own memory, calibration, heatmaps and graph.
+One loaded DINO model is shared; frames from both cameras are scored sequentially
+in timestamp order, including simultaneous timestamps. Each camera keeps its
+native 2 fps sampling schedule. No camera scores are fused or compared against
+another viewpoint's memory. A missing camera/topic or incompatible cache is an
+explicit error. Processing lag is shown rather than skipping sampled images.
+
+For this experiment, manually change these existing top-level entries:
+
+```json
+"camera_topics": [
+  "/top_camera/cam_135222070433/color/image_raw/compressed",
+  "/flange_camera/cam_230422272745/color/image_raw/compressed"
+],
+"dino_input_size": 896,
+"vision_memory_name": "pick_place_dino896_v1",
+"dino_score_mode": "local",
+"dino_threshold_scale": 0.9
+```
+
+`0.9` lowers the calibrated bound by 10% for the requested more sensitive test.
+It can increase false alarms and does not retain the unscaled calibration's
+coverage target. Use `1.0` for the unscaled comparison; the existing multiplier
+requires only a replay restart, not recalibration. The spatial metric itself
+requires fresh calibration. Never change scores without recalibrating the same
+metric on nominal recordings.
+
+**Keep the VLM top-only.** Inside your existing `rynnbrain` object, explicitly set
+both entries below, retaining all its other settings. If these are omitted,
+camera inheritance would also send the flange view to the VLM.
+
+```json
+"camera_topics": ["/top_camera/cam_135222070433/color/image_raw/compressed"],
+"memory_camera_topics": ["/top_camera/cam_135222070433/color/image_raw/compressed"]
+```
+
+Keep the nominal/calibration bag lists separate and unchanged; those recordings
+must contain both camera topics. Run `docker compose run --rm --build vision-memory`
+once, then `docker compose up --build online-replay` and select **DINO vision**.
+The new memory name preserves the old resolution's cache. Both cameras need
+new features at 896 and independent recalibration. Two cameras increase total
+inference work and host RAM for memory; GPU weights are shared. Measure processing
+delay on the lab GPU; no real-time throughput guarantee is implied.
+
+Saved `online_scores.csv`/`online_results.json` label every row with `camera_topic`;
+timeline PNGs are exported separately for each camera. The browser view selector
+only changes the displayed heatmap, not the score. No user config is overwritten
+by this code update.
 
 This change does not recognize the label "scissors", infer grasp intent, repair
 incorrect stage alignment, or guarantee detection under occlusion. It makes

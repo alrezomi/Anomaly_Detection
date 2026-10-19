@@ -167,11 +167,12 @@ class SequentialReplayFeed:
     bounded and a slow detector makes replay slower instead of skipping inputs.
     An optional fourth packet field gives the actual accompanying camera time.
     """
-    def __init__(self, frames, publish, stop, clock=time.monotonic):
+    def __init__(self, frames, publish, stop, clock=time.monotonic, allow_equal_timestamps=False):
         self.frames, self.publish, self.stop, self.clock = iter(frames), publish, stop, clock
         self.origin = clock()
         self.previous = None
         self.camera_time = None
+        self.allow_equal_timestamps = allow_equal_timestamps
 
     def run(self):
         pass  # Consumption and pacing happen in next_frame, not a producer thread.
@@ -183,15 +184,17 @@ class SequentialReplayFeed:
         if packet is None:
             return None
         frame_id, timestamp, image = packet[:3]
-        if not math.isfinite(timestamp) or timestamp < 0 or (self.previous is not None and timestamp <= self.previous):
+        if not math.isfinite(timestamp) or timestamp < 0 or (self.previous is not None and
+                (timestamp < self.previous or (timestamp == self.previous and not self.allow_equal_timestamps))):
             raise ValueError('Replay samples must have finite, strictly increasing bag timestamps.')
         if self.stop.wait(max(0., self.origin + timestamp - self.clock())):
             return None
         self.previous = timestamp
         camera_time = packet[3] if len(packet) == 4 else timestamp
-        if image is not None and camera_time != self.camera_time:
+        camera_stamp = (image.info.get('dino_camera_topic'), camera_time) if image is not None else camera_time
+        if image is not None and camera_stamp != self.camera_time:
             self.publish(image, camera_time)
-            self.camera_time = camera_time
+            self.camera_time = camera_stamp
         return frame_id, timestamp, image
 
     def close(self):
@@ -425,6 +428,9 @@ class ReplayApplication:
         self.jpeg = None
         self.matched_jpeg = None
         self.observed_jpeg = None
+        self.camera_jpegs = {}
+        self.state['dino_cameras'] = []
+        self.state['camera_times'] = {}
         self.worker = threading.Thread(target=self._worker, daemon=True)
 
     def update(self, **values):
@@ -466,6 +472,7 @@ class ReplayApplication:
             self.stop.clear()
             self.jpeg = None
             self.matched_jpeg = self.observed_jpeg = None
+            self.camera_jpegs = {}
             self.state.update(status="starting", rows=[], error=None, video_time_sec=None,
                               output_directory=None, warning=None, cache_verification_status="pending" if self.verify else "not_requested",
                               bag=str(self.bags[index]), interval_sec=self.interval,
@@ -474,6 +481,7 @@ class ReplayApplication:
                               gmr_signal=gmr_signal,
                               signal_description=None, signal_columns=[],
                               detector_preparation_sec=None,
+                              camera_times={},
                               replay_mode=mode, verification_mode=self.verify, diagnostic_mode=self.diagnose)
             self.jobs.put_nowait(index)
 
@@ -485,6 +493,10 @@ class ReplayApplication:
         with self.lock:
             self.jpeg = buffer.getvalue()
             self.state["video_time_sec"] = timestamp
+            topic = image.info.get('dino_camera_topic')
+            if topic:
+                self.camera_jpegs.setdefault(topic, {})['frame'] = self.jpeg
+                self.state['camera_times'][topic] = timestamp
 
     def _worker(self):
         def progress(message):
@@ -531,6 +543,7 @@ class ReplayApplication:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         self.update(status='starting', detector_type=kind, excluded_bag_indices=[],
+                    dino_cameras=[],
                     initialization_phase=f'Loading {kind.upper()}')
         def progress(message):
             self.update(initialization_phase=message, matching_status=message)
@@ -538,11 +551,12 @@ class ReplayApplication:
         if kind == 'vlm':
             detector = OnlineDetector(self.config, progress=progress)
         else:
-            from .replay_detectors import DinoReplayDetector
+            from .dino_cameras import DinoCameraReplay
             from time_series_gmr_scripts.online_gmr import GmrOnlineDetector
-            detector = (DinoReplayDetector if kind == 'dino' else GmrOnlineDetector)(self.config, progress)
+            detector = (DinoCameraReplay if kind == 'dino' else GmrOnlineDetector)(self.config, progress)
         self.detector = detector
         self.update(note=getattr(detector, 'note', SAMPLING_NOTE), score_source=detector.score_source,
+                    dino_cameras=detector.catalogue() if kind == 'dino' else [],
                     score_kind=getattr(detector, 'score_kind', 'knn_distance' if detector.knn else 'failure_probability'),
                     max_frames=detector.frame_count,
                     excluded_bag_indices=[i for i, bag in enumerate(self.bags) if Path(bag).name in detector.excluded])
@@ -615,6 +629,9 @@ class ReplayApplication:
         sample_fps = self.detector.sample_fps if kind == 'dino' else 15.
         if causal_gmr:
             feed = self.detector.create_feed(self.publish, self.stop, self.update)
+        elif kind == 'dino' and hasattr(self.detector, 'iter_frames'):
+            feed = SequentialReplayFeed(self.detector.iter_frames(), self.publish, self.stop,
+                                        allow_equal_timestamps=True)
         else:
             frames = iter_rosbag_image_frames(RosbagImageSource(bag, vlm["camera_topics"][0]),
                 sample_fps=sample_fps, start_sec=0. if kind == 'gmr' else start_sec, end_sec=end_sec)
@@ -673,8 +690,15 @@ class ReplayApplication:
                     if packet is None:
                         break
                     frame_id, timestamp, image = packet
+                    active_detector = self.detector
+                    camera_topic = None
+                    if kind == 'dino' and hasattr(self.detector, 'cameras'):
+                        camera_topic, frame_id = frame_id
+                        active_detector = self.detector.cameras[camera_topic]
                     self.update(status="scoring", scoring_time_sec=timestamp)
-                    row, vector, baseline = self.detector.append(image, timestamp, self.verify)
+                    row, vector, baseline = active_detector.append(image, timestamp, self.verify)
+                    if kind == 'dino':
+                        row['camera_topic'] = camera_topic or getattr(active_detector, 'topic', None)
                     check = row.get("verification")
                     failed = bool(check and not check["within_tolerance"])
                     row["score_computation"] = 'cached' if kind == 'vlm' else 'single_image' if kind == 'dino' else 'causal_ts' if causal_gmr else 'offline_lookup'
@@ -701,9 +725,9 @@ class ReplayApplication:
                     match = row.get("visual_matching", {})
                     if match.get("status") == "matched":
                         try:
-                            if getattr(self.detector, 'matched_image', None) is not None:
+                            if getattr(active_detector, 'matched_image', None) is not None:
                                 match_buffer = io.BytesIO()
-                                self.detector.matched_image.save(match_buffer, format='JPEG', quality=85)
+                                active_detector.matched_image.save(match_buffer, format='JPEG', quality=85)
                                 matched_bytes = match_buffer.getvalue()
                             else:
                                 matched_bytes = Path(match["best"]["image_file"]).read_bytes()
@@ -714,10 +738,21 @@ class ReplayApplication:
                             match["preview_error"] = str(failure)
                     else:
                         matched_bytes = None
-                    observed = getattr(self.detector, 'preview_image', None)
+                    observed = getattr(active_detector, 'preview_image', None)
                     observed = observed.copy() if observed is not None else image.copy() if image is not None else None
                     if kind == 'dino':
                         observed.save(output / f'frame_{len(rows) + 1:02d}_heatmap.jpg')
+                    additional_previews = {}
+                    if camera_topic:
+                        for view, attribute in [('scored', 'scored_preview_image'), ('attention', 'attention_preview_image')]:
+                            preview = getattr(active_detector, attribute, None)
+                            if preview is not None:
+                                preview = preview.copy()
+                                preview.thumbnail((640, 480))
+                                extra_buffer = io.BytesIO()
+                                preview.save(extra_buffer, format='JPEG', quality=85)
+                                additional_previews[view] = extra_buffer.getvalue()
+                                (output / f'frame_{len(rows) + 1:02d}_{view}.jpg').write_bytes(extra_buffer.getvalue())
                     buffer = io.BytesIO()
                     if observed is not None and kind != 'gmr':
                         observed.thumbnail((640, 480))
@@ -736,6 +771,9 @@ class ReplayApplication:
                     persist(force=False)
                     with self.lock:
                         self.observed_jpeg, self.matched_jpeg = buffer.getvalue(), matched_bytes
+                        if camera_topic:
+                            self.camera_jpegs.setdefault(camera_topic, {}).update(
+                                observed=self.observed_jpeg, matched=matched_bytes, **additional_previews)
                         self.state.update(status="observing", rows=list(rows), scoring_time_sec=None)
                     if kind == 'vlm' or len(rows) == 1 or len(rows) % 25 == 0:
                         print(f"{Path(bag).name}: {len(rows)}/{total_samples or 'end of recording'}, "
@@ -762,7 +800,13 @@ class ReplayApplication:
                 feed.close()
             persist()
             try:
-                save_plot(rows, output / "online_timeline.png", not self.detector.knn)
+                if kind == 'dino' and hasattr(self.detector, 'cameras'):
+                    from .run import _slug
+                    for topic in self.detector.cameras:
+                        save_plot([row for row in rows if row.get('camera_topic') == topic],
+                                  output / f'{_slug(topic)}_timeline.png', False)
+                else:
+                    save_plot(rows, output / "online_timeline.png", not self.detector.knn)
             except Exception as failure:
                 error = f"{error or ''} Plot export failed: {failure}".strip()
                 status = "error"
@@ -793,6 +837,13 @@ def make_handler(app):
                 self.send(200, Path(__file__).with_name("online_replay.html").read_bytes(), "text/html; charset=utf-8")
             elif path == "/state":
                 self.send(200, json.dumps(app.snapshot()).encode(), "application/json")
+            elif path == '/dino-camera':
+                from urllib.parse import urlsplit, parse_qs
+                query = parse_qs(urlsplit(self.path).query)
+                topic, view = query.get('topic', [''])[0], query.get('view', ['frame'])[0]
+                with app.lock:
+                    jpeg = app.camera_jpegs.get(topic, {}).get(view) if view in {'frame', 'observed', 'matched', 'scored', 'attention'} else None
+                self.send(200 if jpeg else 204, jpeg or b'', 'image/jpeg')
             elif path in {"/frame", "/observed-frame", "/matched-frame"}:
                 with app.lock:
                     jpeg = getattr(app, {"/frame": "jpeg", "/observed-frame": "observed_jpeg",
