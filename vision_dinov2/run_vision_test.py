@@ -315,6 +315,15 @@ def main(mode: str = "all") -> None:
             print(f"Saved reusable nominal cache: {NOMINAL_CACHE_DIRECTORY}")
 
     print("Nominal grid size:", grid_size)
+    if 'local_profile' in adaptive_threshold_df.attrs:
+        from .local_scoring import local_profile_diagnostics
+        health = local_profile_diagnostics(adaptive_threshold_df.attrs['local_profile'],
+            nominal_memory[0]['features'].shape[-1], THRESHOLD_SCALE)
+        print('DINO local calibration health:', json.dumps(health))
+        if health['unreachable_region_fraction'] > 0:
+            print(f"Calibration needs review: {health['unreachable_region_fraction']:.1%} of region/progress "
+                  f"bounds cannot be crossed (distance ceiling {health['distance_ceiling']:.6f}). "
+                  "Inspect the largest nominal deviations and their source recordings in calibration.csv.")
 
     if mode == "build-memory":
         plot_adaptive_calibration(

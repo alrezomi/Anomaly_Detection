@@ -457,7 +457,8 @@ def run_video_test(
         local_details = {}
         if adaptive_threshold_df is not None:
             from .local_scoring import score_matched_frame
-            decision = score_matched_frame(score, _patch_scores, matched_progress, adaptive_threshold_df)
+            decision = score_matched_frame(score, _patch_scores, matched_progress, adaptive_threshold_df,
+                                           normalized_feature_dimension=test_features.shape[-1])
             score, current_threshold = decision['score'], decision['threshold']
             local_details = {key: value for key, value in decision.items()
                              if key not in {'score', 'threshold', 'heatmap'}}
