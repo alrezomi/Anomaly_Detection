@@ -425,10 +425,11 @@ def create_anomaly_heatmap_video(
             decision = None
             if adaptive_threshold_df is not None:
                 from .local_scoring import score_matched_frame
-                decision = score_matched_frame(score, _patch_scores, matched_progress, adaptive_threshold_df)
+                decision = score_matched_frame(score, _patch_scores, matched_progress, adaptive_threshold_df,
+                                               normalized_feature_dimension=test_features.shape[-1])
                 score, current_threshold = decision['score'], decision['threshold']
                 if decision['heatmap'] is not None:
-                    weighted_patch_scores = decision['heatmap']
+                    weighted_patch_scores = _patch_scores
                 threshold_mode = "adaptive"
             else:
                 current_threshold = fixed_threshold
@@ -451,7 +452,6 @@ def create_anomaly_heatmap_video(
                 weighted_patch_scores=weighted_patch_scores,
                 grid_size=grid_size,
                 alpha=alpha,
-                calibrated=decision is not None and decision['heatmap'] is not None,
                 region=decision if decision is not None and decision['heatmap'] is not None else None,
             )
             overlay_bgr = cv2.cvtColor(
@@ -494,6 +494,8 @@ def create_anomaly_heatmap_video(
 
             rows.append(
                 {
+                    **({key: value for key, value in decision.items()
+                        if key not in {'score', 'threshold', 'heatmap'}} if decision else {}),
                     "frame_id": frame_id,
                     "timestamp_sec": timestamp_sec,
                     "score": score,

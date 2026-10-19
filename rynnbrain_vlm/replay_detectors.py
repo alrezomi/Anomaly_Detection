@@ -28,7 +28,7 @@ class DinoReplayDetector:
         from vision_dinov2.nominal_cache import load_nominal_cache
         from vision_dinov2.dinov2_features import DINOv2FeatureExtractor
         from vision_dinov2.threshold import validate_threshold_scale, SEQUENCE_CALIBRATION_METHOD
-        from vision_dinov2.local_scoring import LOCAL_METHOD
+        from vision_dinov2.local_scoring import LOCAL_METHOD, local_profile_diagnostics
         from rosbag_io import RosbagImageSource
         self.config = config
         self.threshold_scale = validate_threshold_scale(config.get('dino_threshold_scale', 1.0))
@@ -69,6 +69,13 @@ class DinoReplayDetector:
         if self.score_mode == 'local':
             self.score_source = 'dino_calibrated_local_regions'
             self.note += ' Local scoring uses the region with the largest distance / local-bound ratio. The white box identifies it; the graph shows that region\'s distance and bound. It is not a semantic object detector.'
+            health = local_profile_diagnostics(self.thresholds.attrs['local_profile'],
+                self.memory[0]['features'].shape[-1], self.threshold_scale)
+            print('DINO local calibration health:', json.dumps(health), flush=True)
+            if health['unreachable_region_fraction'] > 0:
+                self.note += (f" Calibration needs review: {health['unreachable_region_fraction']:.1%} "
+                    f"of saved region/progress bounds meet or exceed the maximum possible distance "
+                    f"({health['distance_ceiling']:.4f}). Those bounds cannot be crossed.")
         self.note += (f" Threshold calibration: {calibration_label}; "
                       f"multiplier {self.threshold_scale:g}. Calibration recordings are excluded from evaluation.")
         self.sources = saved.get('sources', [])
@@ -133,12 +140,13 @@ class DinoReplayDetector:
             attention_power=self.signature['attention_power'], min_weight=self.signature['min_weight'],
             required_stage=stage)
         decision = score_matched_frame(score, patches, float(best['progress']), self.thresholds,
-                                      getattr(self, 'threshold_scale', 1.0))
+                                      getattr(self, 'threshold_scale', 1.0),
+                                      normalized_feature_dimension=features.shape[-1])
         score, threshold, base_threshold = decision['score'], decision['threshold'], decision['base_threshold']
         scoring_sec = time.monotonic() - started
         if decision['heatmap'] is not None:
-            self.preview_image = Image.fromarray(make_heatmap_overlay(image, decision['heatmap'], grid,
-                calibrated=True, region=decision))
+            # Show actual feature differences, independent of threshold magnitude.
+            self.preview_image = Image.fromarray(make_heatmap_overlay(image, patches, grid, region=decision))
         else:
             self.preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid))
         self.matched_image = None
@@ -158,7 +166,7 @@ class DinoReplayDetector:
                    vector_kind='dino_cls',
                    epsilon=float(score / max(threshold, 1e-8)))
         row.update({key: value for key, value in decision.items()
-                    if key in {'global_score', 'score_mode', 'region_x', 'region_y', 'region_size', 'patch_grid'}})
+                    if key not in {'score', 'threshold', 'base_threshold', 'epsilon', 'heatmap'}})
         self.step += 1
         return row, cls, None
 

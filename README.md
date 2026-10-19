@@ -468,8 +468,13 @@ After matching a nominal frame, local mode:
 2. Averages each overlapping 3 x 3 patch neighborhood. This limits whole-image
    dilution and reduces isolated patch artifacts; it is not object segmentation.
 3. Learns a separate nominal mean/scale for every neighborhood versus matched
-   nominal progress. Normal robot motion therefore does not directly set the
-   variance of a quiet object location.
+   nominal progress. Scale estimates have a pooled floor: the median of the
+   location-wise standard deviations over the shape recordings, with equal
+   recording weights. Larger local scales are retained. This prevents a nearly
+   constant region from producing an enormous standardized residual that
+   inflates the shared multiplier everywhere. The floor uses only shape data;
+   limit and test recordings cannot change it. It is a regularization tradeoff:
+   an unusually quiet region may lose sensitivity to very small differences.
 4. Uses separate limit recordings to calibrate the maximum standardized
    deviation across **all regions and all sampled times** in each recording.
    The final region bound is `mean + margin * bandwidth * scale`. This remains
@@ -479,11 +484,27 @@ After matching a nominal frame, local mode:
    can change between frames; the saved row includes its coordinates, the old
    global score, and the threshold multiplier.
 
-The GUI heatmap uses a fixed ratio scale: 0 is blue, 1 (the decision limit) is
-approximately green, and 2 or more is red. A white rectangle marks the selected
-region. Colors are no longer stretched independently for every frame. A red
-area in the old heatmap only indicated a relatively large difference in that
-frame, not a calibrated alarm.
+The GUI and exported heatmap video show **raw, unweighted patch differences**,
+normalized for visibility separately in each image. Large thresholds therefore
+cannot hide differences in the heatmap. Red means a relatively large difference
+in that image, not a calibrated alarm. The white rectangle still marks the
+region with the greatest distance/bound ratio; it is not an attention or object
+mask and need not cover the largest raw difference. The GUI also displays the
+largest raw neighborhood distance and that neighborhood's own threshold.
+
+For unit-normalized features of dimension `d`, our patch RMS distance cannot
+exceed `2 / sqrt(d)` (about **0.10206** for DINO-small's 384 dimensions). The
+neighborhood mean has the same ceiling. Build/replay logs now report calibration
+health, and the GUI reports the fraction of regions with unreachable bounds at
+the current matched progress. Bounds are not silently clipped or lowered: that
+would conceal a calibration problem. A high fraction means the nominal matching
+and calibration recordings need inspection, even if all normal runs pass.
+
+An older local calibration could produce a very large common multiplier from
+tiny region variances (one observed profile had bandwidth 54.9 and 95.9% of
+bounds above the distance ceiling). The pooled variance floor addresses this
+instability without changing the reference matcher, adding another network, or
+adding a config setting. It does **not** establish accuracy on real failures.
 
 Keep the current separate `nominal_bags` and `dino_calibration_bags` lists. Using
 the same recording as query and memory permits exact self-matches, leading to
@@ -510,15 +531,35 @@ docker compose up --build online-replay
 ```
 
 With `rebuild_nominal_cache: false`, compatible memory features are reused.
-Calibration bags must be processed again because older CSV files contain only
-whole-image scores, not spatial patch differences. The compact regional profile
+After this calibration update, run `vision-memory` once before replay, even if
+you already used local mode. Its method version changed; replay rejects the old
+local profile rather than silently reusing it. Keep your existing config and
+bag lists. Calibration bags must be processed again because the older cache
+does not contain their spatial patch differences. The compact regional profile
 is saved automatically as `local_threshold.npz` beside the existing memory;
 there is no extra config path. Cache signatures prevent mixing mean/local
 thresholds. Returning to mean mode also requires recalibration of that cache.
 `adaptive_threshold.csv` contains the mean regional bound as a **summary only**;
 per-frame CSV/JSON results contain the actual selected-region bound used for
-the alarm. `calibration.csv` retains per-run maxima and selected-region scores
-for checking whether a particular successful recording inflated the limit.
+the alarm. `calibration.csv` retains per-run maxima and selected-region scores;
+it also records the location, distance, mean and scale responsible for each
+maximum standardized deviation. These identify which recording/location inflated
+the limit. Replay JSON and batch CSV include the largest raw region distance,
+its threshold, and the unreachable-bound fraction.
+
+Increasing `dino_input_size` changes spatial sampling, not the pretrained patch
+size (14 pixels). At 728 the grid is 52 x 52 (2,704 patches); at 896 it is
+64 x 64 (4,096 patches). The latter has about 1.51 times as many patches and
+2.29 times as many patch-pair attention entries, not a guaranteed runtime ratio.
+The current extractor requests attention matrices, so GPU memory cost matters.
+A 3 x 3 neighborhood still averages 42 x 42 model-input pixels. Thin objects
+can occupy only part of those patches. Larger inputs may help, but cannot
+recover detail absent from the camera image or repair excessive thresholds.
+For a later controlled resolution experiment, manually change `dino_input_size`
+to 896 and give `vision_memory_name` a separate name, then rebuild both memory
+features and calibration. Compare the same held-out normal/failure bags and
+latency at both resolutions. The pooled-floor update requires no resolution
+change and keeps the current input size.
 
 This change does not recognize the label "scissors", infer grasp intent, repair
 incorrect stage alignment, or guarantee detection under occlusion. It makes

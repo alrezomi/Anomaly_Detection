@@ -8,7 +8,7 @@ import pandas as pd
 from PIL import Image
 
 from vision_dinov2.local_scoring import (fit_local_threshold, local_decision,
-    region_distances, score_matched_frame, LOCAL_METHOD)
+    region_distances, score_matched_frame, local_profile_diagnostics, LOCAL_METHOD)
 from vision_dinov2.threshold import build_sequence_threshold, scaled_threshold
 from vision_dinov2.nominal_cache import save_nominal_cache, save_nominal_calibration, load_nominal_cache
 
@@ -58,7 +58,49 @@ class LocalDinoTests(unittest.TestCase):
         table, _ = fit_local_threshold(self.rows, altered, n_bins=6)
         np.testing.assert_allclose(table.attrs['local_profile']['mean'], self.profile['mean'])
         np.testing.assert_allclose(table.attrs['local_profile']['scale'], self.profile['scale'])
+        self.assertEqual(table.attrs['local_profile']['pooled_scale_floor'], self.profile['pooled_scale_floor'])
         self.assertGreater(table.bandwidth.iloc[0], self.table.bandwidth.iloc[0])
+
+    def test_quiet_shape_region_cannot_inflate_all_other_bounds(self):
+        # A quiet corner is constant in the shape data but has one harmless
+        # transient in a limit bag. Previously its 1e-6 denominator gave a
+        # shared bandwidth of about 12000 and disabled the rest of the image.
+        limit_id = int(self.calibration.loc[self.calibration.calibration_role == 'limit',
+                                             'held_out_video_id'].iloc[0])
+        maps = []
+        for row in self.rows.itertuples():
+            patches = np.full((14, 14), .02 + .004 * np.sin(row.held_out_video_id))
+            patches[:3, :3] = .02
+            if row.held_out_video_id == limit_id and row.matched_progress == 0:
+                patches[:3, :3] += .012
+            maps.append(patches.reshape(-1))
+        table, calibration = fit_local_threshold(self.rows, maps, n_bins=6)
+        profile = table.attrs['local_profile']
+        self.assertLess(float(profile['bandwidth']), 10.)
+        self.assertFalse(calibration.loc[calibration.calibration_role == 'limit', 'above_threshold'].any())
+        self.assertEqual(local_profile_diagnostics(profile, 384)['unreachable_region_fraction'], 0.)
+        failure = maps[0].reshape(14, 14).copy()
+        failure[8:11, 5:8] = .07
+        result = local_decision(failure.reshape(-1), 0., profile, normalized_feature_dimension=384)
+        self.assertGreater(result['epsilon'], 1.)
+        self.assertEqual((result['region_x'], result['region_y']), (5, 8))
+        np.testing.assert_allclose(
+            (calibration.deviation_region_distance - calibration.deviation_region_mean) /
+            calibration.deviation_region_scale, calibration.maximum_region_deviation)
+
+    def test_unreachable_thresholds_are_reported_not_silently_clipped(self):
+        profile = {key: value.copy() for key, value in self.profile.items()}
+        profile['mean'][:] = .02
+        profile['scale'][:] = .01
+        profile['bandwidth'] = np.asarray(55.)
+        health = local_profile_diagnostics(profile, 384)
+        self.assertEqual(health['unreachable_region_fraction'], 1.)
+        result = local_decision(np.full(196, .03), .5, profile,
+                                normalized_feature_dimension=384)
+        self.assertEqual(result['unreachable_region_fraction'], 1.)
+        self.assertAlmostEqual(result['distance_ceiling'], 2 / np.sqrt(384))
+        self.assertGreater(result['threshold'], result['distance_ceiling'])
+        self.assertEqual(local_profile_diagnostics(profile, 384, .1)['unreachable_region_fraction'], 0.)
 
     def test_multiplier_is_identical_for_replay_and_scaled_batch_table(self):
         patches = self.maps[4]
@@ -92,6 +134,8 @@ class LocalDinoTests(unittest.TestCase):
             for key in self.profile:
                 np.testing.assert_allclose(loaded[2].attrs['local_profile'][key], self.profile[key])
             self.assertIsNone(load_nominal_cache(folder, dict(score_mode='mean')))
+            self.assertIsNone(load_nominal_cache(folder,
+                dict(score_mode='local', calibration_method='split_nominal_local_regions_v1')))
             (Path(folder) / 'local_threshold.npz').unlink()
             self.assertIsNone(load_nominal_cache(folder, signature))
             save_nominal_calibration(folder, self.table, self.calibration, signature)
@@ -99,7 +143,7 @@ class LocalDinoTests(unittest.TestCase):
 
     def test_zero_attention_cannot_hide_local_difference_and_batch_replay_agree(self):
         from vision_dinov2.anomaly_detection import run_video_test
-        from vision_dinov2.visualization import create_anomaly_heatmap_video
+        from vision_dinov2.visualization import create_anomaly_heatmap_video, make_heatmap_overlay
         from rynnbrain_vlm.replay_detectors import DinoReplayDetector
         patches = self.maps[4].reshape(14, 14).copy()
         patches[8:11, 1:4] += .025
@@ -135,6 +179,11 @@ class LocalDinoTests(unittest.TestCase):
         self.assertEqual(video.alarm, batch.alarm)
         # A selected-region box is visible even when attention weights are zero.
         self.assertIsNotNone(detector.preview_image)
+        expected = make_heatmap_overlay(image, patches, 14,
+            region=local_decision(patches, 4 / 7, self.profile))
+        np.testing.assert_array_equal(np.asarray(detector.preview_image), expected)
+        self.assertEqual(replay['max_patch_distance'], batch.max_patch_distance)
+        self.assertEqual(video.max_raw_region_distance, batch.max_raw_region_distance)
 
 
 if __name__ == '__main__':

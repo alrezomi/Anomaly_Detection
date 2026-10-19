@@ -8,10 +8,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-LOCAL_METHOD = "split_nominal_local_regions_v1"
+LOCAL_METHOD = "split_nominal_local_regions_v2_pooled_scale"
 
 
-def score_matched_frame(global_score, patch_scores, progress, threshold_table, threshold_scale=1.0):
+def score_matched_frame(global_score, patch_scores, progress, threshold_table, threshold_scale=1.0,
+                        normalized_feature_dimension=None):
     """Shared by replay, batch CSV scoring and exported heatmap video."""
     from .anomaly_detection import threshold_for_progress
     profile = threshold_table.attrs.get('local_profile')
@@ -20,7 +21,8 @@ def score_matched_frame(global_score, patch_scores, progress, threshold_table, t
         return dict(score=float(global_score), threshold=base * threshold_scale,
                     base_threshold=base, heatmap=None, score_mode='mean')
     decision = local_decision(patch_scores, progress, profile,
-        threshold_scale * threshold_table.attrs.get('threshold_scale', 1.0))
+        threshold_scale * threshold_table.attrs.get('threshold_scale', 1.0),
+        normalized_feature_dimension=normalized_feature_dimension)
     decision.update(global_score=float(global_score), score_mode='local')
     return decision
 
@@ -48,7 +50,8 @@ def _interpolate(profile, progress):
                  for key in ('mean', 'scale'))
 
 
-def local_decision(patch_scores, progress, profile, threshold_scale=1.0):
+def local_decision(patch_scores, progress, profile, threshold_scale=1.0,
+                   normalized_feature_dimension=None):
     """Return raw distance/bound of the region with the greatest bound ratio.
 
     All region tests share the sequence-max calibrated bandwidth. Choosing the
@@ -73,10 +76,42 @@ def local_decision(patch_scores, progress, profile, threshold_scale=1.0):
         for dx in range(window):
             np.maximum(heat[dy:dy + side, dx:dx + side], ratio_grid,
                        out=heat[dy:dy + side, dx:dx + side])
-    return dict(score=float(regions[selected]), threshold=float(bounds[selected] * threshold_scale),
+    raw_selected = int(np.argmax(regions))
+    raw_y, raw_x = divmod(raw_selected, side)
+    result = dict(score=float(regions[selected]), threshold=float(bounds[selected] * threshold_scale),
                 base_threshold=float(bounds[selected]), epsilon=float(ratios[selected]),
                 region_x=x, region_y=y, region_size=window, patch_grid=grid,
+                max_raw_region_distance=float(regions[raw_selected]),
+                max_raw_region_threshold=float(bounds[raw_selected] * threshold_scale),
+                max_raw_region_x=raw_x, max_raw_region_y=raw_y,
+                max_patch_distance=float(np.max(patch_scores)),
                 heatmap=heat.reshape(-1))
+    if normalized_feature_dimension is not None:
+        # For unit vectors u,v in R^d, RMS(u-v) <= 2/sqrt(d).
+        # A mean of these distances has the same ceiling. Do not clip bounds:
+        # clipping would conceal a calibration problem, not restore sensitivity.
+        ceiling = normalized_distance_ceiling(normalized_feature_dimension)
+        result.update(distance_ceiling=ceiling,
+                      unreachable_region_fraction=float(np.mean(bounds * threshold_scale >= ceiling)))
+    return result
+
+
+def normalized_distance_ceiling(feature_dimension):
+    if int(feature_dimension) != feature_dimension or feature_dimension < 1:
+        raise ValueError('Feature dimension must be a positive integer.')
+    return float(2 / np.sqrt(feature_dimension))
+
+
+def local_profile_diagnostics(profile, feature_dimension, threshold_scale=1.0):
+    """Read-only health check; it never modifies or silently lowers thresholds."""
+    from .threshold import validate_threshold_scale
+    multiplier = validate_threshold_scale(threshold_scale)
+    bounds = (profile['mean'] + float(profile['margin']) * float(profile['bandwidth']) * profile['scale']) * multiplier
+    ceiling = normalized_distance_ceiling(feature_dimension)
+    return dict(bandwidth=float(profile['bandwidth']), distance_ceiling=ceiling,
+                threshold_min=float(np.min(bounds)), threshold_median=float(np.median(bounds)),
+                threshold_max=float(np.max(bounds)),
+                unreachable_region_fraction=float(np.mean(bounds >= ceiling)))
 
 
 def fit_local_threshold(calibration_df, patch_maps, n_bins=30, quantile=.90, margin=1.10):
@@ -114,8 +149,15 @@ def fit_local_threshold(calibration_df, patch_maps, n_bins=30, quantile=.90, mar
         shape_moments.append((run.mean(axis=0), (run ** 2).mean(axis=0)))
     global_mean = np.mean([x[0] for x in shape_moments], axis=0)
     global_square = np.mean([x[1] for x in shape_moments], axis=0)
-    # Floor is per location; noisy robot motion must not inflate quiet object regions.
-    floor = np.maximum(.1 * np.sqrt(np.maximum(global_square - global_mean ** 2, 0)), 1e-6)
+    # A nearly constant region in the shape split can otherwise produce a huge
+    # standardized residual in a limit run. Because bandwidth is shared, that
+    # single denominator can disable detection everywhere. Regularize with the
+    # median location-wise nominal variability, learned ONLY from shape runs.
+    # The median avoids letting a few noisy robot/background regions set this
+    # floor. Larger region-specific variations are still retained below.
+    global_std = np.sqrt(np.maximum(global_square - global_mean ** 2, 0))
+    pooled_floor = max(float(np.median(global_std)), 1e-6)
+    floor = np.maximum(.1 * global_std, pooled_floor)
     for bin_id in range(n_bins):
         per_run = [values[(run_ids == run_id) & (bins == bin_id)] for run_id in shape_ids]
         per_run = [samples for samples in per_run if len(samples)]
@@ -129,12 +171,24 @@ def fit_local_threshold(calibration_df, patch_maps, n_bins=30, quantile=.90, mar
     scale = np.maximum(np.sqrt(np.maximum(square - mean ** 2, 0)), floor)
     profile = dict(centers=(np.arange(n_bins) + .5) / n_bins, mean=mean, scale=scale,
                    grid=np.asarray(grid), window=np.asarray(window), margin=np.asarray(margin),
+                   pooled_scale_floor=np.asarray(pooled_floor),
                    bandwidth=np.asarray(0.))
-    deviations = []
+    deviations, locations, peak_values, peak_means, peak_scales = [], [], [], [], []
     for scores, p in zip(values, progress):
         mu, sigma = _interpolate(profile, p)
-        deviations.append(float(np.max((scores - mu) / sigma)))
+        standardized = (scores - mu) / sigma
+        selected = int(np.argmax(standardized))
+        deviations.append(float(standardized[selected]))
+        locations.append(divmod(selected, grid - window + 1))
+        peak_values.append(float(scores[selected]))
+        peak_means.append(float(mu[selected]))
+        peak_scales.append(float(sigma[selected]))
     rows['maximum_region_deviation'] = deviations
+    rows['deviation_region_y'] = [y for y, x in locations]
+    rows['deviation_region_x'] = [x for y, x in locations]
+    rows['deviation_region_distance'] = peak_values
+    rows['deviation_region_mean'] = peak_means
+    rows['deviation_region_scale'] = peak_scales
     rows['run_maximum_region_deviation'] = rows.groupby('held_out_video_id').maximum_region_deviation.transform('max')
     maxima = rows.loc[rows.calibration_role == 'limit'].groupby('held_out_video_id').maximum_region_deviation.max()
     bandwidth = max(0., float(np.sort(maxima.to_numpy())[rank - 1]))
@@ -151,9 +205,10 @@ def fit_local_threshold(calibration_df, patch_maps, n_bins=30, quantile=.90, mar
     table = pd.DataFrame(dict(stage_center=profile['centers'], count=counts,
         adaptive_threshold=np.mean(mean + margin * bandwidth * scale, axis=1),
         method=LOCAL_METHOD, shape_runs=len(shape_ids), limit_runs=len(limit_ids),
-        bandwidth=bandwidth, margin=margin, quantile=quantile))
+        bandwidth=bandwidth, margin=margin, quantile=quantile, pooled_scale_floor=pooled_floor))
     table.attrs['local_profile'] = profile
     print(f"DINO local calibration: {len(shape_ids)} shape / {len(limit_ids)} limit bags; "
           f"{grid}x{grid} patches, {window}x{window} regions, maximum-deviation rank {rank}/{len(limit_ids)}")
     print("Largest nominal region deviations by limit bag:", maxima.to_dict())
+    print(f"Nominal pooled scale floor: {pooled_floor:.6g}; calibrated bandwidth: {bandwidth:.6g}")
     return table, rows
