@@ -129,7 +129,8 @@ class DinoThresholdTests(unittest.TestCase):
                 SETTINGS_JSON=None, REBUILD_NOMINAL_CACHE=False), \
                 patch.object(runner, 'check_input_paths'), patch.object(runner, 'print_experiment_summary'), \
                 patch.object(runner, 'DINOv2FeatureExtractor'), \
-                patch.object(runner, 'load_nominal_cache', side_effect=[None, (memory, 2, old_table, pd.DataFrame())]), \
+                patch.object(runner, 'load_nominal_cache', return_value=None), \
+                patch.object(runner, 'load_feature_cache', side_effect=lambda path, sig: (memory, 2) if Path(path) == Path(directory) else None), \
                 patch.object(runner, 'build_nominal_video_memory', return_value=([self.item(.2)], 2)) as extract, \
                 patch.object(runner, 'score_calibration_memory', side_effect=score), \
                 patch.object(runner, 'save_nominal_cache') as save_memory, \

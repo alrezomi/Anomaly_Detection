@@ -161,7 +161,8 @@ class NotebookTests(unittest.TestCase):
                         CALIBRATION_VIDEO_PATHS=paths, SETTINGS_JSON=None, REBUILD_NOMINAL_CACHE=False), \
                     patch.object(runner, 'check_input_paths'), patch.object(runner, 'print_experiment_summary'), \
                     patch.object(runner, 'DINOv2FeatureExtractor'), \
-                    patch.object(runner, 'load_nominal_cache', side_effect=[None, (memory, 4, old_table, pd.DataFrame())]), \
+                    patch.object(runner, 'load_nominal_cache', return_value=None), \
+                    patch.object(runner, 'load_feature_cache', side_effect=lambda path, sig: (memory, 4) if Path(path) == Path(folder) else None), \
                     patch.object(runner, 'build_nominal_video_memory', return_value=([self.item(3)], 4)) as extract, \
                     patch.object(runner, 'save_nominal_cache') as save_memory, \
                     patch.object(runner, 'save_nominal_calibration') as save, \

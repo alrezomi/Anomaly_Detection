@@ -22,10 +22,21 @@ def save_nominal_cache(
     signature: dict[str, Any],
 ) -> None:
     """Save numeric memory arrays, calibration tables, and their signature."""
+    save_feature_cache(cache_directory, nominal_memory, grid_size, signature)
+    save_nominal_calibration(cache_directory, adaptive_threshold_df, calibration_df, signature)
+
+
+def save_feature_cache(cache_directory, nominal_memory, grid_size, signature):
+    """Save extraction results independently of thresholds and scoring settings."""
     directory = Path(cache_directory)
     directory.mkdir(parents=True, exist_ok=True)
+    # Invalidate both signatures before replacing features. An interrupted write
+    # must not pair new features with an old calibration or legacy signature.
+    for name in ('feature_signature.json', 'signature.json'):
+        (directory / name).unlink(missing_ok=True)
+    temporary = directory / 'nominal_memory.tmp.npz'
     np.savez_compressed(
-        directory / "nominal_memory.npz",
+        temporary,
         features=np.stack([item["features"] for item in nominal_memory]),
         attention=np.stack([item["attention"] for item in nominal_memory]),
         cls=np.stack([item["cls"] for item in nominal_memory]),
@@ -43,7 +54,10 @@ def save_nominal_cache(
         ),
         grid_size=np.asarray(grid_size),
     )
-    save_nominal_calibration(directory, adaptive_threshold_df, calibration_df, signature)
+    temporary.replace(directory / 'nominal_memory.npz')
+    marker = directory / 'feature_signature.json.tmp'
+    marker.write_text(json.dumps(memory_signature(signature), indent=2, sort_keys=True), encoding='utf-8')
+    marker.replace(directory / 'feature_signature.json')
 
 
 def save_nominal_calibration(directory, threshold, calibration, signature):
@@ -53,6 +67,13 @@ def save_nominal_calibration(directory, threshold, calibration, signature):
     """
     directory = Path(directory)
     marker = directory / "signature.json"
+    # Promote legacy extraction metadata before invalidating its only signature.
+    feature_marker = directory / 'feature_signature.json'
+    if not feature_marker.is_file() and marker.is_file() and (directory / 'nominal_memory.npz').is_file():
+        temporary = directory / 'feature_signature.json.tmp'
+        temporary.write_text(json.dumps(memory_signature(json.loads(marker.read_text(encoding='utf-8'))),
+                                         indent=2, sort_keys=True), encoding='utf-8')
+        temporary.replace(feature_marker)
     marker.unlink(missing_ok=True)
     if 'local_profile' in threshold.attrs:
         temporary = directory / 'local_threshold.tmp.npz'
@@ -71,7 +92,8 @@ def memory_signature(signature):
     """Calibration changes do not invalidate the extracted/matched memory."""
     return {key: value for key, value in signature.items()
             if not key.startswith("threshold_") and key not in {
-                "min_points_per_bin", "calibration_sources", "calibration_method", "score_mode"}}
+                "min_points_per_bin", "calibration_sources", "calibration_method", "score_mode",
+                "top_k_cls", "attention_power", "min_weight", "stage_constrained_matching"}}
 
 
 def load_nominal_cache(
@@ -92,7 +114,7 @@ def load_nominal_cache(
     saved_signature = json.loads(required[3].read_text(encoding="utf-8"))
     if any(saved_signature.get(key, 'mean' if key == 'score_mode' else None) != value
            for key, value in expected_signature.items()):
-        print(f"Nominal cache settings changed; rebuilding: {directory}")
+        print(f"Saved DINO calibration is incompatible; checking reusable features: {directory}")
         return None
 
     profile = None
@@ -103,13 +125,26 @@ def load_nominal_cache(
         with np.load(profile_path, allow_pickle=False) as arrays:
             profile = {key: arrays[key] for key in arrays.files}
 
-    cache_size_gib = required[0].stat().st_size / (1024**3)
+    memory, grid_size = _read_feature_arrays(required[0])
+    threshold = pd.read_csv(required[1])
+    if saved_signature.get('score_mode') == 'notebook':
+        threshold.attrs['score_mode'] = 'notebook'
+    if profile is not None:
+        threshold.attrs['local_profile'] = profile
+    calibration = pd.read_csv(required[2])
+    print(f"Loaded reusable nominal cache: {directory}")
+    print(f"Cached nominal frames: {len(memory)}")
+    return memory, grid_size, threshold, calibration
+
+
+def _read_feature_arrays(archive):
+    cache_size_gib = archive.stat().st_size / (1024**3)
     print(
         f"Loading nominal memory once ({cache_size_gib:.2f} GiB compressed): "
-        f"{required[0]}"
+        f"{archive}"
     )
     started = perf_counter()
-    with np.load(required[0], allow_pickle=False) as arrays:
+    with np.load(archive, allow_pickle=False) as arrays:
         # Read every compressed member exactly once. Indexing arrays["features"]
         # inside the item loop would decompress the multi-GiB tensor repeatedly.
         features = arrays["features"]
@@ -143,12 +178,23 @@ def load_nominal_cache(
     elapsed = perf_counter() - started
     print(f"Nominal memory loaded in {elapsed:.1f}s")
 
-    threshold = pd.read_csv(required[1])
-    if saved_signature.get('score_mode') == 'notebook':
-        threshold.attrs['score_mode'] = 'notebook'
-    if profile is not None:
-        threshold.attrs['local_profile'] = profile
-    calibration = pd.read_csv(required[2])
-    print(f"Loaded reusable nominal cache: {directory}")
-    print(f"Cached nominal frames: {len(memory)}")
-    return memory, grid_size, threshold, calibration
+    return memory, grid_size
+
+
+def load_feature_cache(cache_directory, signature):
+    """Reuse raw features even if calibration is missing or incompatible.
+
+    Existing caches migrate read-only via their old full signature. A changed
+    source, model, resolution, sampling or stage assignment still invalidates.
+    """
+    directory = Path(cache_directory)
+    archive = directory / 'nominal_memory.npz'
+    marker = directory / 'feature_signature.json'
+    if not marker.is_file():
+        marker = directory / 'signature.json'
+    if not archive.is_file() or not marker.is_file():
+        return None
+    saved = memory_signature(json.loads(marker.read_text(encoding='utf-8')))
+    if saved != memory_signature(signature):
+        return None
+    return _read_feature_arrays(archive)

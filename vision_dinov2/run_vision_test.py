@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import hashlib
 import pandas as pd
 from rosbag_io import RosbagImageSource
 
@@ -18,7 +19,8 @@ from .anomaly_detection import (
     run_video_test,
 )
 from .dinov2_features import DINOv2FeatureExtractor
-from .nominal_cache import load_nominal_cache, save_nominal_cache, save_nominal_calibration, memory_signature
+from .nominal_cache import (load_nominal_cache, save_nominal_cache, save_nominal_calibration,
+                            memory_signature, load_feature_cache, save_feature_cache)
 from .threshold import (
     calibrate_adaptive_threshold_leave_one_video_out,
     build_sequence_threshold, score_calibration_memory, scaled_threshold,
@@ -233,10 +235,12 @@ def main(mode: str = "all") -> None:
     # --------------------------------------------------------
     # Step 1: Load DINOv2 once
     # --------------------------------------------------------
-    extractor = DINOv2FeatureExtractor(
-        model_name=MODEL_NAME,
-        input_size=DINO_INPUT_SIZE,
-    )
+    extractor = None
+    def get_extractor():
+        nonlocal extractor
+        if extractor is None:
+            extractor = DINOv2FeatureExtractor(model_name=MODEL_NAME, input_size=DINO_INPUT_SIZE)
+        return extractor
 
     signature = nominal_cache_signature()
     cached = None
@@ -257,7 +261,7 @@ def main(mode: str = "all") -> None:
     else:
         reusable = None
         if NOMINAL_CACHE_DIRECTORY is not None and not REBUILD_NOMINAL_CACHE:
-            reusable = load_nominal_cache(NOMINAL_CACHE_DIRECTORY, memory_signature(signature))
+            reusable = load_feature_cache(NOMINAL_CACHE_DIRECTORY, signature)
         # ----------------------------------------------------
         # Step 2: Build nominal memory
         # ----------------------------------------------------
@@ -266,9 +270,13 @@ def main(mode: str = "all") -> None:
             print("Reusing extracted nominal memory; recalibrating only the threshold.")
         else:
             nominal_memory, grid_size = build_nominal_video_memory(
-                extractor=extractor, nominal_video_paths=NOMINAL_VIDEO_PATHS,
+                extractor=get_extractor(), nominal_video_paths=NOMINAL_VIDEO_PATHS,
                 sample_fps=SAMPLE_FPS, start_sec=START_SEC, end_sec=END_SEC,
                 max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
+            if NOMINAL_CACHE_DIRECTORY is not None:
+                # Keep completed extraction even if a later calibration bag fails.
+                save_feature_cache(NOMINAL_CACHE_DIRECTORY, nominal_memory, grid_size, signature)
+                reusable = (nominal_memory, grid_size)
 
         # ----------------------------------------------------
         # Step 3: Calibrate the adaptive threshold
@@ -279,9 +287,22 @@ def main(mode: str = "all") -> None:
             for run_id, source in enumerate(CALIBRATION_VIDEO_PATHS):
                 print(f"Independent DINO calibration: {run_id + 1}/{len(CALIBRATION_VIDEO_PATHS)}")
                 # Hold only one query bag in RAM; never add it to retrieval memory.
-                queries, query_grid = build_nominal_video_memory(extractor, [source],
-                    sample_fps=SAMPLE_FPS, start_sec=START_SEC, end_sec=END_SEC,
-                    max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
+                query_signature = memory_signature(dict(signature, sources=source_signatures([source])))
+                query_directory = None
+                if NOMINAL_CACHE_DIRECTORY is not None:
+                    key = hashlib.sha256(json.dumps(query_signature, sort_keys=True).encode()).hexdigest()[:24]
+                    query_directory = Path(NOMINAL_CACHE_DIRECTORY) / 'calibration_features' / key
+                query_cache = (load_feature_cache(query_directory, query_signature)
+                               if query_directory is not None and not REBUILD_NOMINAL_CACHE else None)
+                if query_cache is not None:
+                    queries, query_grid = query_cache
+                    print('Reusing saved calibration features; recomputing scores only.')
+                else:
+                    queries, query_grid = build_nominal_video_memory(get_extractor(), [source],
+                        sample_fps=SAMPLE_FPS, start_sec=START_SEC, end_sec=END_SEC,
+                        max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
+                    if query_directory is not None:
+                        save_feature_cache(query_directory, queries, query_grid, query_signature)
                 if query_grid != grid_size:
                     raise ValueError("Calibration and memory patch grids differ.")
                 extra = {'patch_maps': patch_maps} if patch_maps is not None else {}
@@ -349,6 +370,7 @@ def main(mode: str = "all") -> None:
         return
 
     adaptive_threshold_df = scaled_threshold(adaptive_threshold_df, THRESHOLD_SCALE)
+    extractor = get_extractor()
     adaptive_threshold_df.to_csv(THRESHOLD_CSV, index=False)
     calibration_df.to_csv(CALIBRATION_CSV, index=False)
 

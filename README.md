@@ -444,6 +444,55 @@ multiplier. Leave it at 1.0 for the first independent evaluation. An empty or
 absent calibration list preserves compatibility with existing caches/legacy
 calibration; the GUI note reports which calibration was actually loaded.
 
+### Reusing DINO features across updates
+
+Keep `rebuild_nominal_cache: false` and the same `vision_memory_name` when
+extraction settings are unchanged. GUI/logging changes need no memory rebuild.
+The build command checks what is compatible; it does not inherently mean
+re-extracting every recording.
+
+| Change | Feature extraction | Score/threshold calibration |
+| --- | --- | --- |
+| GUI, logging, output experiment folder | Reuse | Reuse |
+| `dino_threshold_scale` | Reuse | Reuse; apply multiplier at runtime |
+| Score mode, attention weights, CLS shortlist, matching restriction | Reuse | Recompute for the new score/matcher |
+| Threshold-fitting settings | Reuse | Recompute |
+| Model, resolution, camera, source list, sampling, stage-assignment settings | Incompatible features need extraction | Recompute |
+
+Nominal features now have a signature independent of calibration. Older saved
+memories are recognized through their existing signature; they do not need a
+format-conversion run. Completed extraction survives an interrupted later
+calibration. Replay still refuses an incompatible threshold rather than using
+one fitted to a different score.
+
+Separate calibration recordings are also cached automatically, one recording
+at a time, under the camera memory's `calibration_features` directory. The key
+depends on the source and extraction settings, not the scoring method or its
+position in the calibration list. A calibration recording must be extracted
+once after this capability is introduced; subsequent score-method changes can
+rescore its saved patch/CLS/attention features without running DINO again.
+Unchanged complete caches require no model initialization in `vision-memory`.
+Rescoring, threshold fitting and reading compressed features still take time.
+These generated feature archives use extra disk space; they add no config paths
+or tuning parameters. Calibration recordings remain separate from retrieval
+memory and are still excluded from evaluation.
+
+Changing the memory name points to another directory; it does not search other
+experiments for compatible files. Replacing bag contents in place under the
+same path requires `rebuild_nominal_cache: true`; signatures track configured
+sources/settings, not a content hash of every recording. Force rebuilding also
+refreshes calibration feature archives used by that run.
+
+The attention functions in `rynnbrain5.3.ipynb` use the same max-combined soft
+weights and normalized weighted mean as the current matcher:
+`sum(patch_distance * weight) / sum(weight)`. Its later cells also use a CLS
+shortlist and progress-dependent frame-quantile thresholds. The existing
+`mean` mode is closest to that score, although its separate-bag calibration is
+sequence-based when `dino_calibration_bags` is configured. `local` additionally
+uses nearby-patch matching and region-specific sequence calibration. This cache
+update does not alter either score, remove attention, change thresholds, or
+claim that one method is more accurate on the lab recordings.
+
 ### DINO video-notebook baseline
 
 For comparison with the successful **video** implementation in `rynnbrain4.ipynb`
