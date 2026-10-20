@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import hashlib
 import pandas as pd
 from rosbag_io import RosbagImageSource
 
@@ -18,10 +19,10 @@ from .anomaly_detection import (
     run_video_test,
 )
 from .dinov2_features import DINOv2FeatureExtractor
-from .nominal_cache import load_nominal_cache, save_nominal_cache, save_nominal_calibration, memory_signature
+from .nominal_cache import (load_nominal_cache, save_nominal_cache, save_nominal_calibration,
+                            memory_signature, load_feature_cache, save_feature_cache)
 from .threshold import (
-    calibrate_adaptive_threshold_leave_one_video_out,
-    build_sequence_threshold, score_calibration_memory, scaled_threshold,
+    score_calibration_memory, scaled_threshold,
     SEQUENCE_CALIBRATION_METHOD,
     NOTEBOOK_CALIBRATION_METHOD, build_notebook_threshold, calibrate_notebook_leave_one_video_out,
 )
@@ -42,7 +43,7 @@ from .visualization import (
 NOMINAL_VIDEO_PATHS = nominal_video_paths()
 CALIBRATION_VIDEO_PATHS = []
 THRESHOLD_SCALE = 1.0
-SCORE_MODE = "mean"
+SCORE_MODE = "notebook"
 TEST_VIDEO_PATH = test_video_path()
 
 
@@ -113,11 +114,14 @@ def source_signatures(paths) -> list:
     return sources
 
 
-def nominal_cache_signature() -> dict:
+def nominal_cache_signature(score_mode=None) -> dict:
     """Describe every setting that changes reusable nominal results."""
+    mode = score_mode or SCORE_MODE
+    if mode == "mean":
+        mode = "notebook"
     signature = {
         "format_version": 1,
-        "score_mode": SCORE_MODE,
+        "score_mode": mode,
         "sources": source_signatures(NOMINAL_VIDEO_PATHS),
         "model_name": MODEL_NAME,
         "dino_input_size": DINO_INPUT_SIZE,
@@ -139,19 +143,19 @@ def nominal_cache_signature() -> dict:
     if CALIBRATION_VIDEO_PATHS:
         signature.update(calibration_method=SEQUENCE_CALIBRATION_METHOD,
                          calibration_sources=source_signatures(CALIBRATION_VIDEO_PATHS))
-        if SCORE_MODE == 'local':
+        if mode == 'local':
             from .local_scoring import LOCAL_METHOD
             signature['calibration_method'] = LOCAL_METHOD
-    if SCORE_MODE == 'notebook':
+    if mode == 'notebook':
         signature.update(calibration_method=NOTEBOOK_CALIBRATION_METHOD,
                          threshold_quantile=.95, threshold_margin=1.10,
                          calibration_sources=source_signatures(CALIBRATION_VIDEO_PATHS))
     return signature
 
 
-def nominal_cache_runtime_signature() -> dict:
+def nominal_cache_runtime_signature(score_mode=None) -> dict:
     """Settings a test must match, excluding the nominal source list."""
-    signature = nominal_cache_signature()
+    signature = nominal_cache_signature(score_mode)
     signature.pop("sources", None)
     return signature
 
@@ -193,6 +197,9 @@ def check_input_paths(include_nominal: bool = True, include_test: bool = True) -
 
 
 def main(mode: str = "all") -> None:
+    global SCORE_MODE
+    if SCORE_MODE == "mean":
+        SCORE_MODE = "notebook"
     if mode not in {"all", "build-memory", "test"}:
         raise ValueError("mode must be 'all', 'build-memory', or 'test'")
     if SCORE_MODE not in {'mean', 'local', 'notebook'}:
@@ -233,10 +240,12 @@ def main(mode: str = "all") -> None:
     # --------------------------------------------------------
     # Step 1: Load DINOv2 once
     # --------------------------------------------------------
-    extractor = DINOv2FeatureExtractor(
-        model_name=MODEL_NAME,
-        input_size=DINO_INPUT_SIZE,
-    )
+    extractor = None
+    def get_extractor():
+        nonlocal extractor
+        if extractor is None:
+            extractor = DINOv2FeatureExtractor(model_name=MODEL_NAME, input_size=DINO_INPUT_SIZE)
+        return extractor
 
     signature = nominal_cache_signature()
     cached = None
@@ -257,7 +266,7 @@ def main(mode: str = "all") -> None:
     else:
         reusable = None
         if NOMINAL_CACHE_DIRECTORY is not None and not REBUILD_NOMINAL_CACHE:
-            reusable = load_nominal_cache(NOMINAL_CACHE_DIRECTORY, memory_signature(signature))
+            reusable = load_feature_cache(NOMINAL_CACHE_DIRECTORY, signature)
         # ----------------------------------------------------
         # Step 2: Build nominal memory
         # ----------------------------------------------------
@@ -266,9 +275,13 @@ def main(mode: str = "all") -> None:
             print("Reusing extracted nominal memory; recalibrating only the threshold.")
         else:
             nominal_memory, grid_size = build_nominal_video_memory(
-                extractor=extractor, nominal_video_paths=NOMINAL_VIDEO_PATHS,
+                extractor=get_extractor(), nominal_video_paths=NOMINAL_VIDEO_PATHS,
                 sample_fps=SAMPLE_FPS, start_sec=START_SEC, end_sec=END_SEC,
                 max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
+            if NOMINAL_CACHE_DIRECTORY is not None:
+                # Keep completed extraction even if a later calibration bag fails.
+                save_feature_cache(NOMINAL_CACHE_DIRECTORY, nominal_memory, grid_size, signature)
+                reusable = (nominal_memory, grid_size)
 
         # ----------------------------------------------------
         # Step 3: Calibrate the adaptive threshold
@@ -279,9 +292,22 @@ def main(mode: str = "all") -> None:
             for run_id, source in enumerate(CALIBRATION_VIDEO_PATHS):
                 print(f"Independent DINO calibration: {run_id + 1}/{len(CALIBRATION_VIDEO_PATHS)}")
                 # Hold only one query bag in RAM; never add it to retrieval memory.
-                queries, query_grid = build_nominal_video_memory(extractor, [source],
-                    sample_fps=SAMPLE_FPS, start_sec=START_SEC, end_sec=END_SEC,
-                    max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
+                query_signature = memory_signature(dict(signature, sources=source_signatures([source])))
+                query_directory = None
+                if NOMINAL_CACHE_DIRECTORY is not None:
+                    key = hashlib.sha256(json.dumps(query_signature, sort_keys=True).encode()).hexdigest()[:24]
+                    query_directory = Path(NOMINAL_CACHE_DIRECTORY) / 'calibration_features' / key
+                query_cache = (load_feature_cache(query_directory, query_signature)
+                               if query_directory is not None and not REBUILD_NOMINAL_CACHE else None)
+                if query_cache is not None:
+                    queries, query_grid = query_cache
+                    print('Reusing saved calibration features; recomputing scores only.')
+                else:
+                    queries, query_grid = build_nominal_video_memory(get_extractor(), [source],
+                        sample_fps=SAMPLE_FPS, start_sec=START_SEC, end_sec=END_SEC,
+                        max_frames_per_video=MAX_NOMINAL_FRAMES_PER_VIDEO)
+                    if query_directory is not None:
+                        save_feature_cache(query_directory, queries, query_grid, query_signature)
                 if query_grid != grid_size:
                     raise ValueError("Calibration and memory patch grids differ.")
                 extra = {'patch_maps': patch_maps} if patch_maps is not None else {}
@@ -292,33 +318,20 @@ def main(mode: str = "all") -> None:
                     stage_constrained_matching=STAGE_CONSTRAINED_MATCHING, **extra))
                 del queries
             if SCORE_MODE == 'notebook':
-                adaptive_threshold_df, calibration_df = build_notebook_threshold(pd.DataFrame(rows))
+                adaptive_threshold_df, calibration_df = build_notebook_threshold(pd.DataFrame(rows), n_bins=THRESHOLD_BINS,
+                    min_points_per_bin=MIN_POINTS_PER_BIN, smooth_window=THRESHOLD_SMOOTH_WINDOW,
+                    threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE)
             elif SCORE_MODE == 'local':
                 from .local_scoring import fit_local_threshold
                 adaptive_threshold_df, calibration_df = fit_local_threshold(pd.DataFrame(rows), patch_maps,
                     n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE, margin=THRESHOLD_MARGIN)
                 del patch_maps
-            else:
-                adaptive_threshold_df, calibration_df = build_sequence_threshold(pd.DataFrame(rows),
-                    n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE,
-                    margin=THRESHOLD_MARGIN, smooth_window=THRESHOLD_SMOOTH_WINDOW)
         elif SCORE_MODE == 'notebook':
             adaptive_threshold_df, calibration_df = calibrate_notebook_leave_one_video_out(
-                nominal_memory, stage_constrained_matching=STAGE_CONSTRAINED_MATCHING)
-        else:
-            adaptive_threshold_df, calibration_df = calibrate_adaptive_threshold_leave_one_video_out(
-                nominal_memory=nominal_memory,
-                quantile=THRESHOLD_QUANTILE,
-                margin=THRESHOLD_MARGIN,
-                top_k_cls=TOP_K_CLS,
-                attention_power=ATTENTION_POWER,
-                min_weight=MIN_WEIGHT,
-                n_bins=THRESHOLD_BINS,
-                min_points_per_bin=MIN_POINTS_PER_BIN,
-                smooth_window=THRESHOLD_SMOOTH_WINDOW,
-                threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE,
-                stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
-            )
+                nominal_memory, stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
+                top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
+                n_bins=THRESHOLD_BINS, min_points_per_bin=MIN_POINTS_PER_BIN,
+                smooth_window=THRESHOLD_SMOOTH_WINDOW, threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE)
         if NOMINAL_CACHE_DIRECTORY is not None:
             if reusable is not None:
                 save_nominal_calibration(NOMINAL_CACHE_DIRECTORY, adaptive_threshold_df, calibration_df, signature)
@@ -349,6 +362,7 @@ def main(mode: str = "all") -> None:
         return
 
     adaptive_threshold_df = scaled_threshold(adaptive_threshold_df, THRESHOLD_SCALE)
+    extractor = get_extractor()
     adaptive_threshold_df.to_csv(THRESHOLD_CSV, index=False)
     calibration_df.to_csv(CALIBRATION_CSV, index=False)
 

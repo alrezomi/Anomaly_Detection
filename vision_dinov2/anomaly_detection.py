@@ -306,8 +306,8 @@ def compare_frame_to_nominal_memory(
     In local mode the second returned array contains spatial/attention scores;
     the third contains raw same-position differences for the diagnostic heatmap.
     Frame selection itself is unchanged.
-    Notebook mode instead searches all eligible frames using unweighted,
-    same-position patch RMS, averaged over the image (notebook cell 47).
+    Notebook mode uses this attention-weighted matcher with progress-binned
+    calibration; it never performs exhaustive patch search.
     """
     candidate_memory = nominal_memory
     if required_stage is not None:
@@ -319,28 +319,8 @@ def compare_frame_to_nominal_memory(
             raise ValueError(
                 f"Nominal memory has no frames assigned to stage {required_stage}."
             )
-    if notebook_scoring:
-        if local_scoring:
-            raise ValueError('Notebook and local scoring cannot be combined.')
-        best = None
-        query = np.asarray(test_features, dtype=np.float32)
-        if query.ndim != 2 or not query.size or not np.isfinite(query).all():
-            raise ValueError('Notebook scoring requires finite [patch, feature] arrays.')
-        # Stream candidates: do not allocate a second copy of the full memory.
-        for item in candidate_memory:
-            reference = np.asarray(item['features'], dtype=np.float32)
-            if reference.shape != query.shape or not np.isfinite(reference).all():
-                raise ValueError('Notebook reference features must be finite and match the query shape.')
-            patches = np.sqrt(np.mean((query - reference) ** 2, axis=-1))
-            score = float(patches.mean())
-            if best is None or score < best[0]:
-                best = (score, patches, item)
-        if best is None:
-            raise ValueError('Nominal memory is empty.')
-        score, patches, item = best
-        # Attention is diagnostic only in this mode; it never changes the score.
-        weights = make_attention_weights(test_attention, item['attention'], attention_power, min_weight)
-        return score, patches, patches.copy(), weights, item, compute_cls_distance(test_cls, item['cls'])
+    if notebook_scoring and local_scoring:
+        raise ValueError('Notebook and local scoring cannot be combined.')
     selected_memory, cls_distances = select_top_k_nominal_by_cls(
         test_cls=test_cls,
         nominal_memory=candidate_memory,

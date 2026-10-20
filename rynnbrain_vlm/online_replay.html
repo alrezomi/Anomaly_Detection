@@ -127,7 +127,7 @@ function drawDinoCameras(state){
    container.append(element);card={element,stamp:null,liveStamp:null};dinoCards.set(camera.topic,card);element.querySelector('.heatmapMode').onchange=()=>{card.stamp=null;if(lastState)drawDinoCameras(lastState);};
   }
   const rows=state.rows.filter(row=>row.camera_topic===camera.topic),last=rows.at(-1),element=card.element;
-  if(last&&card.scoreMode!==last.score_mode){card.scoreMode=last.score_mode;card.stamp=null;element.querySelector('.heatmapMode').value=last.score_mode==='notebook'?'observed':'scored';}
+  if(last&&card.scoreMode!==last.score_mode){card.scoreMode=last.score_mode;card.stamp=null;element.querySelector('.heatmapMode').value='scored';}
   element.querySelector('.heatmapTitle').textContent=element.querySelector('.heatmapMode').value==='attention'?'Attention map (not anomaly evidence)':'Difference heatmap';
   const stamp=JSON.stringify([state.output_directory,rows.length]);
   const imageURL=view=>'/dino-camera?topic='+encodeURIComponent(camera.topic)+'&view='+view+'&t='+Date.now();
@@ -139,7 +139,7 @@ function drawDinoCameras(state){
   element.querySelector('.timing').textContent=last?`${rows.length} images scored; observation ${last.timestamp_sec.toFixed(2)} s; feature time ${last.cached_feature_sec.toFixed(2)} s; memory comparison ${(last.classifier_sec||0).toFixed(2)} s; observation to result ${last.observation_to_result_sec.toFixed(2)} s.`:'Each camera is scored at its own recorded timestamps.';
   const best=last?.visual_matching?.best;
   element.querySelector('.matchDetails').textContent=best?`${best.bag} - frame ${best.frame_id}, ${best.timestamp_sec.toFixed(2)} s, stage ${best.stage}`:'';
-  element.querySelector('.diagnostics').textContent=(last?.score_mode==='notebook'?'Notebook baseline: mean unweighted patch RMS over the full image, with a fixed frame-quantile threshold. Attention is display-only and does not affect the score. ':last?.score_mode==='local'?'Local scores use soft attention and nearby-patch matching. The white box marks the largest score / threshold ratio, not an object mask. ':'Mean mode uses a whole-image attention-weighted distance. ')+'Select All raw differences to inspect the unweighted map, or Attention weights to inspect the model weighting. Heatmap colors are normalized per image, not alarm probabilities.'+(last?.unreachable_region_fraction>0?` Calibration needs review: ${(100*last.unreachable_region_fraction).toFixed(1)}% of region thresholds are unreachable.`:'');
+  element.querySelector('.diagnostics').textContent=(last?.score_mode==='notebook'?'Notebook mode: attention-weighted corresponding-patch RMS with a progress-binned percentile threshold. ':last?.score_mode==='local'?'Local scores use soft attention and nearby-patch matching. The white box marks the largest score / threshold ratio, not an object mask. ':'Mean mode uses a whole-image attention-weighted distance. ')+'Select All raw differences to inspect the unweighted map, or Attention weights to inspect the model weighting. Heatmap colors are normalized per image, not alarm probabilities.'+(last?.unreachable_region_fraction>0?` Calibration needs review: ${(100*last.unreachable_region_fraction).toFixed(1)}% of region thresholds are unreachable.`:'');
   draw({...state,rows},element.querySelector('canvas'));
  }
 }

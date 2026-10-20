@@ -444,52 +444,85 @@ multiplier. Leave it at 1.0 for the first independent evaluation. An empty or
 absent calibration list preserves compatibility with existing caches/legacy
 calibration; the GUI note reports which calibration was actually loaded.
 
-### DINO video-notebook baseline
+### Reusing DINO features across updates
 
-For comparison with the successful **video** implementation in `rynnbrain4.ipynb`
-(cell 47), set the existing top-level fields:
+Keep `rebuild_nominal_cache: false` and the same `vision_memory_name` when
+extraction settings are unchanged. GUI/logging changes need no memory rebuild.
+The build command checks what is compatible; it does not inherently mean
+re-extracting every recording.
 
-```json
-"dino_score_mode": "notebook",
-"dino_threshold_scale": 1.0,
-"camera_topics": ["/top_camera/cam_135222070433/color/image_raw/compressed"]
-```
+| Change | Feature extraction | Score/threshold calibration |
+| --- | --- | --- |
+| GUI, logging, output experiment folder | Reuse | Reuse |
+| `dino_threshold_scale` | Reuse | Reuse; apply multiplier at runtime |
+| Score mode, attention weights, CLS shortlist, matching restriction | Reuse | Recompute for the new score/matcher |
+| Threshold-fitting settings | Reuse | Recompute |
+| Model, resolution, camera, source list, sampling, stage-assignment settings | Incompatible features need extraction | Recompute |
 
-Keep the current input resolution, memory name, bag lists and VLM/GMR settings.
-This mode processes all sampled images (normally 2 fps), not eight snapshots.
-For each image it searches **every eligible nominal frame**, computes the RMS
-feature difference at each corresponding patch, averages those patch distances,
-and selects the frame with the lowest mean. Existing recorded-stage filtering
-still applies when enabled. CLS and attention do not select or weight the score;
-attention remains available solely as a diagnostic display. There is no nearby
-patch substitution or local-region maximum in this baseline.
+Nominal features now have a signature independent of calibration. Older saved
+memories are recognized through their existing signature; they do not need a
+format-conversion run. Completed extraction survives an interrupted later
+calibration. Replay still refuses an incompatible threshold rather than using
+one fitted to a different score.
 
-The threshold is fixed through the recording: `1.10 * percentile95(calibration
-frame scores)`, matching the video notebook. With `dino_calibration_bags` set,
-those separate successful recordings supply the frame scores. With an empty
-list, calibration holds out each **complete nominal recording** in turn, as in
-the notebook; the remaining nominal recordings supply memory. It never compares
-a calibration frame to its own recording. Leave the existing separate list in
-place for the first comparison. No 18-bag minimum is needed for this empirical
-frame quantile, but it does not guarantee a 5% false-alarm rate on new frames or
-recordings. Larger bags contribute more frames, as in the notebook.
+Separate calibration recordings are also cached automatically, one recording
+at a time, under the camera memory's `calibration_features` directory. The key
+depends on the source and extraction settings, not the scoring method or its
+position in the calibration list. A calibration recording must be extracted
+once after this capability is introduced; subsequent score-method changes can
+rescore its saved patch/CLS/attention features without running DINO again.
+Unchanged complete caches require no model initialization in `vision-memory`.
+Rescoring, threshold fitting and reading compressed features still take time.
+These generated feature archives use extra disk space; they add no config paths
+or tuning parameters. Calibration recordings remain separate from retrieval
+memory and are still excluded from evaluation.
 
-Feature L2 normalization was **not removed**. The earlier four-image notebook
-experiment also divided by nominal standard deviation, but the later video
-implementation did not. This update follows the latter; it adds no Mahalanobis
-distance or covariance fitting. Showing raw distance instead of `epsilon =
-score / threshold` also cannot change the alarm decision. Heatmap min/max
-normalization is visualization only. In the GUI, **Attention weights (not
-differences)** is explicitly labelled; notebook mode initially shows the raw
-patch-difference map used in its mean score.
+Changing the memory name points to another directory; it does not search other
+experiments for compatible files. Replacing bag contents in place under the
+same path requires `rebuild_nominal_cache: true`; signatures track configured
+sources/settings, not a content hash of every recording. Force rebuilding also
+refreshes calibration feature archives used by that run.
 
-This restores the video notebook's scoring and threshold formulas, not a
-bit-for-bit replication of its experiments: the current full-frame square
-resize/resolution is retained, whereas the notebook used the image processor's
-default resize/crop. Stage filtering and separate calibration bags are also
-retained if configured. Whole-image averaging can still dilute small-object
-differences; success on the notebook's videos does not establish accuracy on
-the rosbag dataset.
+The attention functions in `rynnbrain5.3.ipynb` use the same max-combined soft
+weights and normalized weighted mean as the current matcher:
+`sum(patch_distance * weight) / sum(weight)`. Its later cells also use a CLS
+shortlist and progress-dependent frame-quantile thresholds. The existing
+`mean` mode is closest to that score, although its separate-bag calibration is
+sequence-based when `dino_calibration_bags` is configured. `local` additionally
+uses nearby-patch matching and region-specific sequence calibration. This cache
+update does not alter either score, remove attention, change thresholds, or
+claim that one method is more accurate on the lab recordings.
+
+### DINO notebook mode: attention and progress-binned calibration
+
+`"dino_score_mode": "notebook"` now uses the newer notebook approach. The former
+exhaustive, unweighted notebook mode has been removed. Existing `"mean"` configs
+are accepted as an alias for the new notebook mode in rosbag building and replay.
+`local` is unchanged. Your actual config is never rewritten.
+
+The matcher shortlists five nominal frames by CLS similarity (within the recorded
+stage when enabled), then selects the lowest attention-weighted corresponding-patch
+RMS distance. There is no nearby-patch substitution in this mode. Features remain
+L2 normalized. Calibration and inference use exactly the same matcher.
+
+Nominal calibration scores are grouped into 30 bins of **matched nominal progress**.
+Each populated bin uses its 95th percentile times 1.10. Sparse bins are interpolated
+(with a global percentile fallback), a pooled 20th-percentile floor is applied,
+and a three-bin rolling median smooths the curve. At inference the matched reference
+frame supplies progress; its interpolated threshold is compared to the current score.
+`dino_threshold_scale` multiplies this threshold (1.0 by default). No new settings
+are required. This does not require knowing the test recording's future duration.
+
+Separate `dino_calibration_bags` are retained when configured. Otherwise each whole
+nominal recording is held out and scored against the others. This is empirical
+frame calibration, not a guaranteed recording-level false-alarm rate. Whole-image
+averaging can still dilute small-object differences; validate on held-out recordings.
+
+The old notebook thresholds are incompatible and must be recalibrated once. Saved
+features are reused when their extraction settings match and `rebuild_nominal_cache`
+is false. This avoids repeating DINO inference, but score comparisons still take time.
+Update both memory builder and replay to the same code version. Cache errors now
+print the mismatched fields instead of silently suggesting a full extraction rebuild.
 
 Stop replay and run:
 
