@@ -23,8 +23,8 @@ from .nominal_cache import (load_nominal_cache, save_nominal_cache, save_nominal
                             memory_signature, load_feature_cache, save_feature_cache)
 from .threshold import (
     score_calibration_memory, scaled_threshold,
-    SEQUENCE_CALIBRATION_METHOD,
-    NOTEBOOK_CALIBRATION_METHOD, build_notebook_threshold, calibrate_notebook_leave_one_video_out,
+    THRESHOLD_QUANTILE, THRESHOLD_MARGIN,
+    ATTENTION_CALIBRATION_METHOD, build_attention_threshold, calibrate_attention_leave_one_video_out,
 )
 from .visualization import (
     create_anomaly_heatmap_video,
@@ -43,7 +43,6 @@ from .visualization import (
 NOMINAL_VIDEO_PATHS = nominal_video_paths()
 CALIBRATION_VIDEO_PATHS = []
 THRESHOLD_SCALE = 1.0
-SCORE_MODE = "notebook"
 TEST_VIDEO_PATH = test_video_path()
 
 
@@ -71,8 +70,6 @@ STAGE_CONSTRAINED_MATCHING = False
 # 3. ADAPTIVE THRESHOLD PARAMETERS
 # ============================================================
 
-THRESHOLD_QUANTILE = 0.90
-THRESHOLD_MARGIN = 1.10
 THRESHOLD_BINS = 30
 MIN_POINTS_PER_BIN = 2
 THRESHOLD_SMOOTH_WINDOW = 3
@@ -114,14 +111,11 @@ def source_signatures(paths) -> list:
     return sources
 
 
-def nominal_cache_signature(score_mode=None) -> dict:
-    """Describe every setting that changes reusable nominal results."""
-    mode = score_mode or SCORE_MODE
-    if mode == "mean":
-        mode = "notebook"
+def nominal_cache_signature() -> dict:
+    """One scorer and calibration protocol for build, batch and replay."""
     signature = {
         "format_version": 1,
-        "score_mode": mode,
+        "score_mode": "attention",
         "sources": source_signatures(NOMINAL_VIDEO_PATHS),
         "model_name": MODEL_NAME,
         "dino_input_size": DINO_INPUT_SIZE,
@@ -140,22 +134,14 @@ def nominal_cache_signature(score_mode=None) -> dict:
         "threshold_smooth_window": THRESHOLD_SMOOTH_WINDOW,
         "threshold_floor_quantile": THRESHOLD_FLOOR_QUANTILE,
     }
-    if CALIBRATION_VIDEO_PATHS:
-        signature.update(calibration_method=SEQUENCE_CALIBRATION_METHOD,
-                         calibration_sources=source_signatures(CALIBRATION_VIDEO_PATHS))
-        if mode == 'local':
-            from .local_scoring import LOCAL_METHOD
-            signature['calibration_method'] = LOCAL_METHOD
-    if mode == 'notebook':
-        signature.update(calibration_method=NOTEBOOK_CALIBRATION_METHOD,
-                         threshold_quantile=.95, threshold_margin=1.10,
-                         calibration_sources=source_signatures(CALIBRATION_VIDEO_PATHS))
+    signature.update(calibration_method=ATTENTION_CALIBRATION_METHOD,
+                     calibration_sources=source_signatures(CALIBRATION_VIDEO_PATHS))
     return signature
 
 
-def nominal_cache_runtime_signature(score_mode=None) -> dict:
+def nominal_cache_runtime_signature() -> dict:
     """Settings a test must match, excluding the nominal source list."""
-    signature = nominal_cache_signature(score_mode)
+    signature = nominal_cache_signature()
     signature.pop("sources", None)
     return signature
 
@@ -197,15 +183,8 @@ def check_input_paths(include_nominal: bool = True, include_test: bool = True) -
 
 
 def main(mode: str = "all") -> None:
-    global SCORE_MODE
-    if SCORE_MODE == "mean":
-        SCORE_MODE = "notebook"
     if mode not in {"all", "build-memory", "test"}:
         raise ValueError("mode must be 'all', 'build-memory', or 'test'")
-    if SCORE_MODE not in {'mean', 'local', 'notebook'}:
-        raise ValueError("dino_score_mode must be 'mean', 'local', or 'notebook'.")
-    if SCORE_MODE == 'local' and not CALIBRATION_VIDEO_PATHS:
-        raise ValueError("dino_score_mode local requires separate dino_calibration_bags.")
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
     check_input_paths(include_nominal=mode != "test", include_test=mode != "build-memory")
 
@@ -288,7 +267,6 @@ def main(mode: str = "all") -> None:
         # ----------------------------------------------------
         if CALIBRATION_VIDEO_PATHS:
             rows = []
-            patch_maps = [] if SCORE_MODE == 'local' else None
             for run_id, source in enumerate(CALIBRATION_VIDEO_PATHS):
                 print(f"Independent DINO calibration: {run_id + 1}/{len(CALIBRATION_VIDEO_PATHS)}")
                 # Hold only one query bag in RAM; never add it to retrieval memory.
@@ -310,24 +288,15 @@ def main(mode: str = "all") -> None:
                         save_feature_cache(query_directory, queries, query_grid, query_signature)
                 if query_grid != grid_size:
                     raise ValueError("Calibration and memory patch grids differ.")
-                extra = {'patch_maps': patch_maps} if patch_maps is not None else {}
-                if SCORE_MODE == 'notebook':
-                    extra['notebook_scoring'] = True
                 rows.extend(score_calibration_memory(queries, nominal_memory, run_id,
                     top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
-                    stage_constrained_matching=STAGE_CONSTRAINED_MATCHING, **extra))
+                    stage_constrained_matching=STAGE_CONSTRAINED_MATCHING))
                 del queries
-            if SCORE_MODE == 'notebook':
-                adaptive_threshold_df, calibration_df = build_notebook_threshold(pd.DataFrame(rows), n_bins=THRESHOLD_BINS,
-                    min_points_per_bin=MIN_POINTS_PER_BIN, smooth_window=THRESHOLD_SMOOTH_WINDOW,
-                    threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE)
-            elif SCORE_MODE == 'local':
-                from .local_scoring import fit_local_threshold
-                adaptive_threshold_df, calibration_df = fit_local_threshold(pd.DataFrame(rows), patch_maps,
-                    n_bins=THRESHOLD_BINS, quantile=THRESHOLD_QUANTILE, margin=THRESHOLD_MARGIN)
-                del patch_maps
-        elif SCORE_MODE == 'notebook':
-            adaptive_threshold_df, calibration_df = calibrate_notebook_leave_one_video_out(
+            adaptive_threshold_df, calibration_df = build_attention_threshold(pd.DataFrame(rows), n_bins=THRESHOLD_BINS,
+                min_points_per_bin=MIN_POINTS_PER_BIN, smooth_window=THRESHOLD_SMOOTH_WINDOW,
+                threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE)
+        else:
+            adaptive_threshold_df, calibration_df = calibrate_attention_leave_one_video_out(
                 nominal_memory, stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
                 top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
                 n_bins=THRESHOLD_BINS, min_points_per_bin=MIN_POINTS_PER_BIN,
@@ -342,16 +311,6 @@ def main(mode: str = "all") -> None:
             print(f"Saved reusable nominal cache: {NOMINAL_CACHE_DIRECTORY}")
 
     print("Nominal grid size:", grid_size)
-    if 'local_profile' in adaptive_threshold_df.attrs:
-        from .local_scoring import local_profile_diagnostics
-        health = local_profile_diagnostics(adaptive_threshold_df.attrs['local_profile'],
-            nominal_memory[0]['features'].shape[-1], THRESHOLD_SCALE)
-        print('DINO local calibration health:', json.dumps(health))
-        if health['unreachable_region_fraction'] > 0:
-            print(f"Calibration needs review: {health['unreachable_region_fraction']:.1%} of region/progress "
-                  f"bounds cannot be crossed (distance ceiling {health['distance_ceiling']:.6f}). "
-                  "Inspect the largest nominal deviations and their source recordings in calibration.csv.")
-
     if mode == "build-memory":
         plot_adaptive_calibration(
             adaptive_threshold_df, calibration_df,
