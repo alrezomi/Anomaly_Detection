@@ -7,38 +7,34 @@ import pandas as pd
 
 
 SEQUENCE_CALIBRATION_METHOD = "split_nominal_sequence_max_v1"
-NOTEBOOK_CALIBRATION_METHOD = "notebook_patch_rms_frame_quantile_v1"
+NOTEBOOK_CALIBRATION_METHOD = "notebook_attention_progress_quantile_v2"
 
 
-def build_notebook_threshold(calibration_df):
-    """Notebook cell 47: pooled frame 95th percentile times 1.10.
-
-    These are empirical frame statistics, not a whole-run false-alarm guarantee.
-    Queries must be held out from memory by the caller, at recording level.
-    """
+def build_notebook_threshold(calibration_df, n_bins=30, min_points_per_bin=2,
+                             smooth_window=3, threshold_floor_quantile=.20):
+    """Attention-weighted held-out frame percentiles at matched nominal progress."""
     rows = calibration_df.copy()
-    if rows.empty or not {'score', 'held_out_video_id'}.issubset(rows):
-        raise ValueError('Notebook calibration requires held-out frame scores and run IDs.')
+    if rows.empty or not {'score', 'held_out_video_id', 'matched_progress'}.issubset(rows):
+        raise ValueError('Notebook calibration requires held-out scores, run IDs and matched_progress.')
     scores = rows.score.to_numpy(float)
     if not np.isfinite(scores).all() or (scores < 0).any():
         raise ValueError('Calibration scores must be finite and nonnegative.')
-    bound = float(np.quantile(scores, .95)) * 1.10
-    rows['adaptive_threshold'] = bound
-    rows['above_threshold'] = scores > bound
-    rows['calibration_role'] = 'frame_quantile'
-    table = pd.DataFrame(dict(stage_center=[0., 1.], adaptive_threshold=bound,
-                              count=len(scores), quantile=.95, margin=1.10,
-                              method=NOTEBOOK_CALIBRATION_METHOD))
+    table = build_adaptive_visual_threshold_from_scores(rows, n_bins=n_bins,
+        quantile=.95, margin=1.10, min_points_per_bin=min_points_per_bin,
+        smooth_window=smooth_window, threshold_floor_quantile=threshold_floor_quantile)
+    table['method'] = NOTEBOOK_CALIBRATION_METHOD
     table.attrs['score_mode'] = 'notebook'
-    print(f'Notebook DINO calibration: {rows.held_out_video_id.nunique()} held-out runs, '
-          f'{len(rows)} frames; 95th percentile x 1.10 = {bound:.6g}.')
-    print('Calibration crossings (not independent evaluation): '
-          f'{rows.above_threshold.mean():.2%} of frames; '
-          f'{rows.groupby("held_out_video_id").above_threshold.any().mean():.2%} of runs.')
+    rows['adaptive_threshold'] = np.interp(rows.matched_progress,
+        table.stage_center, table.adaptive_threshold)
+    rows['above_threshold'] = scores > rows.adaptive_threshold
+    rows['calibration_role'] = 'progress_frame_quantile'
+    print(f'Notebook attention calibration: {len(rows)} frames, {n_bins} progress bins, '
+          '95th percentile x 1.10, with interpolation, floor and smoothing.')
     return table, rows
 
 
-def calibrate_notebook_leave_one_video_out(nominal_memory, stage_constrained_matching=False):
+def calibrate_notebook_leave_one_video_out(nominal_memory, stage_constrained_matching=False,
+        top_k_cls=5, attention_power=1.5, min_weight=.10, **threshold_settings):
     ids = sorted({item['video_id'] for item in nominal_memory})
     if len(ids) < 2:
         raise ValueError('Notebook leave-one-recording-out calibration needs at least two nominal bags.')
@@ -48,8 +44,9 @@ def calibrate_notebook_leave_one_video_out(nominal_memory, stage_constrained_mat
         queries = [item for item in nominal_memory if item['video_id'] == run_id]
         references = [item for item in nominal_memory if item['video_id'] != run_id]
         rows.extend(score_calibration_memory(queries, references, run_id,
-                    stage_constrained_matching=stage_constrained_matching, notebook_scoring=True))
-    return build_notebook_threshold(pd.DataFrame(rows))
+                    stage_constrained_matching=stage_constrained_matching, notebook_scoring=True,
+                    top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight))
+    return build_notebook_threshold(pd.DataFrame(rows), **threshold_settings)
 
 
 def validate_threshold_scale(value) -> float:

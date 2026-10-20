@@ -148,7 +148,8 @@ class DinoThresholdTests(unittest.TestCase):
         from vision_dinov2 import run_vision_test as runner
         from rynnbrain_vlm.replay_detectors import DinoReplayDetector
         topic = '/camera'
-        table, rows = build_sequence_threshold(self.scores())
+        from vision_dinov2.threshold import build_notebook_threshold, NOTEBOOK_CALIBRATION_METHOD
+        table, rows = build_notebook_threshold(self.scores())
         with tempfile.TemporaryDirectory() as directory:
             memory_path = str(Path(directory) / 'nominal_memory_bag')
             calibration_paths = [str(Path(directory) / f'calibration_{i}') for i in range(26)]
@@ -162,13 +163,13 @@ class DinoThresholdTests(unittest.TestCase):
             with patch('vision_dinov2.dinov2_features.DINOv2FeatureExtractor'):
                 detector = DinoReplayDetector(config, lambda message: None)
                 self.assertEqual(detector.threshold_scale, 1.2)
-                self.assertEqual(detector.signature['calibration_method'], SEQUENCE_CALIBRATION_METHOD)
+                self.assertEqual(detector.signature['calibration_method'], NOTEBOOK_CALIBRATION_METHOD)
                 self.assertEqual(len(detector.excluded), 27)
                 pd.testing.assert_frame_equal(detector.thresholds, table, check_exact=False)
                 with self.assertRaisesRegex(ValueError, 'calibration'):
                     detector.reset(calibration_paths[0])
                 config['dino_calibration_bags'] = calibration_paths[1:]
-                with self.assertRaisesRegex(ValueError, 'No compatible DINO memory'):
+                with self.assertRaisesRegex(ValueError, 'No compatible DINO calibration'):
                     DinoReplayDetector(config, lambda message: None)
 
 

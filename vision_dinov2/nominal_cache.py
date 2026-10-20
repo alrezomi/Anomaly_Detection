@@ -112,9 +112,13 @@ def load_nominal_cache(
         return None
 
     saved_signature = json.loads(required[3].read_text(encoding="utf-8"))
-    if any(saved_signature.get(key, 'mean' if key == 'score_mode' else None) != value
-           for key, value in expected_signature.items()):
-        print(f"Saved DINO calibration is incompatible; checking reusable features: {directory}")
+    differences = [key for key, value in expected_signature.items()
+                   if saved_signature.get(key, 'mean' if key == 'score_mode' else None) != value]
+    if differences:
+        print(f"Saved DINO calibration is incompatible: {directory}")
+        for key in differences:
+            print(f"  {key}: saved={saved_signature.get(key)!r}; requested={expected_signature[key]!r}")
+        print('Recalibrate with vision-memory; compatible extracted features can be reused.')
         return None
 
     profile = None

@@ -1,4 +1,4 @@
-"""Regression against the supplied rynnbrain4.ipynb cell-47 algorithm."""
+"""Attention-scored progress calibration shared by build, replay and export."""
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,29 +40,33 @@ class NotebookTests(unittest.TestCase):
 
     def match(self, query, memory, **kwargs):
         return compare_frame_to_nominal_memory(query['features'], query['attention'], query['cls'],
-                                               memory, notebook_scoring=True, **kwargs)
+                                               memory, notebook_scoring=True, min_weight=.1, **kwargs)
 
-    def test_exact_notebook_formula_and_search_beyond_cls_shortlist(self):
+    def test_attention_formula_and_cls_shortlist(self):
+        from vision_dinov2.anomaly_detection import make_attention_weights
         query = self.item(10)
-        memory = [self.item(i) for i in range(9)]
-        memory[-1]['features'] = query['features'].copy()
-        memory[-1]['cls'] = -query['cls']  # CLS would discard the actual patch match.
+        memory = [self.item(1), self.item(2)]
+        memory[1]['features'] = query['features'].copy()
+        memory[1]['cls'] = -query['cls']
         result = self.match(query, memory, top_k_cls=1)
-        self.assertIs(result[4], memory[-1])
-        self.assertEqual(result[0], 0.)
-        memory.pop()
-        # Literal independent expression used in the supplied notebook.
-        expected = [np.sqrt(np.mean((query['features'] - x['features']) ** 2, axis=-1)) for x in memory]
-        best = int(np.argmin([x.mean() for x in expected]))
-        result = self.match(query, memory)
-        self.assertIs(result[4], memory[best])
-        np.testing.assert_allclose(result[1], expected[best], rtol=1e-6)
-        self.assertAlmostEqual(result[0], expected[best].mean())
-        np.testing.assert_array_equal(result[1], result[2])
+        self.assertIs(result[4], memory[0])  # No exhaustive patch search.
+        raw = np.sqrt(np.mean((query['features'] - memory[0]['features']) ** 2, axis=-1))
+        weights = make_attention_weights(query['attention'], memory[0]['attention'], min_weight=.1)
+        self.assertAlmostEqual(result[0], float(np.sum(raw * weights) / weights.sum()))
         query['attention'][:] = 0
-        for x in memory:
-            x['attention'][:] = 0
-        self.assertEqual(result[0], self.match(query, memory)[0])
+        memory[0]['attention'][:] = 0
+        self.assertNotAlmostEqual(result[0], self.match(query, memory, top_k_cls=1)[0])
+
+    def test_progress_threshold_changes_and_runtime_crossings(self):
+        from vision_dinov2.anomaly_detection import threshold_for_progress
+        rows = pd.DataFrame(dict(score=[.1, .2, .3, .7, .8, .9],
+            matched_progress=[.1]*3 + [.9]*3, held_out_video_id=[0]*6))
+        table, _ = build_notebook_threshold(rows, n_bins=2, smooth_window=1)
+        low, high = table.adaptive_threshold
+        self.assertAlmostEqual(low, np.quantile([.1, .2, .3], .95)*1.1)
+        self.assertAlmostEqual(high, np.quantile([.7, .8, .9], .95)*1.1)
+        self.assertGreater(.5, threshold_for_progress(.1, table))
+        self.assertLess(.5, threshold_for_progress(.9, table))
 
     def test_stage_restriction_and_no_spatial_substitution(self):
         query = self.item(2)
@@ -93,25 +97,26 @@ class NotebookTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'two nominal'):
             calibrate_notebook_leave_one_video_out(memory[:2])
         with self.assertRaisesRegex(ValueError, 'finite'):
-            build_notebook_threshold(pd.DataFrame(dict(score=[np.nan], held_out_video_id=[0])))
+            build_notebook_threshold(pd.DataFrame(dict(score=[np.nan], held_out_video_id=[0], matched_progress=[.5])))
 
     def test_build_replay_cache_agreement_and_old_profile_rejection(self):
         from rosbag_io import RosbagImageSource
         from vision_dinov2 import run_vision_test as runner
         from rynnbrain_vlm.replay_detectors import DinoReplayDetector
-        for independent in (False, True):
-            with self.subTest(independent=independent), tempfile.TemporaryDirectory() as folder:
+        for independent, configured_mode in ((False, 'notebook'), (True, 'notebook'), (False, 'mean'), (True, 'mean')):
+            with self.subTest(independent=independent, mode=configured_mode), tempfile.TemporaryDirectory() as folder:
                 source = RosbagImageSource(Path(folder) / 'memory_bag', '/camera')
                 calibration = [str(Path(folder) / 'calibration_bag')] if independent else []
-                with patch.multiple(runner, SCORE_MODE='notebook', NOMINAL_VIDEO_PATHS=[source],
+                with patch.multiple(runner, SCORE_MODE=configured_mode, NOMINAL_VIDEO_PATHS=[source],
                         CALIBRATION_VIDEO_PATHS=[RosbagImageSource(x, '/camera') for x in calibration]):
                     signature = runner.nominal_cache_signature()
-                table, rows = build_notebook_threshold(pd.DataFrame(dict(score=[.1, .2], held_out_video_id=[0, 1])))
+                table, rows = build_notebook_threshold(pd.DataFrame(dict(score=[.1, .2], held_out_video_id=[0, 1], matched_progress=[.5,.5])))
                 directory = Path(folder) / 'camera'
                 save_nominal_cache(directory, [self.item(1)], 4, table, rows, signature)
                 self.assertIsNone(load_nominal_cache(directory, dict(signature, score_mode='local')))
+                self.assertIsNone(load_nominal_cache(directory, dict(signature, calibration_method='notebook_patch_rms_frame_quantile_v1')))
                 self.assertIsNotNone(load_nominal_cache(directory, memory_signature(signature)))
-                config = dict(nominal_cache_dir=folder, dino_score_mode='notebook',
+                config = dict(nominal_cache_dir=folder, dino_score_mode=configured_mode,
                               dino_calibration_bags=calibration, rynnbrain={'camera_topics': ['/camera']})
                 with patch('vision_dinov2.dinov2_features.DINOv2FeatureExtractor'):
                     detector = DinoReplayDetector(config, lambda _: None)
@@ -126,21 +131,21 @@ class NotebookTests(unittest.TestCase):
         image = Image.new('RGB', (56, 56))
         extractor = Mock()
         extractor.extract.return_value = query['features'], query['attention'], query['cls'], 4
-        table, _ = build_notebook_threshold(pd.DataFrame(dict(score=[.05, .1], held_out_video_id=[0, 1])))
+        table, _ = build_notebook_threshold(pd.DataFrame(dict(score=[.05, .1], held_out_video_id=[0, 1], matched_progress=[.5,.5])))
         detector = DinoReplayDetector.__new__(DinoReplayDetector)
         detector.extractor, detector.thresholds, detector.memory = extractor, table, memory
-        detector.signature = dict(top_k_cls=1, attention_power=1.5, min_weight=.1)
+        detector.signature = dict(top_k_cls=5, attention_power=1.5, min_weight=.1)
         detector.stages, detector.step, detector.threshold_scale = None, 0, .9
         detector._thumbnail = Mock(return_value=('memory', image))
         replay, _, _ = detector.append(image, 3.)
         calibration = score_calibration_memory([query], memory, 0, notebook_scoring=True)
         with patch('vision_dinov2.anomaly_detection.iter_source_frames', return_value=iter([(0, 3., image)])):
-            batch = run_video_test(extractor, 'test', memory, scaled_threshold(table, .9)).iloc[0]
+            batch = run_video_test(extractor, 'test', memory, scaled_threshold(table, .9), min_weight=.1).iloc[0]
         with tempfile.TemporaryDirectory() as folder, \
                 patch('vision_dinov2.visualization.iter_source_frames', return_value=iter([(0, 3., image)])), \
                 patch('vision_dinov2.visualization.cv2.VideoWriter'):
             video = create_anomaly_heatmap_video(extractor, 'test', memory, Path(folder) / 'test.mp4',
-                                                 scaled_threshold(table, .9)).iloc[0]
+                                                 scaled_threshold(table, .9), min_weight=.1).iloc[0]
         for score in [calibration[0]['score'], batch.score, video.score]:
             self.assertAlmostEqual(replay['anomaly_score'], score)
         for bound in [batch.threshold, video.threshold]:
@@ -148,7 +153,7 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(replay['above_threshold'], batch.alarm)
         self.assertEqual(replay['above_threshold'], video.alarm)
         self.assertEqual(replay['score_mode'], 'notebook')
-        np.testing.assert_array_equal(detector.preview_image, detector.scored_preview_image)
+        self.assertIsNotNone(detector.preview_image)
 
     def test_build_reuses_features_and_calibrates_both_supported_splits(self):
         from vision_dinov2 import run_vision_test as runner

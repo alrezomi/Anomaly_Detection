@@ -32,7 +32,9 @@ class DinoReplayDetector:
         from rosbag_io import RosbagImageSource
         self.config = config
         self.threshold_scale = validate_threshold_scale(config.get('dino_threshold_scale', 1.0))
-        self.score_mode = config.get('dino_score_mode', 'mean')
+        self.score_mode = config.get('dino_score_mode', 'notebook')
+        if self.score_mode == 'mean':
+            self.score_mode = 'notebook'
         if self.score_mode not in {'mean', 'local', 'notebook'}:
             raise ValueError("dino_score_mode must be 'mean', 'local', or 'notebook'.")
         self.topic = topic or config.get('camera_topics', config['rynnbrain']['camera_topics'])[0]
@@ -41,7 +43,7 @@ class DinoReplayDetector:
         if config.get('vision_memory_name'):
             self.path /= config['vision_memory_name']
         self.path /= _slug(self.topic)
-        self.signature = settings.nominal_cache_runtime_signature()
+        self.signature = settings.nominal_cache_runtime_signature(self.score_mode)
         self.signature.update(dino_input_size=config.get('dino_input_size', settings.DINO_INPUT_SIZE),
                               stage_constrained_matching=config.get('stage_constrained_matching', False),
                               score_mode=self.score_mode)
@@ -63,7 +65,7 @@ class DinoReplayDetector:
         progress('Loading saved DINO nominal memory')
         loaded = load_nominal_cache(self.path, self.signature)
         if loaded is None:
-            raise ValueError(f'No compatible DINO memory at {self.path}. Run docker compose run --rm --build vision-memory first.')
+            raise ValueError(f'No compatible DINO calibration at {self.path}. See the setting differences in the terminal. Stop replay, run docker compose run --rm --build vision-memory with the same config, then restart online-replay. Compatible extracted features will be reused when rebuild_nominal_cache is false.')
         self.memory, self.grid, self.thresholds, _ = loaded
         saved = json.loads((self.path / 'signature.json').read_text(encoding='utf-8'))
         self.signature['calibration_method'] = saved.get('calibration_method', 'legacy_frame_quantile')
@@ -72,12 +74,11 @@ class DinoReplayDetector:
         calibration_label = ('separate nominal recordings, sequence maximum deviations'
             if self.signature['calibration_method'] in {SEQUENCE_CALIBRATION_METHOD, LOCAL_METHOD} else 'legacy frame quantile')
         if self.score_mode == 'notebook':
-            self.score_source = 'dino_notebook_patch_rms'
-            calibration_label = ('separate nominal recordings' if calibration_bags else 'leave-one-recording-out') + ', frame 95th percentile x 1.10'
-            self.note += (' Notebook baseline: unweighted same-position patch RMS, averaged over the image; '
-                          'all eligible nominal frames are searched. Attention is display-only. '
-                          'A fixed empirical frame threshold does not control the chance of any alarm over a whole run. '
-                          'Full-memory comparison can be slower than the CLS shortlist.')
+            self.score_source = 'dino_notebook_attention_patch_rms'
+            calibration_label = ('separate nominal recordings' if calibration_bags else 'leave-one-recording-out') + ', progress-binned frame 95th percentile x 1.10'
+            self.note += (' Notebook mode uses CLS-shortlisted, attention-weighted corresponding-patch RMS. '
+                          'Thresholds follow matched nominal progress, with interpolation, smoothing and a floor. '
+                          'Frame percentiles do not guarantee a whole-run false-alarm rate.')
         if self.score_mode == 'local':
             self.score_source = 'dino_calibrated_local_regions'
             self.note += (' Local scoring uses soft attention and bidirectional nearby-patch matching with a displacement penalty. '

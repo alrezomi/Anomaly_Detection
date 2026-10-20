@@ -493,52 +493,36 @@ uses nearby-patch matching and region-specific sequence calibration. This cache
 update does not alter either score, remove attention, change thresholds, or
 claim that one method is more accurate on the lab recordings.
 
-### DINO video-notebook baseline
+### DINO notebook mode: attention and progress-binned calibration
 
-For comparison with the successful **video** implementation in `rynnbrain4.ipynb`
-(cell 47), set the existing top-level fields:
+`"dino_score_mode": "notebook"` now uses the newer notebook approach. The former
+exhaustive, unweighted notebook mode has been removed. Existing `"mean"` configs
+are accepted as an alias for the new notebook mode in rosbag building and replay.
+`local` is unchanged. Your actual config is never rewritten.
 
-```json
-"dino_score_mode": "notebook",
-"dino_threshold_scale": 1.0,
-"camera_topics": ["/top_camera/cam_135222070433/color/image_raw/compressed"]
-```
+The matcher shortlists five nominal frames by CLS similarity (within the recorded
+stage when enabled), then selects the lowest attention-weighted corresponding-patch
+RMS distance. There is no nearby-patch substitution in this mode. Features remain
+L2 normalized. Calibration and inference use exactly the same matcher.
 
-Keep the current input resolution, memory name, bag lists and VLM/GMR settings.
-This mode processes all sampled images (normally 2 fps), not eight snapshots.
-For each image it searches **every eligible nominal frame**, computes the RMS
-feature difference at each corresponding patch, averages those patch distances,
-and selects the frame with the lowest mean. Existing recorded-stage filtering
-still applies when enabled. CLS and attention do not select or weight the score;
-attention remains available solely as a diagnostic display. There is no nearby
-patch substitution or local-region maximum in this baseline.
+Nominal calibration scores are grouped into 30 bins of **matched nominal progress**.
+Each populated bin uses its 95th percentile times 1.10. Sparse bins are interpolated
+(with a global percentile fallback), a pooled 20th-percentile floor is applied,
+and a three-bin rolling median smooths the curve. At inference the matched reference
+frame supplies progress; its interpolated threshold is compared to the current score.
+`dino_threshold_scale` multiplies this threshold (1.0 by default). No new settings
+are required. This does not require knowing the test recording's future duration.
 
-The threshold is fixed through the recording: `1.10 * percentile95(calibration
-frame scores)`, matching the video notebook. With `dino_calibration_bags` set,
-those separate successful recordings supply the frame scores. With an empty
-list, calibration holds out each **complete nominal recording** in turn, as in
-the notebook; the remaining nominal recordings supply memory. It never compares
-a calibration frame to its own recording. Leave the existing separate list in
-place for the first comparison. No 18-bag minimum is needed for this empirical
-frame quantile, but it does not guarantee a 5% false-alarm rate on new frames or
-recordings. Larger bags contribute more frames, as in the notebook.
+Separate `dino_calibration_bags` are retained when configured. Otherwise each whole
+nominal recording is held out and scored against the others. This is empirical
+frame calibration, not a guaranteed recording-level false-alarm rate. Whole-image
+averaging can still dilute small-object differences; validate on held-out recordings.
 
-Feature L2 normalization was **not removed**. The earlier four-image notebook
-experiment also divided by nominal standard deviation, but the later video
-implementation did not. This update follows the latter; it adds no Mahalanobis
-distance or covariance fitting. Showing raw distance instead of `epsilon =
-score / threshold` also cannot change the alarm decision. Heatmap min/max
-normalization is visualization only. In the GUI, **Attention weights (not
-differences)** is explicitly labelled; notebook mode initially shows the raw
-patch-difference map used in its mean score.
-
-This restores the video notebook's scoring and threshold formulas, not a
-bit-for-bit replication of its experiments: the current full-frame square
-resize/resolution is retained, whereas the notebook used the image processor's
-default resize/crop. Stage filtering and separate calibration bags are also
-retained if configured. Whole-image averaging can still dilute small-object
-differences; success on the notebook's videos does not establish accuracy on
-the rosbag dataset.
+The old notebook thresholds are incompatible and must be recalibrated once. Saved
+features are reused when their extraction settings match and `rebuild_nominal_cache`
+is false. This avoids repeating DINO inference, but score comparisons still take time.
+Update both memory builder and replay to the same code version. Cache errors now
+print the mismatched fields instead of silently suggesting a full extraction rebuild.
 
 Stop replay and run:
 
