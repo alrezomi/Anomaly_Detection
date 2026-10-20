@@ -78,7 +78,7 @@ class FeatureCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.multiple(runner,
                 OUTPUT_DIRECTORY=Path(folder), NOMINAL_CACHE_DIRECTORY=Path(folder),
                 NOMINAL_VIDEO_PATHS=['memory'], CALIBRATION_VIDEO_PATHS=['calibration'],
-                SCORE_MODE='notebook', SETTINGS_JSON=None, REBUILD_NOMINAL_CACHE=False), \
+                SETTINGS_JSON=None, REBUILD_NOMINAL_CACHE=False), \
                 patch.object(runner, 'check_input_paths'), patch.object(runner, 'print_experiment_summary'), \
                 patch.object(runner, 'plot_adaptive_calibration'), \
                 patch.object(runner, 'DINOv2FeatureExtractor') as model, \

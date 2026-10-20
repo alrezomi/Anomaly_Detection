@@ -87,15 +87,9 @@ def main() -> None:
     if set(calibration_keys) & {str(path.resolve()) for path in nominal_bags}:
         raise ValueError("DINO calibration bags must be separate from nominal_bags memory.")
     run_vision_test.THRESHOLD_SCALE = validate_threshold_scale(configuration.get("dino_threshold_scale", 1.0))
-    run_vision_test.SCORE_MODE = configuration.get('dino_score_mode', 'notebook')
-    if run_vision_test.SCORE_MODE == 'mean':  # Backward-compatible name for attention scoring.
-        run_vision_test.SCORE_MODE = 'notebook'
-    if run_vision_test.SCORE_MODE not in {'mean', 'local', 'notebook'}:
-        raise ValueError("dino_score_mode must be 'mean', 'local', or 'notebook'.")
-    if calibration_bags and len(calibration_bags) < 18 and run_vision_test.SCORE_MODE != 'notebook':
-        raise ValueError("Use at least 18 separate successful DINO calibration bags.")
-    if run_vision_test.SCORE_MODE == 'local' and not calibration_bags:
-        raise ValueError("Local DINO scoring requires separate dino_calibration_bags.")
+    if "dino_score_mode" in configuration:
+        print("dino_score_mode is retired; DINO now always uses attention-weighted "
+              "patch distance and progress-bin calibration. Remove this key from your config.")
     test_bag_value = arguments.test_bag or configuration.get("test_bag")
     camera_topics = arguments.camera_topic or configuration.get("camera_topics", [])
     output_value = (

@@ -74,20 +74,14 @@ def make_heatmap_overlay(
     weighted_patch_scores: np.ndarray,
     grid_size: int,
     alpha: float = 0.45,
-    calibrated: bool = False,
-    region: dict | None = None,
 ) -> np.ndarray:
     """Create an RGB heatmap overlay for one frame."""
     frame_rgb = np.asarray(frame.convert("RGB"))
     height, width = frame_rgb.shape[:2]
 
     heatmap = weighted_patch_scores.reshape(grid_size, grid_size)
-    if calibrated:
-        # Fixed scale: ratio 1 is the decision bound, ratio 2 saturates red.
-        heatmap = np.clip(heatmap / 2., 0., 1.)
-    else:
-        heatmap = heatmap - heatmap.min()
-        heatmap = heatmap / (heatmap.max() + 1e-8)
+    heatmap = heatmap - heatmap.min()
+    heatmap = heatmap / (heatmap.max() + 1e-8)
 
     heatmap_resized = cv2.resize(
         heatmap,
@@ -112,11 +106,6 @@ def make_heatmap_overlay(
         alpha,
         0.0,
     )
-    if region is not None:
-        x, y, size = region['region_x'], region['region_y'], region['region_size']
-        cv2.rectangle(overlay, (int(x * width / grid_size), int(y * height / grid_size)),
-                      (min(width - 1, int((x + size) * width / grid_size)),
-                       min(height - 1, int((y + size) * height / grid_size))), (255, 255, 255), 2)
     return overlay
 
 
@@ -136,22 +125,15 @@ def plot_adaptive_calibration(
         alpha=0.35,
         label="Held-out nominal scores",
     )
-    if 'local_profile' in adaptive_threshold_df.attrs:
-        plt.scatter(calibration_df['matched_progress'],
-                    calibration_df['adaptive_threshold'] * adaptive_threshold_df.attrs.get('threshold_scale', 1.),
-                    s=10, alpha=.35, label='Bound for the selected region')
-        title = 'Local-region nominal calibration (not independent evaluation)'
-    else:
-        plt.plot(
-            adaptive_threshold_df["stage_center"],
-            adaptive_threshold_df["adaptive_threshold"],
-            linewidth=2.5,
-            label="Adaptive threshold",
-        )
+    plt.plot(
+        adaptive_threshold_df["stage_center"],
+        adaptive_threshold_df["adaptive_threshold"],
+        linewidth=2.5,
+        label="Adaptive threshold",
+    )
 
     plt.xlabel("Matched nominal progress / visual stage")
-    plt.ylabel("Selected-region patch distance" if 'local_profile' in adaptive_threshold_df.attrs
-               else "Attention-weighted patch anomaly score")
+    plt.ylabel("Attention-weighted patch anomaly score")
     plt.title(title)
     plt.legend()
     plt.grid(True, alpha=0.35)
@@ -419,16 +401,13 @@ def create_anomaly_heatmap_video(
                 attention_power=attention_power,
                 min_weight=min_weight,
                 required_stage=execution_stage,
-                local_scoring=adaptive_threshold_df is not None and 'local_profile' in adaptive_threshold_df.attrs,
-                notebook_scoring=adaptive_threshold_df is not None and adaptive_threshold_df.attrs.get('score_mode') == 'notebook',
             )
 
             matched_progress = float(best_match["progress"])
             decision = None
             if adaptive_threshold_df is not None:
-                from .local_scoring import score_matched_frame
-                decision = score_matched_frame(score, _patch_scores, matched_progress, adaptive_threshold_df,
-                                               normalized_feature_dimension=test_features.shape[-1])
+                from .threshold import score_matched_frame
+                decision = score_matched_frame(score, matched_progress, adaptive_threshold_df)
                 score, current_threshold = decision['score'], decision['threshold']
                 threshold_mode = "adaptive"
             else:
@@ -440,7 +419,7 @@ def create_anomaly_heatmap_video(
                 alarm = False
             else:
                 epsilon = score / max(float(current_threshold), 1e-8)
-                alarm = bool(epsilon > 1.0)
+                alarm = bool(score > current_threshold)
 
             if visualization_mode == "model":
                 visualization_frame = extractor.resize_frame(frame)
@@ -452,7 +431,6 @@ def create_anomaly_heatmap_video(
                 weighted_patch_scores=weighted_patch_scores,
                 grid_size=grid_size,
                 alpha=alpha,
-                region=decision if decision is not None and decision['heatmap'] is not None else None,
             )
             overlay_bgr = cv2.cvtColor(
                 overlay_rgb,
@@ -495,7 +473,7 @@ def create_anomaly_heatmap_video(
             rows.append(
                 {
                     **({key: value for key, value in decision.items()
-                        if key not in {'score', 'threshold', 'heatmap'}} if decision else {}),
+                        if key not in {'score', 'threshold'}} if decision else {}),
                     "frame_id": frame_id,
                     "timestamp_sec": timestamp_sec,
                     "score": score,

@@ -374,298 +374,88 @@ After changing Python source code pulled from Git, rebuild the shared pipeline
 image once with `docker compose build vision-memory`. Both services then use the
 same updated image. Keep only one top-level `output_dir` entry in the JSON.
 
-### DINO calibration on separate successful recordings
+### One DINO scoring pipeline
 
-The optional top-level `dino_calibration_bags` list enables a sequence-aware
-threshold inspired by [FIDeL, section III-E](https://arxiv.org/html/2604.13788v1#S3.SS5).
-Keep `nominal_bags` as retrieval memory. Calibration bags must be separate
-successful executions, and evaluation bags must be separate from both lists.
-Replay disables memory and calibration bags in the evaluation selector.
-This affects DINO only; LoRA, classifiers and GMR do not need retraining.
+DINO uses one attention-weighted patch-distance score and a progress-bin threshold.
+There is no local/notebook mode selector. Remove `dino_score_mode` from your local
+config; old entries are ignored with a migration notice in build and replay.
+The VLM, LoRA, classifier, GMR and camera selection are unaffected.
 
-The existing CLS shortlist and attention-weighted patch distance are retained.
-Calibration uses that exact same matcher, camera, sampling and stage restriction.
-It does **not** implement the paper's optimal transport or patch-level statistical
-test. It adapts the paper's independent nominal split and maximum-deviation idea
-to the existing scalar frame score, keeping inference cost unchanged.
+For each sampled frame (normally 2 fps):
 
-Whole calibration recordings are partitioned deterministically (seed 42): half
-estimate a mean/standard-deviation curve against matched nominal progress; half
-set the bound from each recording's **largest standardized deviation**. The
-upper order statistic uses `ceil((N + 1) * 0.90)` for N limit recordings, with
-the existing 1.10 margin on its bandwidth. At least 18 calibration bags are
-required. The mean and scale are smoothed before maxima are calculated; the
-final calibrated bound is not smoothed down afterwards. Equal recording weights
-within each progress bin prevent long recordings from dominating the shape.
+1. Resize to `dino_input_size`, apply the model image normalization, and extract
+   patch features, the CLS token and last-layer CLS-to-patch attention averaged
+   across heads. L2-normalize every patch vector and the CLS vector.
+2. Select the five closest nominal frames by CLS cosine distance, restricted to
+   the same recorded stage when `stage_constrained_matching` is true.
+3. Compare corresponding patches using RMS distance: Euclidean distance divided
+   by the square root of the feature dimension. Combine query/reference attention
+   by their maximum, normalize to [0, 1], raise to power 1.5, and apply the existing
+   minimum weight 0.10. Attention is a soft weight, not a scissors/object mask.
+4. Compute `sum(patch_distance * weight) / sum(weight)` for each candidate and
+   retain the lowest-scoring match. Spatial differences remain visible in the
+   heatmaps; they are aggregated into this single frame score.
+5. Interpolate the threshold at the matched nominal frame's progress and alarm
+   when `score > threshold`. The displayed epsilon is score divided by threshold.
 
-The old 90th percentile was over frames, which does not control alarms over an
-entire execution. The new sequence quantile is still **not a promised real-world
-false-alarm rate**: shifted conditions, correlated recordings, longer executions
-or changed sampling can invalidate exchangeability. Evaluate both normal and
-failure bags afterwards, including missed failures and detection delay.
+The progress axis divides nominal execution into 30 bins; it is not elapsed test
+seconds or the test bag's eventual duration. Recorded stages align nominal
+progress when available. This accommodates different execution speeds while
+retaining the existing same-stage restriction. DINO bag-stage alignment is
+retrospective; this replay is not a live ROS subscriber.
 
-For the lab dataset, this one-time command edits your existing config in place
-(no second config). It reserves setting 1 runs 16–30 and setting 2 runs 1–11 for
-calibration, keeping setting 1 runs 31–32 and the additional evaluation runs out.
-Check that both settings are mounted under `/data/Nominal` in Docker.
+### Calibrate and reuse DINO memory
+
+`nominal_bags` supplies retrieval memory. Optional `dino_calibration_bags` supplies
+separate successful recordings, scored by the exact same matcher. Those queries
+never enter retrieval memory. Without that list, calibration holds out one complete
+nominal recording at a time; at least two nominal recordings are then needed.
+The previous local method's minimum of 18 calibration bags no longer applies.
+The supplied 16 calibration recordings can be used by this method.
+
+Each progress bin uses its nominal frame-score 95th percentile times 1.10.
+Bins with fewer than two observations are interpolated from populated bins;
+if all bins are sparse, the global percentile is used. The existing global
+20th-percentile score floor and three-bin median smoothing regularize the curve.
+These are frame percentiles, not a guaranteed whole-execution false-alarm rate.
+Evaluate the result on held-out normal and failure recordings, including delay.
+
+`dino_threshold_scale` is the existing sensitivity control: 1.0 uses calibration,
+0.8 lowers the bound by 20%, and 1.1 raises it by 10%. It changes the decision
+limit only and requires a replay restart, not recalibration. Use 1.0 for an initial
+baseline. A heatmap's colors are stretched per image and do not establish an alarm.
+
+After pulling this update, stop replay and recalibrate once:
 
 ```bash
-python3 - <<'PY'
-import json
-from pathlib import Path
-path = Path('pipeline_config.json')
-config = json.loads(path.read_text())
-config['dino_calibration_bags'] = (
-    [f'/data/Nominal/setting 1/nominal_1.{i}' for i in range(16, 31)]
-    + [f'/data/Nominal/setting 2/nominal_2.{i}' for i in range(1, 12)]
-)
-config['dino_threshold_scale'] = 1.0
-path.write_text(json.dumps(config, indent=2) + '\n')
-PY
+docker compose stop online-replay
 docker compose run --rm --build vision-memory
 docker compose up --build online-replay
 ```
 
-Stop the running replay server before rebuilding calibration. With
-`rebuild_nominal_cache: false`, compatible memory features are reused; only the
-new calibration bags are processed. Each query bag is released before the next
-one, and calibration never adds queries to retrieval memory. The existing
-`calibration.csv` records shape/limit roles, standardized deviations and bound
-crossings; `adaptive_threshold.csv` records the mean, scale, bandwidth and run
-counts. These are calibration diagnostics, not independent evaluation metrics.
-Rerunning an unchanged build reuses the complete cache.
-
-`dino_threshold_scale` is the single sensitivity adjustment: `1.0` uses the
-calibrated curve, `1.1` raises it by 10%. Higher values reduce alarms but can miss
-or delay failures; lower values do the opposite. It multiplies only the decision
-limit, not the distance or heatmap. Restart replay after changing it; no memory
-rebuild is needed. Batch tests, heatmap-video alarms and GUI replay apply the same
-multiplier. Leave it at 1.0 for the first independent evaluation. An empty or
-absent calibration list preserves compatibility with existing caches/legacy
-calibration; the GUI note reports which calibration was actually loaded.
-
-### Reusing DINO features across updates
-
-Keep `rebuild_nominal_cache: false` and the same `vision_memory_name` when
-extraction settings are unchanged. GUI/logging changes need no memory rebuild.
-The build command checks what is compatible; it does not inherently mean
-re-extracting every recording.
+Keep the existing `vision_memory_name`, `dino_input_size`, bag lists and
+`rebuild_nominal_cache: false`. Old local/notebook thresholds are rejected by the
+new protocol signature. Compatible extracted features are reused, including
+per-recording calibration features under `calibration_features`; missing features
+are extracted once. Recalibration does not retrain LoRA or the CoP classifier.
+A fully compatible cache loads without initializing DINO during memory building.
+Test/replay never builds memory or silently uses an incompatible threshold.
 
 | Change | Feature extraction | Score/threshold calibration |
 | --- | --- | --- |
 | GUI, logging, output experiment folder | Reuse | Reuse |
-| `dino_threshold_scale` | Reuse | Reuse; apply multiplier at runtime |
-| Score mode, attention weights, CLS shortlist, matching restriction | Reuse | Recompute for the new score/matcher |
+| `dino_threshold_scale` | Reuse | Reuse; runtime multiplier |
+| Attention weights, CLS shortlist, stage matching restriction | Reuse | Recompute |
 | Threshold-fitting settings | Reuse | Recompute |
-| Model, resolution, camera, source list, sampling, stage-assignment settings | Incompatible features need extraction | Recompute |
+| Model, resolution, camera, sources, sampling, stage assignment | Extract incompatible features | Recompute |
 
-Nominal features now have a signature independent of calibration. Older saved
-memories are recognized through their existing signature; they do not need a
-format-conversion run. Completed extraction survives an interrupted later
-calibration. Replay still refuses an incompatible threshold rather than using
-one fitted to a different score.
-
-Separate calibration recordings are also cached automatically, one recording
-at a time, under the camera memory's `calibration_features` directory. The key
-depends on the source and extraction settings, not the scoring method or its
-position in the calibration list. A calibration recording must be extracted
-once after this capability is introduced; subsequent score-method changes can
-rescore its saved patch/CLS/attention features without running DINO again.
-Unchanged complete caches require no model initialization in `vision-memory`.
-Rescoring, threshold fitting and reading compressed features still take time.
-These generated feature archives use extra disk space; they add no config paths
-or tuning parameters. Calibration recordings remain separate from retrieval
-memory and are still excluded from evaluation.
-
-Changing the memory name points to another directory; it does not search other
-experiments for compatible files. Replacing bag contents in place under the
-same path requires `rebuild_nominal_cache: true`; signatures track configured
-sources/settings, not a content hash of every recording. Force rebuilding also
-refreshes calibration feature archives used by that run.
-
-The attention functions in `rynnbrain5.3.ipynb` use the same max-combined soft
-weights and normalized weighted mean as the current matcher:
-`sum(patch_distance * weight) / sum(weight)`. Its later cells also use a CLS
-shortlist and progress-dependent frame-quantile thresholds. The existing
-`mean` mode is closest to that score, although its separate-bag calibration is
-sequence-based when `dino_calibration_bags` is configured. `local` additionally
-uses nearby-patch matching and region-specific sequence calibration. This cache
-update does not alter either score, remove attention, change thresholds, or
-claim that one method is more accurate on the lab recordings.
-
-### DINO notebook mode: attention and progress-binned calibration
-
-`"dino_score_mode": "notebook"` now uses the newer notebook approach. The former
-exhaustive, unweighted notebook mode has been removed. Existing `"mean"` configs
-are accepted as an alias for the new notebook mode in rosbag building and replay.
-`local` is unchanged. Your actual config is never rewritten.
-
-The matcher shortlists five nominal frames by CLS similarity (within the recorded
-stage when enabled), then selects the lowest attention-weighted corresponding-patch
-RMS distance. There is no nearby-patch substitution in this mode. Features remain
-L2 normalized. Calibration and inference use exactly the same matcher.
-
-Nominal calibration scores are grouped into 30 bins of **matched nominal progress**.
-Each populated bin uses its 95th percentile times 1.10. Sparse bins are interpolated
-(with a global percentile fallback), a pooled 20th-percentile floor is applied,
-and a three-bin rolling median smooths the curve. At inference the matched reference
-frame supplies progress; its interpolated threshold is compared to the current score.
-`dino_threshold_scale` multiplies this threshold (1.0 by default). No new settings
-are required. This does not require knowing the test recording's future duration.
-
-Separate `dino_calibration_bags` are retained when configured. Otherwise each whole
-nominal recording is held out and scored against the others. This is empirical
-frame calibration, not a guaranteed recording-level false-alarm rate. Whole-image
-averaging can still dilute small-object differences; validate on held-out recordings.
-
-The old notebook thresholds are incompatible and must be recalibrated once. Saved
-features are reused when their extraction settings match and `rebuild_nominal_cache`
-is false. This avoids repeating DINO inference, but score comparisons still take time.
-Update both memory builder and replay to the same code version. Cache errors now
-print the mismatched fields instead of silently suggesting a full extraction rebuild.
-
-Stop replay and run:
-
-```bash
-docker compose run --rm --build vision-memory
-docker compose up --build online-replay
-```
-
-The first build recalibrates because the scoring signature changed. Compatible
-extracted memory features are reused with `rebuild_nominal_cache: false`; the
-old threshold cannot silently be used for the new score. This replaces the
-calibration under the same memory name. An unchanged later build reuses it.
-Select **DINO vision** and compare held-out normal and failure recordings.
-Full-memory search can be slower than the five-frame CLS shortlist, especially
-at 896. The GUI now shows memory-comparison time separately from feature time;
-replay keeps all sampled images even if it falls behind wall-clock time.
-
-### DINO local-region scoring for small object mismatches
-
-Set the optional top-level `"dino_score_mode": "local"` to enable local scoring.
-The default `"mean"` retains the previous whole-image attention-weighted score.
-Local mode uses the same DINO model, normalized patch features, CLS shortlist,
-stage restriction and reference-frame selection. No new network is loaded.
-
-Why this change: at input size 728, a frame has 52 x 52 = 2,704 patch tokens.
-A missing or misplaced small object can be diluted by averaging all patch
-differences. DINOv2 supplies spatial patch features, but CLS attention is not a
-task-specific object mask. Its authors document attention/feature artifacts in
-models without registers; increasing attention power does not guarantee emphasis
-on the manipulated object. See the official
-[DINOv2 model card](https://github.com/facebookresearch/dinov2/blob/main/MODEL_CARD.md)
-and [Vision Transformers Need Registers](https://arxiv.org/abs/2309.16588).
-
-After matching a nominal frame, local mode:
-
-1. After selecting the reference frame, searches a 3 x 3 neighbourhood for each
-   patch in both directions. Matching cost includes feature RMS distance and a
-   penalty for displacement in normalized image coordinates. The larger of the
-   forward/reverse nearest costs preserves evidence of missing and extra content.
-   A one-patch shift is tolerated at a nonzero cost; larger displacements cannot
-   use arbitrary distant matches. This is not optical flow or object tracking.
-   The metric cannot guarantee monotonic scores for arbitrary object movement.
-   Soft weights combine current and reference CLS attention with the existing
-   attention power and nonzero weight floor. Reference attention can retain
-   emphasis where an expected object disappeared. No manual region is needed.
-   Attention is a model signal, not a guarantee of task relevance.
-2. Averages each overlapping 3 x 3 patch neighborhood. This limits whole-image
-   dilution and reduces isolated patch artifacts; it is not object segmentation.
-3. Learns a separate nominal mean/scale for every neighborhood versus matched
-   nominal progress. Scale estimates have a pooled floor: the median of the
-   location-wise standard deviations over the shape recordings, with equal
-   recording weights. Larger local scales are retained. This prevents a nearly
-   constant region from producing an enormous standardized residual that
-   inflates the shared multiplier everywhere. The floor uses only shape data;
-   limit and test recordings cannot change it. It is a regularization tradeoff:
-   an unusually quiet region may lose sensitivity to very small differences.
-4. Uses separate limit recordings to calibrate the maximum standardized
-   deviation across **all regions and all sampled times** in each recording.
-   The final region bound is `mean + margin * bandwidth * scale`. This remains
-   a conservative sequence-level limit; missed failures must still be measured.
-5. Selects the region with the largest distance / bound ratio. The graph shows
-   that region's raw distance and its bound, both in the same units. The region
-   can change between frames; the saved row includes its coordinates, the old
-   global score, and the threshold multiplier.
-
-Each DINO camera panel provides three views: **Scored differences (attention)**,
-**All raw differences**, and **Attention weights**. Scored differences use the
-spatial metric and soft weights; raw differences compare the original aligned
-patches without weights or threshold normalization. Colors are stretched per
-image for visibility, not calibrated alarm probabilities. The white rectangle
-marks the region with the greatest score/bound ratio; it is not an object mask.
-Exported `_heatmap.jpg`/batch heatmap videos retain raw differences; replay also
-saves `_scored.jpg` and `_attention.jpg` for inspection. Spatial scoring is used
-identically for nominal calibration, replay, batch CSV and video alarms.
-
-For unit-normalized features of dimension `d`, our patch RMS distance cannot
-exceed `2 / sqrt(d)` (about **0.10206** for DINO-small's 384 dimensions). The
-neighborhood mean has the same ceiling. Build/replay logs now report calibration
-health, and the GUI reports the fraction of regions with unreachable bounds at
-the current matched progress. Bounds are not silently clipped or lowered: that
-would conceal a calibration problem. A high fraction means the nominal matching
-and calibration recordings need inspection, even if all normal runs pass.
-
-An older local calibration could produce a very large common multiplier from
-tiny region variances (one observed profile had bandwidth 54.9 and 95.9% of
-bounds above the distance ceiling). The pooled variance floor addresses this
-instability without changing the reference matcher, adding another network, or
-adding a config setting. It does **not** establish accuracy on real failures.
-
-Keep the current separate `nominal_bags` and `dino_calibration_bags` lists. Using
-the same recording as query and memory permits exact self-matches, leading to
-artificially small distances/thresholds. Using all recordings is possible with
-whole-recording cross-fitting, but that calibrates against a different reference
-set than the final full memory and is not automatically more accurate. Given
-the available independent data, we keep the separate split. More *diverse*
-successful memory runs may help, but they require fresh calibration and must
-not also serve as calibration/evaluation runs. No bag-list changes are made by
-this update.
-
-To use local mode, stop replay, pull the update, and manually set:
-
-```json
-"dino_score_mode": "local",
-"dino_threshold_scale": 1.0
-```
-
-Then run:
-
-```bash
-docker compose run --rm --build vision-memory
-docker compose up --build online-replay
-```
-
-With `rebuild_nominal_cache: false`, compatible memory features are reused.
-After this attention/spatial calibration update, run `vision-memory` once before replay, even if
-you already used local mode. Its method version changed; replay rejects the old
-local profile rather than silently reusing it. Keep your existing config and
-bag lists. Calibration bags must be processed again because the older cache
-does not contain their spatial patch differences. The compact regional profile
-is saved automatically as `local_threshold.npz` beside the existing memory;
-there is no extra config path. Cache signatures prevent mixing mean/local
-thresholds. Returning to mean mode also requires recalibration of that cache.
-`adaptive_threshold.csv` contains the mean regional bound as a **summary only**;
-per-frame CSV/JSON results contain the actual selected-region bound used for
-the alarm. `calibration.csv` retains per-run maxima and selected-region scores;
-it also records the location, distance, mean and scale responsible for each
-maximum standardized deviation. These identify which recording/location inflated
-the limit. Replay JSON and batch CSV include the largest scored region distance,
-its threshold, and the unreachable-bound fraction.
-
-Increasing `dino_input_size` changes spatial sampling, not the pretrained patch
-size (14 pixels). At 728 the grid is 52 x 52 (2,704 patches); at 896 it is
-64 x 64 (4,096 patches). The latter has about 1.51 times as many patches and
-2.29 times as many patch-pair attention entries, not a guaranteed runtime ratio.
-The current extractor requests attention matrices, so GPU memory cost matters.
-A 3 x 3 neighborhood still averages 42 x 42 model-input pixels. Thin objects
-can occupy only part of those patches. Larger inputs may help, but cannot
-recover detail absent from the camera image or repair excessive thresholds.
-For the higher-resolution experiment, manually change `dino_input_size`
-to 896 and give `vision_memory_name` a separate name, then rebuild both memory
-features and calibration. Compare the same held-out normal/failure bags and
-latency at both resolutions. The pooled-floor update requires no resolution
-change by itself. For the requested next experiment use 896, as shown below.
+Keep evaluation bags separate from memory and calibration; replay excludes both.
+`calibration.csv` records scores, matched progress and crossings;
+`adaptive_threshold.csv` records the curve and bin counts. These are calibration
+diagnostics, not independent evaluation results. Changing the memory name selects
+another directory rather than searching for reusable files elsewhere. Replacing
+bag contents under the same path requires `rebuild_nominal_cache: true` because
+feature signatures track sources/settings rather than hashing all bag contents.
 
 ### Independent top and flange DINO replay
 
@@ -686,15 +476,13 @@ For this experiment, manually change these existing top-level entries:
 ],
 "dino_input_size": 896,
 "vision_memory_name": "pick_place_dino896_v1",
-"dino_score_mode": "local",
 "dino_threshold_scale": 0.9
 ```
 
 `0.9` lowers the calibrated bound by 10% for the requested more sensitive test.
-It can increase false alarms and does not retain the unscaled calibration's
-coverage target. Use `1.0` for the unscaled comparison; the existing multiplier
-requires only a replay restart, not recalibration. The spatial metric itself
-requires fresh calibration. Never change scores without recalibrating the same
+It can increase false alarms. Use `1.0` for the unscaled comparison; the existing multiplier
+requires only a replay restart, not recalibration. Changes to the scoring formula
+require fresh calibration. Never change scores without recalibrating the same
 metric on nominal recordings.
 
 **Keep the VLM top-only.** Inside your existing `rynnbrain` object, explicitly set
@@ -719,12 +507,10 @@ timeline PNGs are exported separately for each camera. The browser view selector
 only changes the displayed heatmap, not the score. No user config is overwritten
 by this code update.
 
-This change does not recognize the label "scissors", infer grasp intent, repair
-incorrect stage alignment, or guarantee detection under occlusion. It makes
-localized visual differences available to the decision. Validate it on separate
-successful and failed recordings before drawing accuracy conclusions. Synthetic
-tests check small-region sensitivity, location dependence, normal-motion
-variation, calibration separation, multiplier parity and replay/batch agreement.
+Attention does not identify the target object or guarantee detection under
+occlusion. Validate on separate successful and failed recordings. Regression
+tests check normalization, attention weighting, stage restrictions, progress
+thresholds, cache reuse and calibration/replay/batch/video agreement.
 
 Every rosbag vision run writes two raw videos per camera:
 

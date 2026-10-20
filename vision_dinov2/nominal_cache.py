@@ -75,10 +75,6 @@ def save_nominal_calibration(directory, threshold, calibration, signature):
                                          indent=2, sort_keys=True), encoding='utf-8')
         temporary.replace(feature_marker)
     marker.unlink(missing_ok=True)
-    if 'local_profile' in threshold.attrs:
-        temporary = directory / 'local_threshold.tmp.npz'
-        np.savez_compressed(temporary, **threshold.attrs['local_profile'])
-        temporary.replace(directory / 'local_threshold.npz')
     for name, table in [("adaptive_threshold.csv", threshold), ("calibration.csv", calibration)]:
         temporary = directory / (name + ".tmp")
         table.to_csv(temporary, index=False)
@@ -121,20 +117,9 @@ def load_nominal_cache(
         print('Recalibrate with vision-memory; compatible extracted features can be reused.')
         return None
 
-    profile = None
-    if saved_signature.get('score_mode') == 'local':
-        profile_path = directory / 'local_threshold.npz'
-        if not profile_path.is_file():
-            return None
-        with np.load(profile_path, allow_pickle=False) as arrays:
-            profile = {key: arrays[key] for key in arrays.files}
-
     memory, grid_size = _read_feature_arrays(required[0])
     threshold = pd.read_csv(required[1])
-    if saved_signature.get('score_mode') == 'notebook':
-        threshold.attrs['score_mode'] = 'notebook'
-    if profile is not None:
-        threshold.attrs['local_profile'] = profile
+    threshold.attrs['score_mode'] = saved_signature.get('score_mode', 'mean')
     calibration = pd.read_csv(required[2])
     print(f"Loaded reusable nominal cache: {directory}")
     print(f"Cached nominal frames: {len(memory)}")

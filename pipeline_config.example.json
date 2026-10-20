@@ -13,7 +13,6 @@
   "dino_input_size": 728,
   "dino_calibration_bags": [],
   "dino_threshold_scale": 1.0,
-  "dino_score_mode": "mean",
   "rebuild_nominal_cache": false,
   "stage_topic": "/recording_stage",
   "stage_count": 3,

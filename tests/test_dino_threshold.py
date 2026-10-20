@@ -6,8 +6,8 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from vision_dinov2.threshold import (build_sequence_threshold, scaled_threshold,
-    score_calibration_memory, validate_threshold_scale, SEQUENCE_CALIBRATION_METHOD)
+from vision_dinov2.threshold import (build_attention_threshold, scaled_threshold,
+    score_calibration_memory, validate_threshold_scale, ATTENTION_CALIBRATION_METHOD)
 from vision_dinov2.nominal_cache import (save_nominal_cache, load_nominal_cache,
     save_nominal_calibration, memory_signature)
 
@@ -23,56 +23,28 @@ class DinoThresholdTests(unittest.TestCase):
                 rows.append(dict(held_out_video_id=run, matched_progress=progress, score=score))
         return pd.DataFrame(rows)
 
-    def test_sequence_maxima_cover_short_nominal_transients(self):
-        data = self.scores()
-        threshold, rows = build_sequence_threshold(data)
-        limit = rows[rows.calibration_role == 'limit']
-        self.assertFalse(limit.above_threshold.any())
-        self.assertEqual(set(rows.groupby('held_out_video_id').calibration_role.nunique()), {1})
-        self.assertEqual(threshold.limit_runs.iloc[0], 13)
-        self.assertTrue((threshold.method == SEQUENCE_CALIBRATION_METHOD).all())
-        self.assertGreater(np.ptp(threshold.adaptive_threshold), 0)
-        # The maximum of every limit run is within the selected bandwidth.
-        self.assertGreaterEqual(threshold.bandwidth.iloc[0],
-            limit.groupby('held_out_video_id').standardized_deviation.max().max())
-
-    def test_limit_subset_cannot_change_baseline_shape_and_smoothing_precedes_maxima(self):
-        data = self.scores()
-        original, rows = build_sequence_threshold(data)
-        changed = data.copy()
-        changed.loc[rows.calibration_role == 'limit', 'score'] += .5
-        updated, _ = build_sequence_threshold(changed)
-        np.testing.assert_allclose(original.baseline_mean, updated.baseline_mean)
-        np.testing.assert_allclose(original.baseline_scale, updated.baseline_scale)
-        self.assertGreater(updated.bandwidth.iloc[0], original.bandwidth.iloc[0])
-        self.assertTrue((updated.adaptive_threshold >= original.adaptive_threshold).all())
-
-    def test_long_bag_does_not_dominate_curve(self):
-        data = self.scores()
-        original, rows = build_sequence_threshold(data)
-        shape_id = rows.loc[rows.calibration_role == 'shape', 'held_out_video_id'].iloc[0]
-        repeated = pd.concat([data] + [data[data.held_out_video_id == shape_id]] * 8, ignore_index=True)
-        updated, _ = build_sequence_threshold(repeated)
-        np.testing.assert_allclose(original.adaptive_threshold, updated.adaptive_threshold)
-
     def test_degenerate_scores_are_finite_and_invalid_data_is_rejected(self):
         data = self.scores()
         data['score'] = 0.
         data['matched_progress'] = .5
-        table, _ = build_sequence_threshold(data)
+        table, _ = build_attention_threshold(data)
         self.assertTrue(np.isfinite(table.adaptive_threshold).all())
-        self.assertTrue((table.adaptive_threshold > 0).all())
-        with self.assertRaisesRegex(ValueError, 'Too few'):
-            build_sequence_threshold(self.scores(10))
+        self.assertTrue((table.adaptive_threshold >= 0).all())
+        build_attention_threshold(self.scores(16))  # No sequence-split minimum.
         data.loc[0, 'score'] = np.nan
         with self.assertRaisesRegex(ValueError, 'finite'):
-            build_sequence_threshold(data)
+            build_attention_threshold(data)
         for value in [0, -1, np.nan, np.inf, True]:
             with self.assertRaises(ValueError):
                 validate_threshold_scale(value)
+        for progress in [np.nan, np.inf, -0.1, 1.1]:
+            invalid = self.scores(2)
+            invalid.loc[0, "matched_progress"] = progress
+            with self.assertRaisesRegex(ValueError, "progress"):
+                build_attention_threshold(invalid)
 
     def test_multiplier_changes_limit_only_and_preserves_base_table(self):
-        table, _ = build_sequence_threshold(self.scores())
+        table, _ = build_attention_threshold(self.scores())
         before = table.copy(deep=True)
         scaled = scaled_threshold(table, 1.2)
         np.testing.assert_allclose(scaled.adaptive_threshold, 1.2 * before.adaptive_threshold)
@@ -98,10 +70,10 @@ class DinoThresholdTests(unittest.TestCase):
         self.assertEqual(len(references), 2)
 
     def test_cache_recalibration_preserves_feature_archive_and_rejects_wrong_matcher(self):
-        table, rows = build_sequence_threshold(self.scores())
+        table, rows = build_attention_threshold(self.scores())
         old = dict(sources=[{'bag_path': 'memory'}], top_k_cls=5, dino_input_size=728,
                    threshold_quantile=.90)
-        new = dict(old, calibration_method=SEQUENCE_CALIBRATION_METHOD,
+        new = dict(old, calibration_method=ATTENTION_CALIBRATION_METHOD,
                    calibration_sources=[{'bag_path': 'calibration'}])
         with tempfile.TemporaryDirectory() as directory:
             save_nominal_cache(directory, [self.item()], 2, table, rows, old)
@@ -148,8 +120,8 @@ class DinoThresholdTests(unittest.TestCase):
         from vision_dinov2 import run_vision_test as runner
         from rynnbrain_vlm.replay_detectors import DinoReplayDetector
         topic = '/camera'
-        from vision_dinov2.threshold import build_notebook_threshold, NOTEBOOK_CALIBRATION_METHOD
-        table, rows = build_notebook_threshold(self.scores())
+        from vision_dinov2.threshold import build_attention_threshold, ATTENTION_CALIBRATION_METHOD
+        table, rows = build_attention_threshold(self.scores())
         with tempfile.TemporaryDirectory() as directory:
             memory_path = str(Path(directory) / 'nominal_memory_bag')
             calibration_paths = [str(Path(directory) / f'calibration_{i}') for i in range(26)]
@@ -163,7 +135,7 @@ class DinoThresholdTests(unittest.TestCase):
             with patch('vision_dinov2.dinov2_features.DINOv2FeatureExtractor'):
                 detector = DinoReplayDetector(config, lambda message: None)
                 self.assertEqual(detector.threshold_scale, 1.2)
-                self.assertEqual(detector.signature['calibration_method'], NOTEBOOK_CALIBRATION_METHOD)
+                self.assertEqual(detector.signature['calibration_method'], ATTENTION_CALIBRATION_METHOD)
                 self.assertEqual(len(detector.excluded), 27)
                 pd.testing.assert_frame_equal(detector.thresholds, table, check_exact=False)
                 with self.assertRaisesRegex(ValueError, 'calibration'):

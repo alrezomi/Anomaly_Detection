@@ -288,8 +288,6 @@ def compare_frame_to_nominal_memory(
     attention_power: float = 1.5,
     min_weight: float = 0.15,
     required_stage: int | None = None,
-    local_scoring: bool = False,
-    notebook_scoring: bool = False,
 ) -> tuple[
     float,
     np.ndarray,
@@ -303,11 +301,6 @@ def compare_frame_to_nominal_memory(
 
     First, CLS tokens select the globally closest nominal frames.
     Second, attention-weighted patch differences select the best local match.
-    In local mode the second returned array contains spatial/attention scores;
-    the third contains raw same-position differences for the diagnostic heatmap.
-    Frame selection itself is unchanged.
-    Notebook mode uses this attention-weighted matcher with progress-binned
-    calibration; it never performs exhaustive patch search.
     """
     candidate_memory = nominal_memory
     if required_stage is not None:
@@ -319,8 +312,6 @@ def compare_frame_to_nominal_memory(
             raise ValueError(
                 f"Nominal memory has no frames assigned to stage {required_stage}."
             )
-    if notebook_scoring and local_scoring:
-        raise ValueError('Notebook and local scoring cannot be combined.')
     selected_memory, cls_distances = select_top_k_nominal_by_cls(
         test_cls=test_cls,
         nominal_memory=candidate_memory,
@@ -363,12 +354,6 @@ def compare_frame_to_nominal_memory(
 
     if best_result is None:
         raise RuntimeError("No nominal comparison was completed.")
-    if local_scoring:
-        from .spatial_scoring import spatial_attention_distances
-        score, raw, _weighted, weights, best, distance = best_result
-        local = spatial_attention_distances(test_features, best['features'], test_attention,
-            best['attention'], attention_power=attention_power, min_weight=min_weight)
-        return score, local, raw, weights, best, distance
     return best_result
 
 
@@ -465,19 +450,16 @@ def run_video_test(
             attention_power=attention_power,
             min_weight=min_weight,
             required_stage=execution_stage,
-            local_scoring=adaptive_threshold_df is not None and 'local_profile' in adaptive_threshold_df.attrs,
-            notebook_scoring=adaptive_threshold_df is not None and adaptive_threshold_df.attrs.get('score_mode') == 'notebook',
         )
 
         matched_progress = float(best_match["progress"])
-        local_details = {}
+        decision_details = {}
         if adaptive_threshold_df is not None:
-            from .local_scoring import score_matched_frame
-            decision = score_matched_frame(score, _patch_scores, matched_progress, adaptive_threshold_df,
-                                           normalized_feature_dimension=test_features.shape[-1])
+            from .threshold import score_matched_frame
+            decision = score_matched_frame(score, matched_progress, adaptive_threshold_df)
             score, current_threshold = decision['score'], decision['threshold']
-            local_details = {key: value for key, value in decision.items()
-                             if key not in {'score', 'threshold', 'heatmap'}}
+            decision_details = {key: value for key, value in decision.items()
+                             if key not in {'score', 'threshold'}}
             threshold_mode = "adaptive"
         else:
             current_threshold = fixed_threshold
@@ -488,10 +470,10 @@ def run_video_test(
             alarm = False
         else:
             epsilon = score / max(float(current_threshold), 1e-8)
-            alarm = bool(epsilon > 1.0)
+            alarm = bool(score > current_threshold)
 
         row = {
-            **local_details,
+            **decision_details,
             "frame_id": frame_id,
             "timestamp_sec": timestamp_sec,
             "score": score,
