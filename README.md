@@ -444,6 +444,69 @@ multiplier. Leave it at 1.0 for the first independent evaluation. An empty or
 absent calibration list preserves compatibility with existing caches/legacy
 calibration; the GUI note reports which calibration was actually loaded.
 
+### DINO video-notebook baseline
+
+For comparison with the successful **video** implementation in `rynnbrain4.ipynb`
+(cell 47), set the existing top-level fields:
+
+```json
+"dino_score_mode": "notebook",
+"dino_threshold_scale": 1.0,
+"camera_topics": ["/top_camera/cam_135222070433/color/image_raw/compressed"]
+```
+
+Keep the current input resolution, memory name, bag lists and VLM/GMR settings.
+This mode processes all sampled images (normally 2 fps), not eight snapshots.
+For each image it searches **every eligible nominal frame**, computes the RMS
+feature difference at each corresponding patch, averages those patch distances,
+and selects the frame with the lowest mean. Existing recorded-stage filtering
+still applies when enabled. CLS and attention do not select or weight the score;
+attention remains available solely as a diagnostic display. There is no nearby
+patch substitution or local-region maximum in this baseline.
+
+The threshold is fixed through the recording: `1.10 * percentile95(calibration
+frame scores)`, matching the video notebook. With `dino_calibration_bags` set,
+those separate successful recordings supply the frame scores. With an empty
+list, calibration holds out each **complete nominal recording** in turn, as in
+the notebook; the remaining nominal recordings supply memory. It never compares
+a calibration frame to its own recording. Leave the existing separate list in
+place for the first comparison. No 18-bag minimum is needed for this empirical
+frame quantile, but it does not guarantee a 5% false-alarm rate on new frames or
+recordings. Larger bags contribute more frames, as in the notebook.
+
+Feature L2 normalization was **not removed**. The earlier four-image notebook
+experiment also divided by nominal standard deviation, but the later video
+implementation did not. This update follows the latter; it adds no Mahalanobis
+distance or covariance fitting. Showing raw distance instead of `epsilon =
+score / threshold` also cannot change the alarm decision. Heatmap min/max
+normalization is visualization only. In the GUI, **Attention weights (not
+differences)** is explicitly labelled; notebook mode initially shows the raw
+patch-difference map used in its mean score.
+
+This restores the video notebook's scoring and threshold formulas, not a
+bit-for-bit replication of its experiments: the current full-frame square
+resize/resolution is retained, whereas the notebook used the image processor's
+default resize/crop. Stage filtering and separate calibration bags are also
+retained if configured. Whole-image averaging can still dilute small-object
+differences; success on the notebook's videos does not establish accuracy on
+the rosbag dataset.
+
+Stop replay and run:
+
+```bash
+docker compose run --rm --build vision-memory
+docker compose up --build online-replay
+```
+
+The first build recalibrates because the scoring signature changed. Compatible
+extracted memory features are reused with `rebuild_nominal_cache: false`; the
+old threshold cannot silently be used for the new score. This replaces the
+calibration under the same memory name. An unchanged later build reuses it.
+Select **DINO vision** and compare held-out normal and failure recordings.
+Full-memory search can be slower than the five-frame CLS shortlist, especially
+at 896. The GUI now shows memory-comparison time separately from feature time;
+replay keeps all sampled images even if it falls behind wall-clock time.
+
 ### DINO local-region scoring for small object mismatches
 
 Set the optional top-level `"dino_score_mode": "local"` to enable local scoring.

@@ -86,12 +86,12 @@ def main() -> None:
         raise ValueError("dino_calibration_bags contains duplicate bags.")
     if set(calibration_keys) & {str(path.resolve()) for path in nominal_bags}:
         raise ValueError("DINO calibration bags must be separate from nominal_bags memory.")
-    if calibration_bags and len(calibration_bags) < 18:
-        raise ValueError("Use at least 18 separate successful DINO calibration bags.")
     run_vision_test.THRESHOLD_SCALE = validate_threshold_scale(configuration.get("dino_threshold_scale", 1.0))
     run_vision_test.SCORE_MODE = configuration.get('dino_score_mode', 'mean')
-    if run_vision_test.SCORE_MODE not in {'mean', 'local'}:
-        raise ValueError("dino_score_mode must be 'mean' or 'local'.")
+    if run_vision_test.SCORE_MODE not in {'mean', 'local', 'notebook'}:
+        raise ValueError("dino_score_mode must be 'mean', 'local', or 'notebook'.")
+    if calibration_bags and len(calibration_bags) < 18 and run_vision_test.SCORE_MODE != 'notebook':
+        raise ValueError("Use at least 18 separate successful DINO calibration bags.")
     if run_vision_test.SCORE_MODE == 'local' and not calibration_bags:
         raise ValueError("Local DINO scoring requires separate dino_calibration_bags.")
     test_bag_value = arguments.test_bag or configuration.get("test_bag")

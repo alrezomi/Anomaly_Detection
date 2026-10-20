@@ -420,6 +420,7 @@ def create_anomaly_heatmap_video(
                 min_weight=min_weight,
                 required_stage=execution_stage,
                 local_scoring=adaptive_threshold_df is not None and 'local_profile' in adaptive_threshold_df.attrs,
+                notebook_scoring=adaptive_threshold_df is not None and adaptive_threshold_df.attrs.get('score_mode') == 'notebook',
             )
 
             matched_progress = float(best_match["progress"])

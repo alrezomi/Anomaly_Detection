@@ -19,7 +19,7 @@ def score_matched_frame(global_score, patch_scores, progress, threshold_table, t
     if profile is None:
         base = threshold_for_progress(progress, threshold_table)
         return dict(score=float(global_score), threshold=base * threshold_scale,
-                    base_threshold=base, heatmap=None, score_mode='mean')
+                    base_threshold=base, heatmap=None, score_mode=threshold_table.attrs.get('score_mode', 'mean'))
     decision = local_decision(patch_scores, progress, profile,
         threshold_scale * threshold_table.attrs.get('threshold_scale', 1.0),
         normalized_feature_dimension=normalized_feature_dimension)
