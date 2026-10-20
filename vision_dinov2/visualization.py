@@ -74,14 +74,18 @@ def make_heatmap_overlay(
     weighted_patch_scores: np.ndarray,
     grid_size: int,
     alpha: float = 0.45,
+    scale_max: float | None = None,
 ) -> np.ndarray:
     """Create an RGB heatmap overlay for one frame."""
     frame_rgb = np.asarray(frame.convert("RGB"))
     height, width = frame_rgb.shape[:2]
 
     heatmap = weighted_patch_scores.reshape(grid_size, grid_size)
-    heatmap = heatmap - heatmap.min()
-    heatmap = heatmap / (heatmap.max() + 1e-8)
+    if scale_max is None:
+        heatmap = heatmap - heatmap.min()
+        heatmap = heatmap / (heatmap.max() + 1e-8)
+    else:
+        heatmap = np.clip(heatmap / max(float(scale_max), 1e-8), 0., 1.)
 
     heatmap_resized = cv2.resize(
         heatmap,
@@ -133,7 +137,7 @@ def plot_adaptive_calibration(
     )
 
     plt.xlabel("Matched nominal progress / visual stage")
-    plt.ylabel("Attention-weighted patch anomaly score")
+    plt.ylabel("Nominal-adjusted patch anomaly score")
     plt.title(title)
     plt.legend()
     plt.grid(True, alpha=0.35)
@@ -407,8 +411,11 @@ def create_anomaly_heatmap_video(
             decision = None
             if adaptive_threshold_df is not None:
                 from .threshold import score_matched_frame
-                decision = score_matched_frame(score, matched_progress, adaptive_threshold_df)
+                decision = score_matched_frame(score, matched_progress, adaptive_threshold_df,
+                                               patches=_patch_scores, attention_weights=_weights)
                 score, current_threshold = decision['score'], decision['threshold']
+                if decision["heatmap"] is not None:
+                    weighted_patch_scores = decision["heatmap"]
                 threshold_mode = "adaptive"
             else:
                 current_threshold = fixed_threshold
@@ -431,6 +438,8 @@ def create_anomaly_heatmap_video(
                 weighted_patch_scores=weighted_patch_scores,
                 grid_size=grid_size,
                 alpha=alpha,
+                scale_max=(2 * current_threshold
+                           if decision is not None and decision["heatmap"] is not None else None),
             )
             overlay_bgr = cv2.cvtColor(
                 overlay_rgb,
@@ -473,7 +482,7 @@ def create_anomaly_heatmap_video(
             rows.append(
                 {
                     **({key: value for key, value in decision.items()
-                        if key not in {'score', 'threshold'}} if decision else {}),
+                        if key not in {'score', 'threshold', 'heatmap'}} if decision else {}),
                     "frame_id": frame_id,
                     "timestamp_sec": timestamp_sec,
                     "score": score,

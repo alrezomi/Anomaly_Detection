@@ -376,7 +376,7 @@ same updated image. Keep only one top-level `output_dir` entry in the JSON.
 
 ### One DINO scoring pipeline
 
-DINO uses one attention-weighted patch-distance score and a progress-bin threshold.
+DINO uses one nominal-adjusted patch score and a progress-bin threshold.
 There is no local/notebook mode selector. Remove `dino_score_mode` from your local
 config; old entries are ignored with a migration notice in build and replay.
 The VLM, LoRA, classifier, GMR and camera selection are unaffected.
@@ -393,9 +393,15 @@ For each sampled frame (normally 2 fps):
    by their maximum, normalize to [0, 1], raise to power 1.5, and apply the existing
    minimum weight 0.10. Attention is a soft weight, not a scissors/object mask.
 4. Compute `sum(patch_distance * weight) / sum(weight)` for each candidate and
-   retain the lowest-scoring match. Spatial differences remain visible in the
-   heatmaps; they are aggregated into this single frame score.
-5. Interpolate the threshold at the matched nominal frame's progress and alarm
+   retain the lowest-scoring match. Retrieval is unchanged.
+5. At the matched progress, subtract each patch's expected nominal distance and
+   divide positive excess by its regularized nominal standard deviation:
+   `evidence = max(distance - mean, 0) / scale`. Apply softened attention
+   `0.5 + 0.5 * weight`, so low-attention objects can still contribute.
+6. Average evidence over 3x3 patch neighborhoods, then average the largest 1% of
+   neighborhood responses. This retains small coherent changes without a
+   whole-image average or a single-patch maximum. The score is now dimensionless.
+7. Interpolate the threshold at the matched nominal frame's progress and alarm
    when `score > threshold`. The displayed epsilon is score divided by threshold.
 
 The progress axis divides nominal execution into 30 bins; it is not elapsed test
@@ -404,26 +410,58 @@ progress when available. This accommodates different execution speeds while
 retaining the existing same-stage restriction. DINO bag-stage alignment is
 retrospective; this replay is not a live ROS subscriber.
 
+The variability profile is learned from `nominal_bags` only. Each training frame
+is matched to other complete recordings, using the runtime CLS/attention matcher.
+This measures normal *matched residuals*, not unaligned feature variance. Moments
+are combined with equal recording weights in each of the existing 30 bins.
+Sparse bins shrink toward global per-location moments with three recording
+equivalents of regularization. The scale is `sqrt(variance + floor**2)`; the floor
+is the larger of the median patch standard deviation, the median nonzero mean
+residual, and `1e-6`. Thus nearly constant patches cannot get unbounded weights
+from a tiny estimated variance. No region is permanently masked.
+
+This adaptation is informed by [PaDiM's location-specific normal statistics](https://arxiv.org/abs/2011.08785)
+and [PatchCore's localized anomaly scoring](https://arxiv.org/abs/2106.08265);
+it is not a reproduction of either algorithm or full-covariance Mahalanobis
+distance. [DINOv2](https://arxiv.org/abs/2304.07193) provides general visual
+features, not task-specific scissors segmentation. [The registers paper](https://arxiv.org/abs/2309.16588)
+documents feature/attention artifacts, but its DINOv2 size comparison finds the
+high-norm outliers in the large models, not Small. It does not establish that
+those outliers caused this experiment's arm hotspots. Keeping the existing Small
+extractor preserves reusable features. This method can still miss changes in highly variable or occluded
+regions, or alarm under unseen lighting/camera shifts. Lab accuracy remains to
+be measured on independent runs.
+
 ### Calibrate and reuse DINO memory
 
 `nominal_bags` supplies retrieval memory. Optional `dino_calibration_bags` supplies
 separate successful recordings, scored by the exact same matcher. Those queries
-never enter retrieval memory. Without that list, calibration holds out one complete
-nominal recording at a time; at least two nominal recordings are then needed.
+never enter retrieval memory or the patch variability profile. At least two
+nominal memory recordings are required. Without a separate calibration list,
+at least three nominal recordings are needed: each outer held-out recording is
+excluded from both retrieval and variability fitting, then the final profile is
+fit on all memory recordings. Separate calibration is preferable and avoids the
+extra fitting cost and reference-size difference of this fallback.
 The previous local method's minimum of 18 calibration bags no longer applies.
 The supplied 16 calibration recordings can be used by this method.
 
-Each progress bin uses its nominal frame-score 95th percentile times 1.10.
-Bins with fewer than two observations are interpolated from populated bins;
-if all bins are sparse, the global percentile is used. The existing global
-20th-percentile score floor and three-bin median smoothing regularize the curve.
-These are frame percentiles, not a guaranteed whole-execution false-alarm rate.
+Within each progress bin, compute a 95th percentile for each recording, then
+the 95th percentile across those values times 1.10. Every recording has equal
+weight. Bins without two recordings/two frames interpolate populated bins; if all
+bins are sparse, the same two-level quantile is computed globally. The floor is
+the median of recording-level 20th-percentile frame scores. Three-bin median
+smoothing can raise low bounds but never lowers a valid nominal peak.
+These are empirical frame/run quantiles, not a conformal or guaranteed
+whole-execution false-alarm rate.
 Evaluate the result on held-out normal and failure recordings, including delay.
 
 `dino_threshold_scale` is the existing sensitivity control: 1.0 uses calibration,
 0.8 lowers the bound by 20%, and 1.1 raises it by 10%. It changes the decision
 limit only and requires a replay restart, not recalibration. Use 1.0 for an initial
-baseline. A heatmap's colors are stretched per image and do not establish an alarm.
+baseline. The scored heatmap now shows the same pooled evidence used for the
+score, with color maximum equal to twice the current threshold. Raw-difference
+and attention views still stretch their colors per image. Colors are not
+probabilities, and the final decision uses the aggregated score.
 
 After pulling this update, stop replay and recalibrate once:
 
@@ -434,8 +472,9 @@ docker compose up --build online-replay
 ```
 
 Keep the existing `vision_memory_name`, `dino_input_size`, bag lists and
-`rebuild_nominal_cache: false`. Old local/notebook thresholds are rejected by the
-new protocol signature. Compatible extracted features are reused, including
+`rebuild_nominal_cache: false`. Previous thresholds, including the former unified
+whole-image score, are rejected by the new protocol signature. Compatible
+extracted features are reused, including
 per-recording calibration features under `calibration_features`; missing features
 are extracted once. Recalibration does not retrain LoRA or the CoP classifier.
 A fully compatible cache loads without initializing DINO during memory building.
@@ -452,7 +491,11 @@ Test/replay never builds memory or silently uses an incompatible threshold.
 Keep evaluation bags separate from memory and calibration; replay excludes both.
 `calibration.csv` records scores, matched progress and crossings;
 `adaptive_threshold.csv` records the curve and bin counts. These are calibration
-diagnostics, not independent evaluation results. Changing the memory name selects
+diagnostics, not independent evaluation results. `patch_normality.npz` stores the
+learned means/scales; `patch_reliability.png` shows their relative reliability
+for every progress bin, using one fixed color scale. Missing/incompatible profiles
+cannot silently fall back to the old score. `raw_global_score` in result rows
+retains the former whole-image distance for diagnosis. Changing the memory name selects
 another directory rather than searching for reusable files elsewhere. Replacing
 bag contents under the same path requires `rebuild_nominal_cache: true` because
 feature signatures track sources/settings rather than hashing all bag contents.

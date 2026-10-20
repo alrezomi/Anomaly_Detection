@@ -8,14 +8,14 @@ import pandas as pd
 from .anomaly_detection import compare_frame_to_nominal_memory
 
 
-ATTENTION_CALIBRATION_METHOD = "attention_progress_quantile_v1"
+ATTENTION_CALIBRATION_METHOD = "matched_patch_normality_progress_v2"
 THRESHOLD_QUANTILE = 0.95
 THRESHOLD_MARGIN = 1.10
 
 
 def build_attention_threshold(calibration_df, n_bins=30, min_points_per_bin=2,
                              smooth_window=3, threshold_floor_quantile=.20):
-    """Attention-weighted held-out frame percentiles at matched nominal progress."""
+    """Equal-recording progress bounds for the final, normality-adjusted score."""
     rows = calibration_df.copy()
     if rows.empty or not {'score', 'held_out_video_id', 'matched_progress'}.issubset(rows):
         raise ValueError('DINO attention calibration requires held-out scores, run IDs and matched_progress.')
@@ -30,26 +30,36 @@ def build_attention_threshold(calibration_df, n_bins=30, min_points_per_bin=2,
     rows['adaptive_threshold'] = np.interp(rows.matched_progress,
         table.stage_center, table.adaptive_threshold)
     rows['above_threshold'] = scores > rows.adaptive_threshold
-    rows['calibration_role'] = 'progress_frame_quantile'
+    rows['calibration_role'] = 'independent_progress_calibration'
     print(f'DINO attention calibration: {len(rows)} frames, {n_bins} progress bins, '
-          f'{THRESHOLD_QUANTILE:g} quantile x {THRESHOLD_MARGIN:g}, with interpolation, floor and smoothing.')
+          f'per-recording {THRESHOLD_QUANTILE:g} quantiles, then {THRESHOLD_QUANTILE:g} across runs x '
+          f'{THRESHOLD_MARGIN:g}; smoothing never lowers populated-bin bounds.')
     return table, rows
 
 
 def calibrate_attention_leave_one_video_out(nominal_memory, stage_constrained_matching=False,
         top_k_cls=5, attention_power=1.5, min_weight=.10, **threshold_settings):
+    from .patch_normality import fit_patch_profile
     ids = sorted({item['video_id'] for item in nominal_memory})
-    if len(ids) < 2:
-        raise ValueError('DINO attention leave-one-recording-out calibration needs at least two nominal bags.')
+    if len(ids) < 3:
+        raise ValueError('Without separate calibration bags, patch normality needs at least three nominal bags.')
+    matcher = dict(stage_constrained_matching=stage_constrained_matching,
+                   top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight)
     rows = []
     for run_id in ids:
         print(f'DINO attention calibration: holding out complete nominal run {run_id}', flush=True)
         queries = [item for item in nominal_memory if item['video_id'] == run_id]
         references = [item for item in nominal_memory if item['video_id'] != run_id]
+        # The held-out execution must not influence either the matcher memory
+        # or the variability model used to score its calibration frames.
+        profile = fit_patch_profile(references, n_bins=threshold_settings.get("n_bins", 30), **matcher)
         rows.extend(score_calibration_memory(queries, references, run_id,
-                    stage_constrained_matching=stage_constrained_matching,
-                    top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight))
-    return build_attention_threshold(pd.DataFrame(rows), **threshold_settings)
+                    patch_profile=profile, **matcher))
+    table, rows = build_attention_threshold(pd.DataFrame(rows), **threshold_settings)
+    table.attrs["patch_profile"] = fit_patch_profile(nominal_memory,
+        n_bins=threshold_settings.get("n_bins", 30), **matcher)
+    rows["calibration_role"] = "cross_fitted_progress_calibration"
+    return table, rows
 
 
 def validate_threshold_scale(value) -> float:
@@ -71,36 +81,48 @@ def scaled_threshold(table: pd.DataFrame, scale: float) -> pd.DataFrame:
     return result
 
 
-def score_matched_frame(score, progress, threshold_table, threshold_scale=1.0):
+def score_matched_frame(score, progress, threshold_table, threshold_scale=1.0,
+                        *, patches=None, attention_weights=None):
     """Apply the same decision rule in replay, batch CSVs and exported videos.
 
     A batch table may already be scaled; replay passes its multiplier directly.
     The saved unscaled bound remains available in both cases.
     """
     from .anomaly_detection import threshold_for_progress
+    raw_score = float(score)
+    heatmap = None
+    if "patch_profile" in threshold_table.attrs:
+        from .patch_normality import patch_evidence
+        score, heatmap = patch_evidence(patches, attention_weights, progress, threshold_table.attrs["patch_profile"])
     scale = validate_threshold_scale(threshold_scale)
     bound = threshold_for_progress(progress, threshold_table)
     base = (float(np.interp(progress, threshold_table.stage_center,
                             threshold_table.base_threshold))
             if "base_threshold" in threshold_table else bound)
     return dict(score=float(score), threshold=bound * scale,
-                base_threshold=base, score_mode="attention")
+                base_threshold=base, score_mode="attention", raw_global_score=raw_score,
+                heatmap=heatmap)
 
 
 def score_calibration_memory(query_memory, reference_memory, run_id, *, top_k_cls=5,
-                             attention_power=1.5, min_weight=.10, stage_constrained_matching=False):
+                             attention_power=1.5, min_weight=.10, stage_constrained_matching=False,
+                             patch_profile=None):
     """Score a separate successful recording using exactly the runtime matcher."""
     rows = []
     for query in query_memory:
-        score, _, _, _, match, distance = compare_frame_to_nominal_memory(
+        score, patches, _, weights, match, distance = compare_frame_to_nominal_memory(
             query["features"], query["attention"], query["cls"], reference_memory,
             top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight,
             required_stage=int(query["stage"]) if stage_constrained_matching else None)
+        raw_score = float(score)
+        if patch_profile is not None:
+            from .patch_normality import patch_evidence
+            score, _ = patch_evidence(patches, weights, float(match["progress"]), patch_profile)
         rows.append(dict(held_out_video_id=run_id, query_frame_id=int(query["frame_id"]),
             query_bag=str(getattr(query.get('source'), 'bag_path', query.get('video_path', ''))),
             query_progress=float(query["progress"]), matched_progress=float(match["progress"]),
             matched_video_id=int(match["video_id"]), matched_frame_id=int(match["frame_id"]),
-            matched_timestamp_sec=float(match["timestamp_sec"]), score=float(score),
+            matched_timestamp_sec=float(match["timestamp_sec"]), score=float(score), raw_global_score=raw_score,
             cls_distance=float(distance), query_stage=int(query.get("stage", -1)),
             matched_stage=int(match.get("stage", -1))))
     return rows
@@ -149,16 +171,22 @@ def build_adaptive_visual_threshold_from_scores(
     bins = np.linspace(0.0, 1.0, n_bins + 1)
     centers = 0.5 * (bins[:-1] + bins[1:])
 
-    global_threshold = float(np.quantile(scores, quantile) * margin)
+    # Group quantiles prevent a long bag from dominating the distribution.
+    grouped = "held_out_video_id" in calibration_df
+    global_scores = (calibration_df.groupby("held_out_video_id").score.quantile(quantile).to_numpy()
+                     if grouped else scores)
+    global_threshold = float(np.quantile(global_scores, quantile) * margin)
 
     threshold_floor = (
-        float(np.quantile(scores, threshold_floor_quantile))
+        (float(calibration_df.groupby("held_out_video_id").score.quantile(threshold_floor_quantile).median())
+         if grouped else float(np.quantile(scores, threshold_floor_quantile)))
         if threshold_floor_quantile is not None
         else 0.0
     )
 
     threshold_values: list[float] = []
     counts: list[int] = []
+    run_counts: list[int] = []
 
     for bin_index in range(n_bins):
         left = bins[bin_index]
@@ -175,10 +203,13 @@ def build_adaptive_visual_threshold_from_scores(
                 & (calibration_df["matched_progress"] < right)
             )
 
-        bin_scores = calibration_df.loc[mask, "score"].to_numpy()
-        counts.append(len(bin_scores))
+        bin_rows = calibration_df.loc[mask]
+        bin_scores = (bin_rows.groupby("held_out_video_id").score.quantile(quantile).to_numpy()
+                      if grouped else bin_rows.score.to_numpy())
+        counts.append(len(bin_rows))
+        run_counts.append(len(bin_scores))
 
-        if len(bin_scores) >= min_points_per_bin:
+        if len(bin_rows) >= min_points_per_bin and len(bin_scores) >= (2 if grouped else 1):
             bin_threshold = float(
                 np.quantile(bin_scores, quantile) * margin
             )
@@ -192,6 +223,7 @@ def build_adaptive_visual_threshold_from_scores(
             "stage_center": centers,
             "adaptive_threshold": threshold_values,
             "count": counts,
+            "run_count": run_counts,
         }
     )
 
@@ -209,7 +241,7 @@ def build_adaptive_visual_threshold_from_scores(
     )
 
     if smooth_window is not None and smooth_window > 1:
-        threshold_df["adaptive_threshold"] = (
+        smoothed = (
             threshold_df["adaptive_threshold"]
             .rolling(
                 window=smooth_window,
@@ -218,5 +250,7 @@ def build_adaptive_visual_threshold_from_scores(
             )
             .median()
         )
+        # A median filter previously lowered narrow, valid nominal peaks.
+        threshold_df["adaptive_threshold"] = np.maximum(threshold_df.adaptive_threshold, smoothed)
 
     return threshold_df

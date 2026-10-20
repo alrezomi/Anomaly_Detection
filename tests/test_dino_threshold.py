@@ -10,6 +10,7 @@ from vision_dinov2.threshold import (build_attention_threshold, scaled_threshold
     score_calibration_memory, validate_threshold_scale, ATTENTION_CALIBRATION_METHOD)
 from vision_dinov2.nominal_cache import (save_nominal_cache, load_nominal_cache,
     save_nominal_calibration, memory_signature)
+from vision_dinov2.patch_normality import fit_patch_profile
 
 
 class DinoThresholdTests(unittest.TestCase):
@@ -71,6 +72,7 @@ class DinoThresholdTests(unittest.TestCase):
 
     def test_cache_recalibration_preserves_feature_archive_and_rejects_wrong_matcher(self):
         table, rows = build_attention_threshold(self.scores())
+        table.attrs["patch_profile"] = fit_patch_profile([self.item(), dict(self.item(.1), video_id=1)])
         old = dict(sources=[{'bag_path': 'memory'}], top_k_cls=5, dino_input_size=728,
                    threshold_quantile=.90)
         new = dict(old, calibration_method=ATTENTION_CALIBRATION_METHOD,
@@ -88,7 +90,7 @@ class DinoThresholdTests(unittest.TestCase):
 
     def test_build_reuses_memory_and_never_adds_calibration_queries(self):
         from vision_dinov2 import run_vision_test as runner
-        memory = [self.item()]
+        memory = [self.item(), dict(self.item(.1), video_id=1)]
         old_table = pd.DataFrame(dict(stage_center=[.5], adaptive_threshold=[.1]))
         calibration_paths = [f'calibration_{i}' for i in range(26)]
         source_rows = self.scores()
@@ -107,7 +109,7 @@ class DinoThresholdTests(unittest.TestCase):
                 patch.object(runner, 'score_calibration_memory', side_effect=score), \
                 patch.object(runner, 'save_nominal_cache') as save_memory, \
                 patch.object(runner, 'save_nominal_calibration') as save_calibration, \
-                patch.object(runner, 'plot_adaptive_calibration'):
+                patch('vision_dinov2.patch_normality.plot_patch_reliability'), patch.object(runner, 'plot_adaptive_calibration'):
             runner.main('build-memory')
             self.assertEqual(extract.call_count, 26)
             self.assertEqual([call.kwargs['nominal_video_paths'] if 'nominal_video_paths' in call.kwargs
@@ -122,6 +124,7 @@ class DinoThresholdTests(unittest.TestCase):
         topic = '/camera'
         from vision_dinov2.threshold import build_attention_threshold, ATTENTION_CALIBRATION_METHOD
         table, rows = build_attention_threshold(self.scores())
+        table.attrs["patch_profile"] = fit_patch_profile([self.item(), dict(self.item(.1), video_id=1)])
         with tempfile.TemporaryDirectory() as directory:
             memory_path = str(Path(directory) / 'nominal_memory_bag')
             calibration_paths = [str(Path(directory) / f'calibration_{i}') for i in range(26)]
@@ -137,7 +140,9 @@ class DinoThresholdTests(unittest.TestCase):
                 self.assertEqual(detector.threshold_scale, 1.2)
                 self.assertEqual(detector.signature['calibration_method'], ATTENTION_CALIBRATION_METHOD)
                 self.assertEqual(len(detector.excluded), 27)
-                pd.testing.assert_frame_equal(detector.thresholds, table, check_exact=False)
+                np.testing.assert_allclose(detector.thresholds.adaptive_threshold, table.adaptive_threshold)
+                np.testing.assert_allclose(detector.thresholds.attrs["patch_profile"]["scale"],
+                                           table.attrs["patch_profile"]["scale"])
                 with self.assertRaisesRegex(ValueError, 'calibration'):
                     detector.reset(calibration_paths[0])
                 config['dino_calibration_bags'] = calibration_paths[1:]
