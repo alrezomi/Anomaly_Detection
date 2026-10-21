@@ -68,7 +68,7 @@ class PatchNormalityTests(unittest.TestCase):
         table, rows = build_attention_threshold(pd.DataFrame(dict(score=[1., 2.],
             matched_progress=[.5, .5], held_out_video_id=[0, 1])))
         table.attrs["patch_profile"] = fit_patch_profile(memory, n_bins=3)
-        old = dict(calibration_method="matched_patch_normality_progress_v3_no_attention", score_mode="attention")
+        old = dict(calibration_method="matched_patch_normality_progress_v4_symmetric_local", score_mode="attention")
         new = dict(old, calibration_method=ATTENTION_CALIBRATION_METHOD)
         with tempfile.TemporaryDirectory() as folder:
             save_nominal_cache(folder, memory, 32, table, rows, old)
