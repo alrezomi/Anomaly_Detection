@@ -434,6 +434,69 @@ be measured on independent runs.
 
 ### Calibrate and reuse DINO memory
 
+To test calibration from the memory demonstrations themselves, set
+`"dino_calibration_bags": []` in your local config. Keep the existing
+`nominal_bags`, DINOv2 model, input size, and memory name for this first experiment.
+Keep `rebuild_nominal_cache: false`: extracted features are reused. Each whole
+recording is held out from both matching and patch-normality fitting when its
+calibration scores are measured (at least three nominal recordings required).
+This is intentionally not self-matching. The nested fitting can take substantially
+longer than separate calibration. Save your previous calibration bag list outside
+the active config; restoring that list and running `vision-memory` restores the
+separate-calibration experiment without re-extracting compatible features.
+Use the same `dino_threshold_scale` (start with 1.0) for both comparisons.
+
+For a second, separate experiment, the same scorer supports DINOv3 ViT checkpoints.
+Manually change these local config entries:
+
+```json
+"dino_model_name": "facebook/dinov3-vits16plus-pretrain-lvd1689m",
+"dino_input_size": 832,
+"vision_memory_name": "pick_place_dinov3_splus832_nominal",
+"dino_calibration_bags": [],
+"dino_threshold_scale": 1.0,
+"rebuild_nominal_cache": false
+```
+
+Use a fresh `output_dir` too, to preserve the earlier graphs. Small+ is a practical
+first trial alongside the existing VLM; larger ViTs increase compute and memory
+and are not established to be better for this task. 832 / 16 gives the same 52x52
+patch grid as DINOv2 at 728 / 14. The extractor removes CLS/register tokens,
+retains CLS-to-patch attention, and L2-normalizes patch and CLS features for both
+families. ConvNeXt checkpoints are not supported by this CLS-based matcher.
+The GPU image already pins Transformers 4.57.1, which supports DINOv3; no VLM
+dependency upgrade is needed. DINOv2 remains the default when the new key is absent.
+
+After Hugging Face approves your account, log in **inside the shared Docker cache**
+on the lab PC using a read token belonging to that account. Run this interactive
+command and paste the token only into its hidden prompt (not into JSON or Git):
+
+```bash
+docker compose run --rm --build --entrypoint hf vision-memory auth login
+docker compose run --rm --build vision-memory
+docker compose up --build online-replay
+```
+
+Weights download automatically on the first build and persist in the existing
+`huggingface-cache` volume. DINOv3 needs fresh extracted features and calibration;
+DINOv2 features cannot be reused across backbones. To roll back, restore the
+DINOv2 model name, 728 input size, original memory name and calibration list,
+then run `vision-memory` and restart replay. Do not delete either cache.
+
+Evaluate the same **unseen** nominal and failure bags after each experiment.
+Select **Nominal-adjusted differences** in the heatmap menu to see scored evidence;
+attention weights alone are not an anomaly map. Record false alarms on nominal
+runs and whether the object-related failure crosses its threshold. These changes
+enable a controlled comparison; neither a newer backbone nor nominal-only
+calibration guarantees better detection. Do not tune repeatedly against the final
+evaluation set and then report it as an independent test.
+
+References: [DINOv3 paper](https://arxiv.org/abs/2508.10104),
+[Meta model collection](https://huggingface.co/collections/facebook/dinov3),
+[Transformers 4.57.1 DINOv3 support](https://huggingface.co/docs/transformers/v4.57.1/model_doc/dinov3).
+The paper's dense-feature improvements motivate this experiment; it does not
+validate our robot anomaly scorer or its thresholds.
+
 `nominal_bags` supplies retrieval memory. Optional `dino_calibration_bags` supplies
 separate successful recordings, scored by the exact same matcher. Those queries
 never enter retrieval memory or the patch variability profile. At least two

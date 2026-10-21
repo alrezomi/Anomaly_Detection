@@ -28,6 +28,7 @@ class DinoReplayDetector:
         from vision_dinov2.nominal_cache import load_nominal_cache
         from vision_dinov2.dinov2_features import DINOv2FeatureExtractor
         from vision_dinov2.threshold import validate_threshold_scale
+        from vision_dinov2.model_settings import model_settings
         from rosbag_io import RosbagImageSource
         self.config = config
         self.threshold_scale = validate_threshold_scale(config.get('dino_threshold_scale', 1.0))
@@ -40,7 +41,8 @@ class DinoReplayDetector:
             self.path /= config['vision_memory_name']
         self.path /= _slug(self.topic)
         self.signature = settings.nominal_cache_runtime_signature()
-        self.signature.update(dino_input_size=config.get('dino_input_size', settings.DINO_INPUT_SIZE),
+        model_name, input_size = model_settings(config, settings.DINO_INPUT_SIZE)
+        self.signature.update(model_name=model_name, dino_input_size=input_size,
                               stage_constrained_matching=config.get('stage_constrained_matching', False))
         calibration_bags = config.get('dino_calibration_bags', [])
         self.signature['calibration_sources'] = settings.source_signatures([
