@@ -60,7 +60,8 @@ class DinoReplayDetector:
         self.signature['calibration_sources'] = saved.get('calibration_sources', [])
         self.signature['dino_threshold_scale'] = self.threshold_scale
         calibration_label = 'separate nominal recordings' if calibration_bags else 'leave-one-recording-out'
-        self.note += (f" Patch differences are standardized by learned nominal variation. "
+        self.note += (f" Patch differences use symmetric 3x3 local matching within the selected frame, "
+                      "then learned nominal variation and soft attention weighting. "
                       "The score averages the largest 1% of 3x3-pooled responses. "
                       f"Thresholds use per-recording progress quantiles from {calibration_label}. "
                       f"Threshold multiplier {self.threshold_scale:g}. "

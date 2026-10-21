@@ -279,6 +279,40 @@ def compute_patch_distance_attention_weighted(
     return frame_score, patch_scores, weighted_patch_scores, weights
 
 
+def symmetric_local_patch_distance(test_features: np.ndarray, nominal_features: np.ndarray) -> np.ndarray:
+    """RMS residual with a one-patch spatial tolerance, in both directions.
+
+    Each patch searches only its clipped 3x3 neighborhood in the selected frame.
+    The maximum of observation-to-reference and reference-to-observation minima
+    preserves evidence of both extra and missing content at each grid location.
+    No wraparound, cross-frame search, or P-by-P distance matrix is used.
+    """
+    query = np.asarray(test_features, dtype=np.float32)
+    reference = np.asarray(nominal_features, dtype=np.float32)
+    if query.ndim != 2 or query.shape != reference.shape or not query.shape[1]:
+        raise ValueError("Local patch matching needs equal [patches, features] arrays.")
+    grid = int(np.sqrt(query.shape[0]))
+    if not grid or grid * grid != query.shape[0]:
+        raise ValueError("Local patch matching needs a square patch grid.")
+    if not np.isfinite(query).all() or not np.isfinite(reference).all():
+        raise ValueError("Local patch matching needs finite features.")
+    query = query.reshape(grid, grid, -1)
+    reference = reference.reshape(grid, grid, -1)
+    forward = np.full((grid, grid), np.inf, dtype=np.float32)
+    reverse = np.full_like(forward, np.inf)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            y0, y1 = max(0, -dy), min(grid, grid - dy)
+            x0, x1 = max(0, -dx), min(grid, grid - dx)
+            q = (slice(y0, y1), slice(x0, x1))
+            r = (slice(y0 + dy, y1 + dy), slice(x0 + dx, x1 + dx))
+            delta = query[q] - reference[r]
+            distance2 = np.mean(delta * delta, axis=-1)
+            np.minimum(forward[q], distance2, out=forward[q])
+            np.minimum(reverse[r], distance2, out=reverse[r])
+    return np.sqrt(np.maximum(forward, reverse)).ravel()
+
+
 def compare_frame_to_nominal_memory(
     test_features: np.ndarray,
     test_attention: np.ndarray,
@@ -300,7 +334,10 @@ def compare_frame_to_nominal_memory(
     Compare one test frame with nominal memory.
 
     First, CLS tokens select the globally closest nominal frames.
-    Second, attention-weighted patch differences select the best local match.
+    Second, same-position attention-weighted differences select the best frame.
+    Finally, compute symmetric 3x3 residuals for that frame only. The first return
+    value remains the retrieval distance (raw_global_score diagnostic), while the
+    returned patch maps feed nominal fitting and the final calibrated scorer.
     """
     candidate_memory = nominal_memory
     if required_stage is not None:
@@ -354,7 +391,9 @@ def compare_frame_to_nominal_memory(
 
     if best_result is None:
         raise RuntimeError("No nominal comparison was completed.")
-    return best_result
+    retrieval_score, _, _, weights, match, cls_distance = best_result
+    residual = symmetric_local_patch_distance(test_features, match["features"])
+    return retrieval_score, residual, residual * weights, weights, match, cls_distance
 
 
 def threshold_for_progress(

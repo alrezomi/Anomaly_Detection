@@ -394,31 +394,44 @@ For each sampled frame (normally 2 fps):
    minimum weight 0.10. Attention is a soft weight, not a scissors/object mask.
 4. Compute `sum(patch_distance * weight) / sum(weight)` for each candidate and
    retain the lowest-scoring match. Retrieval is unchanged.
-5. At the matched progress, subtract each patch's expected nominal distance and
+5. Within the selected frame only, find each observation patch's closest nominal
+   patch in its clipped 3x3 neighborhood (one patch in each direction). Also search
+   nominal-to-observation. At each grid position take the maximum of the two
+   minimum RMS distances, retaining extra and missing-content evidence. There is
+   no border wraparound, search across other frames, or unrestricted spatial search.
+   At the matched progress, subtract each patch's expected nominal local residual and
    divide positive excess by its regularized nominal standard deviation:
-   `evidence = max(distance - mean, 0) / scale`. The current experiment uses no
-   attention multiplier in this final evidence. Attention still participates in
-   selecting the reference frame; matching and learned normal variation are unchanged.
+   `evidence = max(distance - mean, 0) / scale`. Restore softened attention
+   `0.5 + 0.5 * weight`. Similar local content contributes little through its small
+   residual; weights are not redistributed onto the remaining patches.
 6. Average evidence over 3x3 patch neighborhoods, then average the largest 1% of
    neighborhood responses. This retains small coherent changes without a
    whole-image average or a single-patch maximum. The score is now dimensionless.
 7. Interpolate the threshold at the matched nominal frame's progress and alarm
    when `score > threshold`. The displayed epsilon is score divided by threshold.
 
-For the experiment without final attention weighting, rebuild with
+For the symmetric local comparison experiment, rebuild with
 `docker compose run --rm --build vision-memory`, then restart replay. Keep the
 same model, resolution, bag lists and threshold scale for the comparison, with
 `rebuild_nominal_cache: false`. The calibration protocol is now
-`matched_patch_normality_progress_v3_no_attention`; old thresholds are rejected
+`matched_patch_normality_progress_v4_symmetric_local`; old thresholds are rejected
 because both nominal calibration scores and test scores must use the new formula.
-Compatible extracted features are reused. No new configuration parameter is needed.
-The baseline before this isolated experiment is commit `ce5c1c7`; reverting the
-experiment commit and rebuilding calibration restores its attention weighting.
+Compatible extracted features are reused, but patch-normality profiles and
+thresholds are both fitted again using local residuals. No new configuration
+parameter is needed. The previous experiment is commit `0c613c7`; reverting this
+experiment commit and rebuilding calibration restores that version. The earlier
+same-position scorer with attention is commit `ce5c1c7`.
 Preserve the previous score plots and use a different output directory for the trial.
 The default **Nominal-adjusted differences** heatmap is the actual pooled evidence
 used by the score, derived from observation-versus-matched-frame feature distances.
-**All raw differences** displays those feature distances before normality adjustment;
+**Local residuals before adjustment** displays those bidirectional feature distances
+before normality adjustment and attention weighting;
 neither is a subtraction of RGB pixels. **Attention weights** is diagnostic only.
+This tolerates movement by one patch, including an object moved by that amount;
+it cannot distinguish intentional task-critical small displacements from nuisance
+motion. Spatial searches are many-to-one, not object tracking or geometric alignment.
+At a 52x52 grid the tolerance is about 1/52 of the image width/height. Recalibration
+is slower because it repeats local comparisons during whole-recording holdouts.
 
 The progress axis divides nominal execution into 30 bins; it is not elapsed test
 seconds or the test bag's eventual duration. Recorded stages align nominal
