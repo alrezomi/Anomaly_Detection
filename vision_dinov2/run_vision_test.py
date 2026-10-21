@@ -301,6 +301,8 @@ def main(mode: str = "all") -> None:
                 threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE)
             adaptive_threshold_df.attrs["patch_profile"] = patch_profile
         else:
+            print("Calibrating from nominal_bags only: each complete query recording is excluded "
+                  "from both reference matching and patch-normality fitting. No self-matches.", flush=True)
             adaptive_threshold_df, calibration_df = calibrate_attention_leave_one_video_out(
                 nominal_memory, stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
                 top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,

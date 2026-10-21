@@ -1,4 +1,4 @@
-"""DINOv2 model loading, video reading, and feature extraction."""
+"""DINOv2/v3 ViT loading, video reading, and feature extraction."""
 
 from __future__ import annotations
 
@@ -56,8 +56,12 @@ class DINOv2FeatureExtractor:
 
         self.model.eval()
         self.patch_size = int(getattr(self.model.config, "patch_size", 14))
+        if self.input_size < self.patch_size or self.input_size % self.patch_size:
+            raise ValueError(f"Input size {self.input_size} must be a multiple of patch size {self.patch_size}.")
+        if self.model.config.model_type not in {"dinov2", "dinov2_with_registers", "dinov3_vit"}:
+            raise ValueError("DINO extraction requires a DINOv2/v3 Vision Transformer.")
 
-        print("DINOv2 loaded.")
+        print(f"DINO loaded: {self.model_name}")
         print("Patch size:", self.patch_size)
         print("Input size:", self.input_size)
 
@@ -120,7 +124,7 @@ class DINOv2FeatureExtractor:
 
         if outputs.attentions is None:
             raise RuntimeError(
-                "DINOv2 did not return attention matrices. "
+                "DINO did not return attention matrices. "
                 "The model must be loaded with attn_implementation='eager'."
             )
 
@@ -131,6 +135,8 @@ class DINOv2FeatureExtractor:
         pixel_values = inputs["pixel_values"]
         input_height = int(pixel_values.shape[-2])
         input_width = int(pixel_values.shape[-1])
+        if (input_height, input_width) != (self.input_size, self.input_size):
+            raise ValueError("DINO processor changed the configured image size; refusing misaligned patches.")
 
         grid_height = input_height // self.patch_size
         grid_width = input_width // self.patch_size
@@ -194,7 +200,7 @@ class DINOv2FeatureExtractor:
         grid_size = grid_height
 
         if not hasattr(self, "_printed_extraction_info"):
-            print("DINOv2 extraction check:")
+            print("DINO extraction check:")
             print(f"  input: {input_height} x {input_width}")
             print(f"  total tokens: {total_tokens}")
             print(f"  special tokens removed: {special_token_count}")

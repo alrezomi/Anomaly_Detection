@@ -137,11 +137,9 @@ def main() -> None:
         raise ValueError(
             "vision_memory_name may contain only lowercase letters, numbers, and underscores"
         )
-    dino_input_size = int(
-        configuration.get("dino_input_size", run_vision_test.DINO_INPUT_SIZE)
-    )
-    if dino_input_size < 14 or dino_input_size % 14 != 0:
-        raise ValueError("dino_input_size must be a positive multiple of DINO's patch size 14")
+    from vision_dinov2.model_settings import model_settings
+    run_vision_test.MODEL_NAME, dino_input_size = model_settings(
+        configuration, run_vision_test.DINO_INPUT_SIZE)
     run_vision_test.DINO_INPUT_SIZE = dino_input_size
     run_vision_test.STAGE_CONSTRAINED_MATCHING = bool(
         configuration.get("stage_constrained_matching", False)

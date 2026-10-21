@@ -1,7 +1,8 @@
 {
   "nominal_bags": [
     "/data/normal_run_01",
-    "/data/normal_run_02"
+    "/data/normal_run_02",
+    "/data/normal_run_03"
   ],
   "test_bag": "/data/test_run_01",
   "camera_topics": [
@@ -11,6 +12,7 @@
   "nominal_cache_dir": "/outputs/nominal_cache",
   "vision_memory_name": "pick_place_dino728_v1",
   "dino_input_size": 728,
+  "dino_model_name": "facebook/dinov2-small",
   "dino_calibration_bags": [],
   "dino_threshold_scale": 1.0,
   "rebuild_nominal_cache": false,
