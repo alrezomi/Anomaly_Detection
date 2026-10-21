@@ -246,6 +246,14 @@ class OnlineReplayTests(unittest.TestCase):
                 self.assertIn(b"Execution monitor", response.read())
             with urlopen(address + "/state") as response:
                 self.assertEqual(json.load(response)["status"], "ready")
+            app.camera_jpegs['/camera'] = {'diagnostics': b'{"timestamp_sec":1,"grid":2}',
+                                          'diag_excess': b'example-image'}
+            with urlopen(address + '/dino-camera?topic=%2Fcamera&view=diagnostics') as response:
+                self.assertEqual(response.headers['Content-Type'], 'application/json')
+                self.assertEqual(json.load(response)['grid'], 2)
+            with urlopen(address + '/dino-camera?topic=%2Fcamera&view=diag_excess') as response:
+                self.assertEqual(response.headers['Content-Type'], 'image/jpeg')
+                self.assertEqual(response.read(), b'example-image')
             app.publish(Image.new("RGB", (10, 10)), 1.)
             with urlopen(address + "/frame") as response:
                 self.assertEqual(response.headers["Content-Type"], "image/jpeg")

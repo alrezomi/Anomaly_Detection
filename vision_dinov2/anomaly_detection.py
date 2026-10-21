@@ -335,9 +335,8 @@ def compare_frame_to_nominal_memory(
 
     First, CLS tokens select the globally closest nominal frames.
     Second, same-position attention-weighted differences select the best frame.
-    Finally, each patch takes its smallest symmetric 3x3 residual across the CLS
-    shortlist, with attention weights from that patch's winning candidate.
-    The selected whole frame anchors progress and the preview only. The first return
+    Finally, compute symmetric 3x3 residuals within the selected frame only.
+    This same frame supplies every patch comparison, progress and the preview. The first return
     value remains the retrieval distance (raw_global_score diagnostic), while the
     returned patch maps feed nominal fitting and the final calibrated scorer.
     """
@@ -366,8 +365,6 @@ def compare_frame_to_nominal_memory(
         float,
     ] | None = None
 
-    residual = None
-    patch_weights = None
     for item, cls_distance in zip(selected_memory, cls_distances):
         (
             frame_score,
@@ -383,16 +380,6 @@ def compare_frame_to_nominal_memory(
             min_weight=min_weight,
         )
 
-        local = symmetric_local_patch_distance(test_features, item["features"])
-        if residual is None:
-            residual, patch_weights = local, weights.copy()
-        else:
-            # Choose by distance before attention, so low attention cannot make
-            # a poorly matching candidate win. Ties retain the earlier candidate.
-            better = local < residual
-            residual = np.where(better, local, residual)
-            patch_weights = np.where(better, weights, patch_weights)
-
         if best_result is None or frame_score < best_result[0]:
             best_result = (
                 frame_score,
@@ -405,8 +392,9 @@ def compare_frame_to_nominal_memory(
 
     if best_result is None:
         raise RuntimeError("No nominal comparison was completed.")
-    retrieval_score, _, _, _, match, cls_distance = best_result
-    return retrieval_score, residual, residual * patch_weights, patch_weights, match, cls_distance
+    retrieval_score, _, _, weights, match, cls_distance = best_result
+    residual = symmetric_local_patch_distance(test_features, match["features"])
+    return retrieval_score, residual, residual * weights, weights, match, cls_distance
 
 
 def threshold_for_progress(

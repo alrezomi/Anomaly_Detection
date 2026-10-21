@@ -196,6 +196,14 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(replay['above_threshold'], video.alarm)
         self.assertEqual(replay['score_mode'], 'attention')
         self.assertIsNotNone(detector.preview_image)
+        details = detector.diagnostic_data
+        self.assertAlmostEqual(details['score'], replay['anomaly_score'])
+        self.assertAlmostEqual(details['threshold'], replay['threshold'])
+        self.assertEqual(details['timestamp_sec'], 3.)
+        np.testing.assert_allclose(details['stages']['weighted'],
+            np.array(details['stages']['standardized']) * details['stages']['multiplier'])
+        self.assertEqual(set(detector.diagnostic_previews),
+                         {'raw', 'excess', 'standardized', 'weighted', 'pooled', 'multiplier'})
 
     def test_build_reuses_features_and_calibrates_both_supported_splits(self):
         from vision_dinov2 import run_vision_test as runner

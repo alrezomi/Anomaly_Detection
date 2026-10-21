@@ -60,9 +60,9 @@ class DinoReplayDetector:
         self.signature['calibration_sources'] = saved.get('calibration_sources', [])
         self.signature['dino_threshold_scale'] = self.threshold_scale
         calibration_label = 'separate nominal recordings' if calibration_bags else 'leave-one-recording-out'
-        self.note += (f" Each patch chooses its smallest symmetric 3x3 residual across the CLS shortlist, "
+        self.note += (f" Patches use symmetric 3x3 residuals within one selected nominal frame, "
                       "then learned nominal variation and soft attention weighting. "
-                      "The displayed reference frame anchors progress; patches may use other shortlisted frames. "
+                      "The displayed reference frame supplies every patch comparison and anchors progress. "
                       "The score averages the largest 1% of 3x3-pooled responses. "
                       f"Thresholds use per-recording progress quantiles from {calibration_label}. "
                       f"Threshold multiplier {self.threshold_scale:g}. "
@@ -128,16 +128,33 @@ class DinoReplayDetector:
             features, attention, cls, self.memory, top_k_cls=self.signature['top_k_cls'],
             attention_power=self.signature['attention_power'], min_weight=self.signature['min_weight'],
             required_stage=stage)
+        diagnostics = {}
         decision = score_matched_frame(score, float(best['progress']), self.thresholds,
                                       getattr(self, 'threshold_scale', 1.0),
-                                      patches=patches, attention_weights=weights)
+                                      patches=patches, attention_weights=weights, diagnostics=diagnostics)
         score, threshold, base_threshold = decision['score'], decision['threshold'], decision['base_threshold']
         scoring_sec = time.monotonic() - started
-        self.preview_image = Image.fromarray(make_heatmap_overlay(image, patches, grid))
-        scored_map = decision["heatmap"] if decision["heatmap"] is not None else weighted
-        self.scored_preview_image = Image.fromarray(make_heatmap_overlay(image, scored_map, grid,
-            scale_max=2 * threshold if decision["heatmap"] is not None else None))
-        self.attention_preview_image = Image.fromarray(make_heatmap_overlay(image, weights, grid))
+        self.diagnostic_previews = {}
+        self.diagnostic_data = None
+        if diagnostics:
+            raw_max = max(float(diagnostics['raw'].max()), 1e-8)
+            evidence_max = max(2 * threshold, float(diagnostics['standardized'].max()), 1e-8)
+            for name, values in diagnostics.items():
+                if name in {'raw', 'excess', 'standardized', 'weighted', 'pooled', 'multiplier'}:
+                    maximum = raw_max if name in {'raw', 'excess'} else 1.0 if name == 'multiplier' else evidence_max
+                    self.diagnostic_previews[name] = Image.fromarray(make_heatmap_overlay(image, values, grid,
+                                                                                         scale_max=maximum))
+            self.diagnostic_data = dict(timestamp_sec=float(timestamp), grid=grid,
+                raw_color_max=raw_max, evidence_color_max=evidence_max,
+                score=float(score), threshold=float(threshold),
+                stages={name: values.tolist() for name, values in diagnostics.items()})
+            self.preview_image = self.diagnostic_previews['raw']
+            self.scored_preview_image = self.diagnostic_previews['pooled']
+            self.attention_preview_image = self.diagnostic_previews['multiplier']
+        else:
+            self.preview_image = Image.fromarray(make_heatmap_overlay(image, patches, grid))
+            self.scored_preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid))
+            self.attention_preview_image = Image.fromarray(make_heatmap_overlay(image, weights, grid))
         self.matched_image = None
         match = {'status': 'unavailable', 'stage': stage}
         try:

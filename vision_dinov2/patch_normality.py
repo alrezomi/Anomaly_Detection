@@ -102,7 +102,7 @@ def validate_patch_profile(profile, patch_count=None):
         raise ValueError("Invalid DINO patch-normality profile; rebuild vision-memory.")
 
 
-def patch_evidence(patches, attention_weights, progress, profile):
+def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics=None):
     """Return one dimensionless score and its spatially pooled evidence map.
 
     Subtract expected residuals and divide by regularized nominal variability.
@@ -127,11 +127,18 @@ def patch_evidence(patches, attention_weights, progress, profile):
                        max(float(centers[right] - centers[left]), 1e-12), 0., 1.)
     mean = (1 - fraction) * profile["mean"][left] + fraction * profile["mean"][right]
     scale = (1 - fraction) * profile["scale"][left] + fraction * profile["scale"][right]
-    evidence = np.maximum(patches - mean, 0.) / scale * (.5 + .5 * weights)
+    excess = np.maximum(patches - mean, 0.)
+    standardized = excess / scale
+    multiplier = .5 + .5 * weights
+    evidence = standardized * multiplier
     padded = np.pad(evidence.reshape(grid, grid), 1, mode="edge")
     heatmap = np.lib.stride_tricks.sliding_window_view(padded, (3, 3)).mean(axis=(-1, -2)).ravel()
     count = max(1, int(np.ceil(.01 * heatmap.size)))
     score = float(np.partition(heatmap, heatmap.size - count)[-count:].mean())
+    if diagnostics is not None:
+        diagnostics.update(raw=patches, mean=mean, scale=scale, excess=excess,
+                           standardized=standardized, multiplier=multiplier,
+                           weighted=evidence, pooled=heatmap)
     return score, heatmap
 
 
