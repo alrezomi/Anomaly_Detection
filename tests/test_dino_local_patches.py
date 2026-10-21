@@ -3,10 +3,60 @@ import unittest
 
 import numpy as np
 
-from vision_dinov2.anomaly_detection import symmetric_local_patch_distance
+from vision_dinov2.anomaly_detection import (symmetric_local_patch_distance,
+    compare_frame_to_nominal_memory, make_attention_weights)
 
 
 class LocalPatchTests(unittest.TestCase):
+    @staticmethod
+    def item(features, stage=1, cls=None, attention=None):
+        return dict(features=features.reshape(-1, 2), stage=stage,
+                    cls=np.array([1., 0.]) if cls is None else cls,
+                    attention=np.ones(64) if attention is None else attention)
+
+    def test_different_patches_choose_different_shortlisted_frames(self):
+        query, left, right = self.scene(), self.scene(), self.scene()
+        query[2, 2] = left[2, 2] = [0, 1]
+        query[5, 5] = right[5, 5] = [0, 1]
+        self.assertGreater(self.distance(query, left).max(), 0)
+        self.assertGreater(self.distance(query, right).max(), 0)
+        memory = [self.item(left), self.item(right)]
+        result = compare_frame_to_nominal_memory(query.reshape(-1, 2), np.ones(64),
+                                                 np.array([1., 0.]), memory, required_stage=1)
+        np.testing.assert_array_equal(result[1], 0)
+        # A novel feature absent from every local candidate must survive.
+        query[6, 1] = [-1, 0]
+        result = compare_frame_to_nominal_memory(query.reshape(-1, 2), np.ones(64),
+                                                 np.array([1., 0.]), memory, required_stage=1)
+        self.assertGreater(result[1].reshape(8, 8)[6, 1], 0)
+
+    def test_patch_search_respects_cls_shortlist_and_stage(self):
+        query = self.scene()
+        query[3, 3] = [0, 1]
+        memory = [self.item(self.scene()) for _ in range(5)]
+        memory += [self.item(query, cls=np.array([-1., 0.])), self.item(query, stage=2)]
+        args = (query.reshape(-1, 2), np.ones(64), np.array([1., 0.]), memory)
+        result = compare_frame_to_nominal_memory(*args, required_stage=1)
+        self.assertGreater(result[1][27], 0)
+        result = compare_frame_to_nominal_memory(*args, required_stage=1, top_k_cls=6)
+        np.testing.assert_array_equal(result[1], 0)
+        with self.assertRaisesRegex(ValueError, 'stage 3'):
+            compare_frame_to_nominal_memory(*args, required_stage=3)
+
+    def test_attention_follows_distance_winner_and_does_not_select_it(self):
+        rng = np.random.default_rng(22)
+        query = rng.normal(size=(64, 2)).astype(np.float32)
+        memory = [self.item(rng.normal(size=(64, 2)), attention=rng.random(64)) for _ in range(2)]
+        attention = rng.random(64)
+        residuals = [symmetric_local_patch_distance(query, item['features']) for item in memory]
+        winner = residuals[1] < residuals[0]
+        self.assertTrue(winner.any() and (~winner).any())
+        weights = [make_attention_weights(attention, item['attention']) for item in memory]
+        result = compare_frame_to_nominal_memory(query, attention, np.array([1., 0.]), memory)
+        np.testing.assert_allclose(result[1], np.minimum(*residuals))
+        np.testing.assert_allclose(result[3], np.where(winner, weights[1], weights[0]))
+        np.testing.assert_allclose(result[2], result[1] * result[3])
+
     @staticmethod
     def scene():
         return np.tile(np.array([1., 0.], dtype=np.float32), (8, 8, 1))

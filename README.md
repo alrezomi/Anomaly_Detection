@@ -393,12 +393,15 @@ For each sampled frame (normally 2 fps):
    by their maximum, normalize to [0, 1], raise to power 1.5, and apply the existing
    minimum weight 0.10. Attention is a soft weight, not a scissors/object mask.
 4. Compute `sum(patch_distance * weight) / sum(weight)` for each candidate and
-   retain the lowest-scoring match. Retrieval is unchanged.
-5. Within the selected frame only, find each observation patch's closest nominal
+   retain the lowest-scoring frame as the progress anchor and reference preview.
+5. For EACH of the five CLS candidates, find each observation patch's closest nominal
    patch in its clipped 3x3 neighborhood (one patch in each direction). Also search
    nominal-to-observation. At each grid position take the maximum of the two
-   minimum RMS distances, retaining extra and missing-content evidence. There is
-   no border wraparound, search across other frames, or unrestricted spatial search.
+   minimum RMS distances, retaining extra and missing-content evidence. Then take
+   the smallest of those per-candidate residuals independently for each patch.
+   Neighboring patches can choose different frames. Use the combined attention
+   weight at that grid position from the winning candidate; choose by distance
+   BEFORE applying attention. No border wraparound or search beyond the shortlist.
    At the matched progress, subtract each patch's expected nominal local residual and
    divide positive excess by its regularized nominal standard deviation:
    `evidence = max(distance - mean, 0) / scale`. Restore softened attention
@@ -410,20 +413,22 @@ For each sampled frame (normally 2 fps):
 7. Interpolate the threshold at the matched nominal frame's progress and alarm
    when `score > threshold`. The displayed epsilon is score divided by threshold.
 
-For the symmetric local comparison experiment, rebuild with
+For the shortlist patch comparison experiment, rebuild with
 `docker compose run --rm --build vision-memory`, then restart replay. Keep the
 same model, resolution, bag lists and threshold scale for the comparison, with
 `rebuild_nominal_cache: false`. The calibration protocol is now
-`matched_patch_normality_progress_v4_symmetric_local`; old thresholds are rejected
+`matched_patch_normality_progress_v5_shortlist_local`; old thresholds are rejected
 because both nominal calibration scores and test scores must use the new formula.
 Compatible extracted features are reused, but patch-normality profiles and
 thresholds are both fitted again using local residuals. No new configuration
-parameter is needed. The previous experiment is commit `0c613c7`; reverting this
+parameter is needed. The previous experiment is commit `14777de`; reverting this
 experiment commit and rebuilding calibration restores that version. The earlier
 same-position scorer with attention is commit `ce5c1c7`.
 Preserve the previous score plots and use a different output directory for the trial.
 The default **Nominal-adjusted differences** heatmap is the actual pooled evidence
-used by the score, derived from observation-versus-matched-frame feature distances.
+used by the score, derived from observation-versus-shortlist feature distances.
+The nominal preview is NOT the source of every comparison. Its progress still
+anchors the normality profile and threshold, identically in calibration and replay.
 **Local residuals before adjustment** displays those bidirectional feature distances
 before normality adjustment and attention weighting;
 neither is a subtraction of RGB pixels. **Attention weights** is diagnostic only.
@@ -432,6 +437,12 @@ it cannot distinguish intentional task-critical small displacements from nuisanc
 motion. Spatial searches are many-to-one, not object tracking or geometric alignment.
 At a 52x52 grid the tolerance is about 1/52 of the image width/height. Recalibration
 is slower because it repeats local comparisons during whole-recording holdouts.
+Five-candidate scoring adds up to five local comparisons per query frame. It can
+also accept a combination of local appearances never seen together in one nominal
+frame, or hide a failure if a shortlisted frame still shows the object in its old
+location. Stage restriction reduces but does not eliminate that ambiguity. Use
+`stage_constrained_matching: true` and keep the model and threshold scale fixed
+while comparing unseen normal and failure runs.
 
 The progress axis divides nominal execution into 30 bins; it is not elapsed test
 seconds or the test bag's eventual duration. Recorded stages align nominal
