@@ -456,10 +456,11 @@ def run_video_test(
         decision_details = {}
         if adaptive_threshold_df is not None:
             from .threshold import score_matched_frame
-            decision = score_matched_frame(score, matched_progress, adaptive_threshold_df)
+            decision = score_matched_frame(score, matched_progress, adaptive_threshold_df,
+                                           patches=_patch_scores, attention_weights=_weights)
             score, current_threshold = decision['score'], decision['threshold']
             decision_details = {key: value for key, value in decision.items()
-                             if key not in {'score', 'threshold'}}
+                             if key not in {'score', 'threshold', 'heatmap'}}
             threshold_mode = "adaptive"
         else:
             current_threshold = fixed_threshold

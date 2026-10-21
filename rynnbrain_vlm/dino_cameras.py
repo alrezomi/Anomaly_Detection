@@ -9,7 +9,7 @@ class DinoCameraReplay:
     knn = True
     frame_count = None
     capture_visual = False
-    score_kind = 'dino_distance'
+    score_kind = 'dino_standardized_distance'
 
     def __init__(self, config, progress):
         topics = config.get('camera_topics') or config['rynnbrain']['camera_topics']

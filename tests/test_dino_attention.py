@@ -12,6 +12,7 @@ from vision_dinov2.anomaly_detection import compare_frame_to_nominal_memory, run
 from vision_dinov2.threshold import (build_attention_threshold, calibrate_attention_leave_one_video_out,
                                     score_calibration_memory, scaled_threshold, ATTENTION_CALIBRATION_METHOD)
 from vision_dinov2.nominal_cache import save_nominal_cache, load_nominal_cache, memory_signature
+from vision_dinov2.patch_normality import fit_patch_profile
 
 
 class AttentionTests(unittest.TestCase):
@@ -98,8 +99,8 @@ class AttentionTests(unittest.TestCase):
     def test_progress_threshold_changes_and_runtime_crossings(self):
         from vision_dinov2.anomaly_detection import threshold_for_progress
         rows = pd.DataFrame(dict(score=[.1, .2, .3, .7, .8, .9],
-            matched_progress=[.1]*3 + [.9]*3, held_out_video_id=[0]*6))
-        table, _ = build_attention_threshold(rows, n_bins=2, smooth_window=1)
+            matched_progress=[.1]*3 + [.9]*3, held_out_video_id=[0,1,2]*2))
+        table, _ = build_attention_threshold(rows, n_bins=2, smooth_window=1, threshold_floor_quantile=None)
         low, high = table.adaptive_threshold
         self.assertAlmostEqual(low, np.quantile([.1, .2, .3], .95)*1.1)
         self.assertAlmostEqual(high, np.quantile([.7, .8, .9], .95)*1.1)
@@ -124,13 +125,14 @@ class AttentionTests(unittest.TestCase):
         for query in memory:
             references = [x for x in memory if x['video_id'] != query['video_id']]
             expected.append(self.match(query, references)[0])
-        np.testing.assert_allclose(rows.score, expected)
+        np.testing.assert_allclose(rows.raw_global_score, expected)
         self.assertTrue((rows.matched_video_id != rows.held_out_video_id).all())
-        self.assertAlmostEqual(table.adaptive_threshold.iloc[0], np.quantile(expected, .95) * 1.1)
+        self.assertAlmostEqual(table.adaptive_threshold.iloc[0],
+            np.quantile(rows.groupby("held_out_video_id").score.quantile(.95), .95) * 1.1)
         self.assertEqual(np.ptp(table.adaptive_threshold), 0.)
         self.assertEqual(table.attrs['score_mode'], 'attention')
         self.assertTrue((table.method == ATTENTION_CALIBRATION_METHOD).all())
-        with self.assertRaisesRegex(ValueError, 'two nominal'):
+        with self.assertRaisesRegex(ValueError, 'three nominal'):
             calibrate_attention_leave_one_video_out(memory[:2])
         with self.assertRaisesRegex(ValueError, 'finite'):
             build_attention_threshold(pd.DataFrame(dict(score=[np.nan], held_out_video_id=[0], matched_progress=[.5])))
@@ -147,6 +149,7 @@ class AttentionTests(unittest.TestCase):
                         CALIBRATION_VIDEO_PATHS=[RosbagImageSource(x, '/camera') for x in calibration]):
                     signature = runner.nominal_cache_signature()
                 table, rows = build_attention_threshold(pd.DataFrame(dict(score=[.1, .2], held_out_video_id=[0, 1], matched_progress=[.5,.5])))
+                table.attrs["patch_profile"] = fit_patch_profile([self.item(1, run=0), self.item(2, run=1)])
                 directory = Path(folder) / 'camera'
                 save_nominal_cache(directory, [self.item(1)], 4, table, rows, signature)
                 self.assertIsNone(load_nominal_cache(directory, dict(signature, score_mode='local')))
@@ -168,13 +171,14 @@ class AttentionTests(unittest.TestCase):
         extractor = Mock()
         extractor.extract.return_value = query['features'], query['attention'], query['cls'], 4
         table, _ = build_attention_threshold(pd.DataFrame(dict(score=[.05, .1], held_out_video_id=[0, 1], matched_progress=[.5,.5])))
+        table.attrs["patch_profile"] = fit_patch_profile([self.item(1, run=0), self.item(2, run=1)])
         detector = DinoReplayDetector.__new__(DinoReplayDetector)
         detector.extractor, detector.thresholds, detector.memory = extractor, table, memory
         detector.signature = dict(top_k_cls=5, attention_power=1.5, min_weight=.1)
         detector.stages, detector.step, detector.threshold_scale = None, 0, .9
         detector._thumbnail = Mock(return_value=('memory', image))
         replay, _, _ = detector.append(image, 3.)
-        calibration = score_calibration_memory([query], memory, 0)
+        calibration = score_calibration_memory([query], memory, 0, patch_profile=table.attrs["patch_profile"])
         with patch('vision_dinov2.anomaly_detection.iter_source_frames', return_value=iter([(0, 3., image)])):
             batch = run_video_test(extractor, 'test', memory, scaled_threshold(table, .9), min_weight=.1).iloc[0]
         with tempfile.TemporaryDirectory() as folder, \
@@ -195,7 +199,7 @@ class AttentionTests(unittest.TestCase):
 
     def test_build_reuses_features_and_calibrates_both_supported_splits(self):
         from vision_dinov2 import run_vision_test as runner
-        memory = [self.item(1, run=0), self.item(2, run=1)]
+        memory = [self.item(1, run=0), self.item(2, run=1), self.item(3, run=2)]
         old_table = pd.DataFrame(dict(stage_center=[.5], adaptive_threshold=[.1]))
         for paths in ([], ['separate_nominal']):
             with self.subTest(paths=paths), tempfile.TemporaryDirectory() as folder, \
@@ -209,14 +213,15 @@ class AttentionTests(unittest.TestCase):
                     patch.object(runner, 'build_nominal_video_memory', return_value=([self.item(3)], 4)) as extract, \
                     patch.object(runner, 'save_nominal_cache') as save_memory, \
                     patch.object(runner, 'save_nominal_calibration') as save, \
-                    patch.object(runner, 'plot_adaptive_calibration'):
+                    patch('vision_dinov2.patch_normality.plot_patch_reliability'), patch.object(runner, 'plot_adaptive_calibration'):
                 runner.main('build-memory')
                 save_memory.assert_not_called()
                 self.assertEqual(extract.call_count, len(paths))
                 table, rows, signature = save.call_args.args[1:]
                 self.assertEqual(table.attrs['score_mode'], 'attention')
                 self.assertEqual(signature['calibration_method'], ATTENTION_CALIBRATION_METHOD)
-                self.assertAlmostEqual(table.adaptive_threshold.iloc[0], np.quantile(rows.score, .95) * 1.1)
+                self.assertAlmostEqual(table.adaptive_threshold.iloc[0],
+                    np.quantile(rows.groupby("held_out_video_id").score.quantile(.95), .95) * 1.1)
                 if not paths:
                     self.assertTrue((rows.matched_video_id != rows.held_out_video_id).all())
 

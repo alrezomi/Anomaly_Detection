@@ -75,6 +75,12 @@ def save_nominal_calibration(directory, threshold, calibration, signature):
                                          indent=2, sort_keys=True), encoding='utf-8')
         temporary.replace(feature_marker)
     marker.unlink(missing_ok=True)
+    if "patch_profile" in threshold.attrs:
+        from .patch_normality import validate_patch_profile
+        validate_patch_profile(threshold.attrs["patch_profile"])
+        temporary = directory / "patch_normality.tmp.npz"
+        np.savez_compressed(temporary, **threshold.attrs["patch_profile"])
+        temporary.replace(directory / "patch_normality.npz")
     for name, table in [("adaptive_threshold.csv", threshold), ("calibration.csv", calibration)]:
         temporary = directory / (name + ".tmp")
         table.to_csv(temporary, index=False)
@@ -117,9 +123,27 @@ def load_nominal_cache(
         print('Recalibrate with vision-memory; compatible extracted features can be reused.')
         return None
 
+    profile = None
+    from .threshold import ATTENTION_CALIBRATION_METHOD
+    if saved_signature.get("calibration_method") == ATTENTION_CALIBRATION_METHOD:
+        from .patch_normality import validate_patch_profile
+        profile_path = directory / "patch_normality.npz"
+        if not profile_path.is_file():
+            print("Missing DINO patch-normality profile; rebuild vision-memory.")
+            return None
+        try:
+            with np.load(profile_path, allow_pickle=False) as arrays:
+                profile = {key: arrays[key] for key in arrays.files}
+            validate_patch_profile(profile)
+        except (OSError, ValueError) as error:
+            print(f"Invalid DINO patch-normality profile: {error}. Rebuild vision-memory.")
+            return None
     memory, grid_size = _read_feature_arrays(required[0])
     threshold = pd.read_csv(required[1])
     threshold.attrs['score_mode'] = saved_signature.get('score_mode', 'mean')
+    if profile is not None:
+        validate_patch_profile(profile, grid_size ** 2)
+        threshold.attrs["patch_profile"] = profile
     calibration = pd.read_csv(required[2])
     print(f"Loaded reusable nominal cache: {directory}")
     print(f"Cached nominal frames: {len(memory)}")

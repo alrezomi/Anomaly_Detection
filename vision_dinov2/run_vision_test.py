@@ -266,6 +266,10 @@ def main(mode: str = "all") -> None:
         # Step 3: Calibrate the adaptive threshold
         # ----------------------------------------------------
         if CALIBRATION_VIDEO_PATHS:
+            from .patch_normality import fit_patch_profile
+            patch_profile = fit_patch_profile(nominal_memory, n_bins=THRESHOLD_BINS,
+                top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
+                stage_constrained_matching=STAGE_CONSTRAINED_MATCHING)
             rows = []
             for run_id, source in enumerate(CALIBRATION_VIDEO_PATHS):
                 print(f"Independent DINO calibration: {run_id + 1}/{len(CALIBRATION_VIDEO_PATHS)}")
@@ -290,11 +294,12 @@ def main(mode: str = "all") -> None:
                     raise ValueError("Calibration and memory patch grids differ.")
                 rows.extend(score_calibration_memory(queries, nominal_memory, run_id,
                     top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
-                    stage_constrained_matching=STAGE_CONSTRAINED_MATCHING))
+                    stage_constrained_matching=STAGE_CONSTRAINED_MATCHING, patch_profile=patch_profile))
                 del queries
             adaptive_threshold_df, calibration_df = build_attention_threshold(pd.DataFrame(rows), n_bins=THRESHOLD_BINS,
                 min_points_per_bin=MIN_POINTS_PER_BIN, smooth_window=THRESHOLD_SMOOTH_WINDOW,
                 threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE)
+            adaptive_threshold_df.attrs["patch_profile"] = patch_profile
         else:
             adaptive_threshold_df, calibration_df = calibrate_attention_leave_one_video_out(
                 nominal_memory, stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
@@ -312,6 +317,9 @@ def main(mode: str = "all") -> None:
 
     print("Nominal grid size:", grid_size)
     if mode == "build-memory":
+        from .patch_normality import plot_patch_reliability
+        plot_patch_reliability(adaptive_threshold_df.attrs["patch_profile"],
+            Path(NOMINAL_CACHE_DIRECTORY or OUTPUT_DIRECTORY) / "patch_reliability.png")
         plot_adaptive_calibration(
             adaptive_threshold_df, calibration_df,
             output_path=CALIBRATION_PLOT,

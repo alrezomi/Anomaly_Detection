@@ -16,8 +16,8 @@ def check_stop(stop):
 
 class DinoReplayDetector:
     kind = 'dino'
-    score_kind = 'dino_distance'
-    score_source = 'dino_cls_attention_patch_distance'
+    score_kind = 'dino_standardized_distance'
+    score_source = 'dino_nominal_patch_evidence'
     note = 'DINO scores every sampled image at the existing DINO sampling rate, through the end of the recording. No VLM interval or eight-frame limit applies. If processing is slower than playback, replay falls behind instead of skipping inputs. Recorded-stage restrictions use retrospective bag annotations.'
     knn = True  # Common renderer: distance rather than probability.
     capture_visual = False
@@ -58,8 +58,9 @@ class DinoReplayDetector:
         self.signature['calibration_sources'] = saved.get('calibration_sources', [])
         self.signature['dino_threshold_scale'] = self.threshold_scale
         calibration_label = 'separate nominal recordings' if calibration_bags else 'leave-one-recording-out'
-        self.note += (f" Attention-weighted patch RMS, calibrated on {calibration_label}: "
-                      "progress-bin 95th percentiles x 1.10, with interpolation, smoothing and a floor. "
+        self.note += (f" Patch differences are standardized by learned nominal variation. "
+                      "The score averages the largest 1% of 3x3-pooled responses. "
+                      f"Thresholds use per-recording progress quantiles from {calibration_label}. "
                       f"Threshold multiplier {self.threshold_scale:g}. "
                       "Calibration recordings are excluded from evaluation.")
         self.sources = saved.get('sources', [])
@@ -124,11 +125,14 @@ class DinoReplayDetector:
             attention_power=self.signature['attention_power'], min_weight=self.signature['min_weight'],
             required_stage=stage)
         decision = score_matched_frame(score, float(best['progress']), self.thresholds,
-                                      getattr(self, 'threshold_scale', 1.0))
+                                      getattr(self, 'threshold_scale', 1.0),
+                                      patches=patches, attention_weights=weights)
         score, threshold, base_threshold = decision['score'], decision['threshold'], decision['base_threshold']
         scoring_sec = time.monotonic() - started
         self.preview_image = Image.fromarray(make_heatmap_overlay(image, patches, grid))
-        self.scored_preview_image = Image.fromarray(make_heatmap_overlay(image, weighted, grid))
+        scored_map = decision["heatmap"] if decision["heatmap"] is not None else weighted
+        self.scored_preview_image = Image.fromarray(make_heatmap_overlay(image, scored_map, grid,
+            scale_max=2 * threshold if decision["heatmap"] is not None else None))
         self.attention_preview_image = Image.fromarray(make_heatmap_overlay(image, weights, grid))
         self.matched_image = None
         match = {'status': 'unavailable', 'stage': stage}
@@ -147,7 +151,7 @@ class DinoReplayDetector:
                    vector_kind='dino_cls',
                    epsilon=float(score / max(threshold, 1e-8)))
         row.update({key: value for key, value in decision.items()
-                    if key not in {'score', 'threshold', 'base_threshold', 'epsilon'}})
+                    if key not in {'score', 'threshold', 'base_threshold', 'epsilon', 'heatmap'}})
         self.step += 1
         return row, cls, None
 

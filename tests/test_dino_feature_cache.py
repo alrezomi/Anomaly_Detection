@@ -80,10 +80,11 @@ class FeatureCacheTests(unittest.TestCase):
                 NOMINAL_VIDEO_PATHS=['memory'], CALIBRATION_VIDEO_PATHS=['calibration'],
                 SETTINGS_JSON=None, REBUILD_NOMINAL_CACHE=False), \
                 patch.object(runner, 'check_input_paths'), patch.object(runner, 'print_experiment_summary'), \
-                patch.object(runner, 'plot_adaptive_calibration'), \
+                patch('vision_dinov2.patch_normality.plot_patch_reliability'), patch.object(runner, 'plot_adaptive_calibration'), \
                 patch.object(runner, 'DINOv2FeatureExtractor') as model, \
-                patch.object(runner, 'build_nominal_video_memory', return_value=([self.item(.2)], 2)) as extract:
-            save_feature_cache(folder, [self.item()], 2, runner.nominal_cache_signature())
+                patch.object(runner, 'build_nominal_video_memory',
+                             return_value=([self.item(.2), dict(self.item(.3), video_id=1)], 2)) as extract:
+            save_feature_cache(folder, [self.item(), dict(self.item(.1), video_id=1)], 2, runner.nominal_cache_signature())
             runner.main('build-memory')
             self.assertEqual(extract.call_count, 1)  # Only the calibration bag.
             self.assertEqual(model.call_count, 1)
