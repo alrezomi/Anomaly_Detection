@@ -106,8 +106,8 @@ def patch_evidence(patches, attention_weights, progress, profile):
     """Return one dimensionless score and its spatially pooled evidence map.
 
     Subtract expected residuals and divide by regularized nominal variability.
-    Attention remains soft (at least half weight); a stable low-attention object
-    must still be able to contribute. Average 3x3 neighborhoods, then the largest
+    Attention is used for reference matching only, not for this final evidence.
+    Average 3x3 neighborhoods, then the largest
     1% of those responses, to retain small objects without relying on one pixel.
     """
     patches = np.asarray(patches, dtype=np.float64)
@@ -127,7 +127,7 @@ def patch_evidence(patches, attention_weights, progress, profile):
                        max(float(centers[right] - centers[left]), 1e-12), 0., 1.)
     mean = (1 - fraction) * profile["mean"][left] + fraction * profile["mean"][right]
     scale = (1 - fraction) * profile["scale"][left] + fraction * profile["scale"][right]
-    evidence = np.maximum(patches - mean, 0.) / scale * (.5 + .5 * weights)
+    evidence = np.maximum(patches - mean, 0.) / scale
     padded = np.pad(evidence.reshape(grid, grid), 1, mode="edge")
     heatmap = np.lib.stride_tricks.sliding_window_view(padded, (3, 3)).mean(axis=(-1, -2)).ravel()
     count = max(1, int(np.ceil(.01 * heatmap.size)))

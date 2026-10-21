@@ -139,7 +139,7 @@ function drawDinoCameras(state){
   element.querySelector('.timing').textContent=last?`${rows.length} images scored; observation ${last.timestamp_sec.toFixed(2)} s; feature time ${last.cached_feature_sec.toFixed(2)} s; memory comparison ${(last.classifier_sec||0).toFixed(2)} s; observation to result ${last.observation_to_result_sec.toFixed(2)} s.`:'Each camera is scored at its own recorded timestamps.';
   const best=last?.visual_matching?.best;
   element.querySelector('.matchDetails').textContent=best?`${best.bag} - frame ${best.frame_id}, ${best.timestamp_sec.toFixed(2)} s, stage ${best.stage}`:'';
-  element.querySelector('.diagnostics').textContent='Scored view: patch differences above their usual nominal level, scaled by normal variability and softly weighted by attention. The score averages the strongest 1% of 3x3 neighborhoods. Scored colors use twice the current threshold as their maximum; raw differences and attention remain normalized per image. Colors are not probabilities.';
+  element.querySelector('.diagnostics').textContent='Scored view: feature differences between this observation and its matched nominal frame, above their usual nominal level and scaled by normal variability. Attention does not weight this score. The score averages the strongest 1% of 3x3 neighborhoods. Scored colors use twice the current threshold as their maximum; raw differences and attention remain normalized per image. Colors are not probabilities.';
   draw({...state,rows},element.querySelector('canvas'));
  }
 }

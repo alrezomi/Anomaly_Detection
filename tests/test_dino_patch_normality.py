@@ -50,6 +50,31 @@ class PatchNormalityTests(unittest.TestCase):
         changed_arm[:512] += 8 * scale[:512]
         self.assertGreater(patch_evidence(changed_arm, weights, .5, profile)[0], failure_score)
 
+    def test_final_evidence_is_independent_of_attention_and_matches_score(self):
+        profile = fit_patch_profile(self.memory(), n_bins=3)
+        distances = profile["mean"][1].copy().reshape(32, 32)
+        distances[20:24, 10:14] += 5 * profile["scale"][1].reshape(32, 32)[20:24, 10:14]
+        score, heatmap = patch_evidence(distances.ravel(), np.ones(1024), .5, profile)
+        low_score, low_map = patch_evidence(distances.ravel(), np.full(1024, .1), .5, profile)
+        self.assertGreater(score, 0)
+        self.assertEqual(score, low_score)
+        np.testing.assert_array_equal(heatmap, low_map)
+        self.assertAlmostEqual(score, np.sort(heatmap)[-11:].mean())
+        self.assertEqual(heatmap.reshape(32, 32)[0, 0], 0)
+
+    def test_previous_attention_calibration_is_rejected_but_features_reusable(self):
+        from vision_dinov2.threshold import ATTENTION_CALIBRATION_METHOD
+        memory = self.memory()
+        table, rows = build_attention_threshold(pd.DataFrame(dict(score=[1., 2.],
+            matched_progress=[.5, .5], held_out_video_id=[0, 1])))
+        table.attrs["patch_profile"] = fit_patch_profile(memory, n_bins=3)
+        old = dict(calibration_method="matched_patch_normality_progress_v2", score_mode="attention")
+        new = dict(old, calibration_method=ATTENTION_CALIBRATION_METHOD)
+        with tempfile.TemporaryDirectory() as folder:
+            save_nominal_cache(folder, memory, 32, table, rows, old)
+            self.assertIsNone(load_nominal_cache(folder, new))
+            self.assertIsNotNone(load_feature_cache(folder, new))
+
     def test_profile_excludes_self_matches_and_equal_weights_recordings(self):
         from vision_dinov2.anomaly_detection import compare_frame_to_nominal_memory
         memory = self.memory()

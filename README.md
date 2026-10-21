@@ -396,13 +396,29 @@ For each sampled frame (normally 2 fps):
    retain the lowest-scoring match. Retrieval is unchanged.
 5. At the matched progress, subtract each patch's expected nominal distance and
    divide positive excess by its regularized nominal standard deviation:
-   `evidence = max(distance - mean, 0) / scale`. Apply softened attention
-   `0.5 + 0.5 * weight`, so low-attention objects can still contribute.
+   `evidence = max(distance - mean, 0) / scale`. The current experiment uses no
+   attention multiplier in this final evidence. Attention still participates in
+   selecting the reference frame; matching and learned normal variation are unchanged.
 6. Average evidence over 3x3 patch neighborhoods, then average the largest 1% of
    neighborhood responses. This retains small coherent changes without a
    whole-image average or a single-patch maximum. The score is now dimensionless.
 7. Interpolate the threshold at the matched nominal frame's progress and alarm
    when `score > threshold`. The displayed epsilon is score divided by threshold.
+
+For the experiment without final attention weighting, rebuild with
+`docker compose run --rm --build vision-memory`, then restart replay. Keep the
+same model, resolution, bag lists and threshold scale for the comparison, with
+`rebuild_nominal_cache: false`. The calibration protocol is now
+`matched_patch_normality_progress_v3_no_attention`; old thresholds are rejected
+because both nominal calibration scores and test scores must use the new formula.
+Compatible extracted features are reused. No new configuration parameter is needed.
+The baseline before this isolated experiment is commit `ce5c1c7`; reverting the
+experiment commit and rebuilding calibration restores its attention weighting.
+Preserve the previous score plots and use a different output directory for the trial.
+The default **Nominal-adjusted differences** heatmap is the actual pooled evidence
+used by the score, derived from observation-versus-matched-frame feature distances.
+**All raw differences** displays those feature distances before normality adjustment;
+neither is a subtraction of RGB pixels. **Attention weights** is diagnostic only.
 
 The progress axis divides nominal execution into 30 bins; it is not elapsed test
 seconds or the test bag's eventual duration. Recorded stages align nominal
