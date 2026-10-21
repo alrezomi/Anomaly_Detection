@@ -13,6 +13,21 @@ from vision_dinov2.nominal_cache import save_nominal_cache, load_nominal_cache, 
 
 
 class PatchNormalityTests(unittest.TestCase):
+    def test_diagnostics_explain_each_operation_without_changing_score(self):
+        profile = fit_patch_profile(self.memory(), n_bins=3)
+        raw = profile['mean'][1] + profile['scale'][1] * 2
+        weights = np.linspace(.1, 1, len(raw))
+        expected, expected_map = patch_evidence(raw, weights, .5, profile)
+        stages = {}
+        score, heatmap = patch_evidence(raw, weights, .5, profile, diagnostics=stages)
+        self.assertEqual(score, expected)
+        np.testing.assert_array_equal(heatmap, expected_map)
+        np.testing.assert_allclose(stages['excess'], np.maximum(raw - stages['mean'], 0))
+        np.testing.assert_allclose(stages['standardized'], stages['excess'] / stages['scale'])
+        np.testing.assert_allclose(stages['weighted'], stages['standardized'] * stages['multiplier'])
+        np.testing.assert_array_equal(stages['pooled'], heatmap)
+        self.assertAlmostEqual(score, np.sort(stages['pooled'])[-11:].mean())
+
     @staticmethod
     def memory():
         memory = []
@@ -68,7 +83,7 @@ class PatchNormalityTests(unittest.TestCase):
         table, rows = build_attention_threshold(pd.DataFrame(dict(score=[1., 2.],
             matched_progress=[.5, .5], held_out_video_id=[0, 1])))
         table.attrs["patch_profile"] = fit_patch_profile(memory, n_bins=3)
-        old = dict(calibration_method="matched_patch_normality_progress_v4_symmetric_local", score_mode="attention")
+        old = dict(calibration_method="matched_patch_normality_progress_v5_shortlist_local", score_mode="attention")
         new = dict(old, calibration_method=ATTENTION_CALIBRATION_METHOD)
         with tempfile.TemporaryDirectory() as folder:
             save_nominal_cache(folder, memory, 32, table, rows, old)

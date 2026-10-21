@@ -8,7 +8,7 @@ import pandas as pd
 from .anomaly_detection import compare_frame_to_nominal_memory
 
 
-ATTENTION_CALIBRATION_METHOD = "matched_patch_normality_progress_v5_shortlist_local"
+ATTENTION_CALIBRATION_METHOD = "matched_patch_normality_progress_v4_symmetric_local"
 THRESHOLD_QUANTILE = 0.95
 THRESHOLD_MARGIN = 1.10
 
@@ -82,7 +82,7 @@ def scaled_threshold(table: pd.DataFrame, scale: float) -> pd.DataFrame:
 
 
 def score_matched_frame(score, progress, threshold_table, threshold_scale=1.0,
-                        *, patches=None, attention_weights=None):
+                        *, patches=None, attention_weights=None, diagnostics=None):
     """Apply the same decision rule in replay, batch CSVs and exported videos.
 
     A batch table may already be scaled; replay passes its multiplier directly.
@@ -93,7 +93,8 @@ def score_matched_frame(score, progress, threshold_table, threshold_scale=1.0,
     heatmap = None
     if "patch_profile" in threshold_table.attrs:
         from .patch_normality import patch_evidence
-        score, heatmap = patch_evidence(patches, attention_weights, progress, threshold_table.attrs["patch_profile"])
+        score, heatmap = patch_evidence(patches, attention_weights, progress, threshold_table.attrs["patch_profile"],
+                                       diagnostics=diagnostics)
     scale = validate_threshold_scale(threshold_scale)
     bound = threshold_for_progress(progress, threshold_table)
     base = (float(np.interp(progress, threshold_table.stage_center,

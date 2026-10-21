@@ -753,6 +753,16 @@ class ReplayApplication:
                                 preview.save(extra_buffer, format='JPEG', quality=85)
                                 additional_previews[view] = extra_buffer.getvalue()
                                 (output / f'frame_{len(rows) + 1:02d}_{view}.jpg').write_bytes(extra_buffer.getvalue())
+                    if camera_topic and getattr(active_detector, 'diagnostic_data', None):
+                        additional_previews['diagnostics'] = json.dumps(active_detector.diagnostic_data).encode()
+                        for name, preview in active_detector.diagnostic_previews.items():
+                            if name not in {'excess', 'standardized', 'weighted'}:
+                                continue  # Other maps already use the normal preview endpoints.
+                            preview = preview.copy()
+                            preview.thumbnail((640, 480))
+                            extra_buffer = io.BytesIO()
+                            preview.save(extra_buffer, format='JPEG', quality=85)
+                            additional_previews['diag_' + name] = extra_buffer.getvalue()
                     buffer = io.BytesIO()
                     if observed is not None and kind != 'gmr':
                         observed.thumbnail((640, 480))
@@ -842,8 +852,8 @@ def make_handler(app):
                 query = parse_qs(urlsplit(self.path).query)
                 topic, view = query.get('topic', [''])[0], query.get('view', ['frame'])[0]
                 with app.lock:
-                    jpeg = app.camera_jpegs.get(topic, {}).get(view) if view in {'frame', 'observed', 'matched', 'scored', 'attention'} else None
-                self.send(200 if jpeg else 204, jpeg or b'', 'image/jpeg')
+                    jpeg = app.camera_jpegs.get(topic, {}).get(view) if view in {'frame', 'observed', 'matched', 'scored', 'attention', 'diagnostics', 'diag_raw', 'diag_excess', 'diag_standardized', 'diag_weighted', 'diag_pooled', 'diag_multiplier'} else None
+                self.send(200 if jpeg else 204, jpeg or b'', 'application/json' if view == 'diagnostics' else 'image/jpeg')
             elif path in {"/frame", "/observed-frame", "/matched-frame"}:
                 with app.lock:
                     jpeg = getattr(app, {"/frame": "jpeg", "/observed-frame": "observed_jpeg",

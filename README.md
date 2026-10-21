@@ -394,14 +394,11 @@ For each sampled frame (normally 2 fps):
    minimum weight 0.10. Attention is a soft weight, not a scissors/object mask.
 4. Compute `sum(patch_distance * weight) / sum(weight)` for each candidate and
    retain the lowest-scoring frame as the progress anchor and reference preview.
-5. For EACH of the five CLS candidates, find each observation patch's closest nominal
+5. Within the selected frame only, find each observation patch's closest nominal
    patch in its clipped 3x3 neighborhood (one patch in each direction). Also search
    nominal-to-observation. At each grid position take the maximum of the two
-   minimum RMS distances, retaining extra and missing-content evidence. Then take
-   the smallest of those per-candidate residuals independently for each patch.
-   Neighboring patches can choose different frames. Use the combined attention
-   weight at that grid position from the winning candidate; choose by distance
-   BEFORE applying attention. No border wraparound or search beyond the shortlist.
+   minimum RMS distances, retaining extra and missing-content evidence. There is
+   no border wraparound, search across other frames, or unrestricted spatial search.
    At the matched progress, subtract each patch's expected nominal local residual and
    divide positive excess by its regularized nominal standard deviation:
    `evidence = max(distance - mean, 0) / scale`. Restore softened attention
@@ -413,36 +410,46 @@ For each sampled frame (normally 2 fps):
 7. Interpolate the threshold at the matched nominal frame's progress and alarm
    when `score > threshold`. The displayed epsilon is score divided by threshold.
 
-For the shortlist patch comparison experiment, rebuild with
-`docker compose run --rm --build vision-memory`, then restart replay. Keep the
-same model, resolution, bag lists and threshold scale for the comparison, with
-`rebuild_nominal_cache: false`. The calibration protocol is now
-`matched_patch_normality_progress_v5_shortlist_local`; old thresholds are rejected
-because both nominal calibration scores and test scores must use the new formula.
-Compatible extracted features are reused, but patch-normality profiles and
-thresholds are both fitted again using local residuals. No new configuration
-parameter is needed. The previous experiment is commit `14777de`; reverting this
-experiment commit and rebuilding calibration restores that version. The earlier
-same-position scorer with attention is commit `ce5c1c7`.
-Preserve the previous score plots and use a different output directory for the trial.
-The default **Nominal-adjusted differences** heatmap is the actual pooled evidence
-used by the score, derived from observation-versus-shortlist feature distances.
-The nominal preview is NOT the source of every comparison. Its progress still
-anchors the normality profile and threshold, identically in calibration and replay.
-**Local residuals before adjustment** displays those bidirectional feature distances
-before normality adjustment and attention weighting;
-neither is a subtraction of RGB pixels. **Attention weights** is diagnostic only.
+The single-frame matcher and calibration protocol
+`matched_patch_normality_progress_v4_symmetric_local` are restored. Features are
+reused with `rebuild_nominal_cache: false`; v5 shortlist profiles and thresholds
+must be rebuilt. Existing compatible v4 calibration can be reused. No new config
+parameter is needed. Restoring one local comparison per observation reduces
+calibration cost; nominal-only calibration still uses nested whole-run holdouts.
+
+Replay diagnostics now expose six views: raw local residuals, baseline-subtracted
+residuals, variability-scaled evidence, attention-weighted evidence before pooling,
+final pooled evidence, and the effective attention multiplier. Raw and subtracted
+views share a zero-based colour scale. Scaled, weighted and pooled views share a
+second zero-based scale (at least twice the current threshold); the two groups
+have different units. These scales are reported numerically and may change
+between observations. Do not compare brightness across groups or timestamps.
+The chart always plots the top-1% average of final pooled evidence; changing the
+view never changes the detector, score or threshold.
+
+Stop replay at the object, then click its location in the heatmap. The inspector
+shows the patch row/column, observation timestamp, raw distance, expected nominal
+distance, positive excess, variability denominator, standardized evidence,
+effective attention multiplier, weighted evidence, pooled evidence, and current
+frame score/threshold. It rejects an inspection if the observation advances while
+fetching the values. For example, a zero excess identifies baseline subtraction;
+a large denominator reduces standardized evidence; attention multiplies by
+0.55-1.0 with the usual minimum weight. The final patch value also includes its
+3x3 neighborhood, so it need not equal that patch's pre-pooling evidence.
+
+All comparisons now use the displayed nominal frame. The diagnostics are produced
+by the same calculation used for decisions, not a second implementation. Only
+the latest per-camera numerical diagnostic is retained, outside the score history,
+and fetched when clicked. Extra diagnostic views add rendering work to replay
+but do not run DINO again or add work to memory calibration. The preceding
+shortlist experiment is commit `c8121c2`; this restoration can be reverted as a
+single commit followed by recalibration. Keep the model and threshold scale fixed.
+
 This tolerates movement by one patch, including an object moved by that amount;
 it cannot distinguish intentional task-critical small displacements from nuisance
 motion. Spatial searches are many-to-one, not object tracking or geometric alignment.
 At a 52x52 grid the tolerance is about 1/52 of the image width/height. Recalibration
 is slower because it repeats local comparisons during whole-recording holdouts.
-Five-candidate scoring adds up to five local comparisons per query frame. It can
-also accept a combination of local appearances never seen together in one nominal
-frame, or hide a failure if a shortlisted frame still shows the object in its old
-location. Stage restriction reduces but does not eliminate that ambiguity. Use
-`stage_constrained_matching: true` and keep the model and threshold scale fixed
-while comparing unseen normal and failure runs.
 
 The progress axis divides nominal execution into 30 bins; it is not elapsed test
 seconds or the test bag's eventual duration. Recorded stages align nominal
@@ -562,8 +569,8 @@ Evaluate the result on held-out normal and failure recordings, including delay.
 0.8 lowers the bound by 20%, and 1.1 raises it by 10%. It changes the decision
 limit only and requires a replay restart, not recalibration. Use 1.0 for an initial
 baseline. The scored heatmap now shows the same pooled evidence used for the
-score, with color maximum equal to twice the current threshold. Raw-difference
-and attention views still stretch their colors per image. Colors are not
+score. Replay uses shared scales for the diagnostic groups described above;
+exported batch videos retain their threshold-relative scale. Colors are not
 probabilities, and the final decision uses the aggregated score.
 
 After pulling this update, stop replay and recalibrate once:
