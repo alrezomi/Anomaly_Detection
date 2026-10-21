@@ -8,7 +8,7 @@ import pandas as pd
 from .anomaly_detection import compare_frame_to_nominal_memory
 
 
-ATTENTION_CALIBRATION_METHOD = "matched_patch_normality_progress_v2"
+ATTENTION_CALIBRATION_METHOD = "matched_patch_normality_progress_v3_no_attention"
 THRESHOLD_QUANTILE = 0.95
 THRESHOLD_MARGIN = 1.10
 
