@@ -101,6 +101,16 @@ services:
     entrypoint: ["python", "run_benchmark.py"]
     command: ["--config", "/config/pipeline_config.json"]
 
+  # DINO-only pooled-score statistics for explicitly selected subfolders.
+  dino-benchmark:
+    <<: *rynnbrain-common
+    environment:
+      ANOMALY_DATA_ROOT: /data
+      ANOMALY_OUTPUT_ROOT: /outputs
+      STAGE_STARTUP_IGNORE_SEC: ${STAGE_STARTUP_IGNORE_SEC:-0.1}
+    entrypoint: ["python", "-u", "run_dino_benchmark.py"]
+    command: ["--config", "/config/pipeline_config.json"]
+
   # Prepare selected CoP vectors and fit nominal kNN or supervised logistic regression.
   cop-classifier-train:
     <<: *rynnbrain-common
