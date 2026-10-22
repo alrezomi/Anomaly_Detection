@@ -8,8 +8,8 @@ import pandas as pd
 from .anomaly_detection import compare_frame_to_nominal_memory
 
 
-ATTENTION_CALIBRATION_METHOD = "matched_patch_metrics_progress_v6_top5_unpooled"
-SCORE_VARIANTS = ("baseline", "scaled", "weighted", "mahalanobis")
+ATTENTION_CALIBRATION_METHOD = "matched_patch_metrics_progress_v7_top1_pooling_smooth"
+SCORE_VARIANTS = ("weighted", "pooled")
 THRESHOLD_QUANTILE = 0.95
 THRESHOLD_MARGIN = 1.10
 
@@ -46,7 +46,7 @@ def build_attention_threshold(calibration_df, n_bins=30, min_points_per_bin=2,
     rows['calibration_role'] = 'independent_progress_calibration'
     print(f'DINO attention calibration: {len(rows)} frames, {n_bins} progress bins, '
           f'per-recording {THRESHOLD_QUANTILE:g} quantiles, then {THRESHOLD_QUANTILE:g} across runs x '
-          f'{THRESHOLD_MARGIN:g}; smoothing never lowers populated-bin bounds.')
+          f'{THRESHOLD_MARGIN:g}; smoothed progress limits retain nominal-bin bounds.')
     return table, rows
 
 
@@ -276,16 +276,19 @@ def build_adaptive_visual_threshold_from_scores(
     )
 
     if smooth_window is not None and smooth_window > 1:
-        smoothed = (
-            threshold_df["adaptive_threshold"]
-            .rolling(
-                window=smooth_window,
-                center=True,
-                min_periods=1,
-            )
-            .median()
-        )
-        # A median filter previously lowered narrow, valid nominal peaks.
-        threshold_df["adaptive_threshold"] = np.maximum(threshold_df.adaptive_threshold, smoothed)
+        # Spread high bounds into neighboring bins instead of lowering valid
+        # nominal peaks. Adjacent bins differ by at most a factor of 1.25.
+        envelope = threshold_df.adaptive_threshold.to_numpy(copy=True)
+        for index in range(1, len(envelope)):
+            envelope[index] = max(envelope[index], envelope[index - 1] / 1.25)
+        for index in range(len(envelope) - 2, -1, -1):
+            envelope[index] = max(envelope[index], envelope[index + 1] / 1.25)
+        # A short symmetric average rounds the ramps; taking the upper envelope
+        # preserves both the calibrated bounds and the adjacent-bin ratio limit.
+        window = int(smooth_window)
+        left = window // 2
+        smoothed = np.convolve(np.pad(envelope, (left, window - 1 - left), mode='edge'),
+                               np.ones(window) / window, mode='valid')
+        threshold_df['adaptive_threshold'] = np.maximum(envelope, smoothed)
 
     return threshold_df

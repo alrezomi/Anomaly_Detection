@@ -761,7 +761,7 @@ class ReplayApplication:
                     if camera_topic and getattr(active_detector, 'diagnostic_data', None):
                         additional_previews['diagnostics'] = json.dumps(active_detector.diagnostic_data).encode()
                         for name, preview in active_detector.diagnostic_previews.items():
-                            if name not in {'excess', 'standardized', 'weighted'}:
+                            if name not in {'excess', 'standardized', 'weighted', 'pooled'}:
                                 continue  # Other maps already use the normal preview endpoints.
                             preview = preview.copy()
                             preview.thumbnail((640, 480))

@@ -25,8 +25,8 @@ class PatchNormalityTests(unittest.TestCase):
         np.testing.assert_allclose(stages['excess'], np.maximum(raw - stages['mean'], 0))
         np.testing.assert_allclose(stages['standardized'], stages['excess'] / stages['scale'])
         np.testing.assert_allclose(stages['weighted'], stages['standardized'] * stages['multiplier'])
-        np.testing.assert_array_equal(stages['pooled'], heatmap)
-        self.assertAlmostEqual(score, np.sort(stages['pooled'])[-52:].mean())
+        np.testing.assert_array_equal(stages['weighted'], heatmap)
+        self.assertAlmostEqual(score, np.sort(stages['weighted'])[-11:].mean())
 
     @staticmethod
     def memory():
@@ -74,7 +74,7 @@ class PatchNormalityTests(unittest.TestCase):
         self.assertGreater(score, 0)
         self.assertAlmostEqual(low_score, .55 * score)
         np.testing.assert_allclose(low_map, .55 * heatmap)
-        self.assertAlmostEqual(score, np.sort(heatmap)[-52:].mean())
+        self.assertAlmostEqual(score, np.sort(heatmap)[-11:].mean())
         self.assertEqual(heatmap.reshape(32, 32)[0, 0], 0)
 
     def test_previous_calibration_is_rejected_but_features_reusable(self):
@@ -82,7 +82,7 @@ class PatchNormalityTests(unittest.TestCase):
         memory = self.memory()
         table, rows = build_attention_threshold(pd.DataFrame(dict(score=[1., 2.],
             matched_progress=[.5, .5], held_out_video_id=[0, 1],
-            score_baseline=[1., 2.], score_scaled=[1., 2.], score_weighted=[1., 2.])))
+            score_pooled=[1., 2.], score_weighted=[1., 2.])))
         table.attrs["patch_profile"] = fit_patch_profile(memory, n_bins=3)
         old = dict(calibration_method="matched_patch_normality_progress_v5_shortlist_local", score_mode="attention")
         new = dict(old, calibration_method=ATTENTION_CALIBRATION_METHOD)
@@ -158,7 +158,7 @@ class PatchNormalityTests(unittest.TestCase):
         memory = self.memory()
         table, rows = build_attention_threshold(pd.DataFrame(dict(score=[1., 2.],
             matched_progress=[.5, .5], held_out_video_id=[0, 1],
-            score_baseline=[1., 2.], score_scaled=[1., 2.], score_weighted=[1., 2.])))
+            score_pooled=[1., 2.], score_weighted=[1., 2.])))
         profile = fit_patch_profile(memory, n_bins=3)
         table.attrs["patch_profile"] = profile
         signature = dict(calibration_method=ATTENTION_CALIBRATION_METHOD, score_mode="attention")
