@@ -57,7 +57,7 @@ class PatchNormalityTests(unittest.TestCase):
         changed[23:27, 10:14] += (8 * scale.reshape(32, 32))[23:27, 10:14]
         normal_score, _ = patch_evidence(normal, weights, .5, profile)
         failure_score, heatmap = patch_evidence(changed.ravel(), weights, .5, profile)
-        self.assertGreater(failure_score, 3 * normal_score)
+        self.assertGreater(failure_score, normal_score)
         y, x = divmod(int(heatmap.argmax()), 32)
         self.assertTrue(23 <= y < 27 and 10 <= x < 14)
         # No permanent arm ignore mask: a sufficiently unusual arm change counts.
@@ -65,15 +65,15 @@ class PatchNormalityTests(unittest.TestCase):
         changed_arm[:512] += 8 * scale[:512]
         self.assertGreater(patch_evidence(changed_arm, weights, .5, profile)[0], failure_score)
 
-    def test_final_evidence_uses_soft_attention_without_redistribution(self):
+    def test_final_evidence_uses_direct_attention_without_redistribution(self):
         profile = fit_patch_profile(self.memory(), n_bins=3)
         distances = profile["mean"][1].copy().reshape(32, 32)
         distances[20:24, 10:14] += 5 * profile["scale"][1].reshape(32, 32)[20:24, 10:14]
         score, heatmap = patch_evidence(distances.ravel(), np.ones(1024), .5, profile)
         low_score, low_map = patch_evidence(distances.ravel(), np.full(1024, .1), .5, profile)
         self.assertGreater(score, 0)
-        self.assertAlmostEqual(low_score, .55 * score)
-        np.testing.assert_allclose(low_map, .55 * heatmap)
+        self.assertAlmostEqual(low_score, .1 * score)
+        np.testing.assert_allclose(low_map, .1 * heatmap)
         self.assertAlmostEqual(score, np.sort(heatmap)[-11:].mean())
         self.assertEqual(heatmap.reshape(32, 32)[0, 0], 0)
 

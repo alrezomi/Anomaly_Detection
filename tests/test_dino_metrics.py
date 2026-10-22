@@ -10,7 +10,8 @@ from vision_dinov2.metrics import validate_metric, mahalanobis_patches, local_re
 from vision_dinov2.patch_normality import fit_patch_profile, patch_evidence, top_one_percent
 from vision_dinov2.threshold import (calibrate_attention_leave_one_video_out, score_calibration_memory,
     score_matched_frame, scaled_threshold, ATTENTION_CALIBRATION_METHOD)
-from vision_dinov2.nominal_cache import save_nominal_cache, load_nominal_cache, load_feature_cache
+from vision_dinov2.nominal_cache import (save_nominal_cache, save_nominal_calibration,
+    load_nominal_cache, load_feature_cache)
 
 
 def memory():
@@ -39,7 +40,7 @@ class MetricTests(unittest.TestCase):
         raw = np.ones(100)
         raw[50:55] = 9.
         scores, diagnostics = {}, {}
-        primary, heatmap = patch_evidence(raw, np.zeros(100), .5, profile, scores=scores, diagnostics=diagnostics)
+        primary, heatmap = patch_evidence(raw, np.full(100, .5), .5, profile, scores=scores, diagnostics=diagnostics)
         self.assertEqual(set(scores), {'weighted', 'pooled'})
         self.assertEqual(scores['weighted'], 2.)
         self.assertEqual(scores['pooled'], top_one_percent(diagnostics['pooled']))
@@ -47,6 +48,10 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(primary, 2.)
         self.assertEqual(np.count_nonzero(heatmap), 5)  # no spatial spreading
         np.testing.assert_array_equal(heatmap, diagnostics['weighted'])
+        np.testing.assert_array_equal(diagnostics['multiplier'], .5)
+        zero, zero_map = patch_evidence(raw, np.zeros(100), .5, profile)
+        self.assertEqual(zero, 0.)
+        np.testing.assert_array_equal(zero_map, 0.)
 
     def test_mahalanobis_known_diagonal_covariance_and_attention(self):
         query = np.tile([2., 3.], (4, 1))
@@ -104,6 +109,13 @@ class MetricTests(unittest.TestCase):
                 signature = dict(calibration_method=ATTENTION_CALIBRATION_METHOD, dino_metric=metric)
                 with tempfile.TemporaryDirectory() as directory:
                     save_nominal_cache(directory, data, 4, table, rows, signature)
+                    signature = dict(signature, attention_weighting='direct')
+                    if metric == 'euclidean':
+                        self.assertIsNone(load_nominal_cache(directory, signature))
+                        self.assertIsNotNone(load_feature_cache(directory, signature))
+                        save_nominal_calibration(directory, table, rows, signature)
+                    # Older Mahalanobis metadata has no attention_weighting key,
+                    # but its score already used direct attention and is reusable.
                     loaded = load_nominal_cache(directory, signature)
                     self.assertIsNotNone(loaded)
                     changed = dict(signature, dino_metric='euclidean' if metric == 'mahalanobis' else 'mahalanobis')

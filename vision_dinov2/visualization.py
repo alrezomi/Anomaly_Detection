@@ -211,6 +211,9 @@ def plot_test_scores(
 def plot_score_variants(rows, x_column, variants, output_path, thresholds=None):
     """Separate axes and calibrated limits for scores with different units."""
     labels = dict(weighted='After attention (no pooling)', pooled='After attention (3x3 pooling)')
+    metric = (str(thresholds.attrs.get('patch_profile', {}).get('metric', 'euclidean'))
+              if thresholds is not None else str(rows.metric.iloc[-1]) if 'metric' in rows else 'euclidean')
+    metric_title = 'Mahalanobis' if metric == 'mahalanobis' else 'Euclidean'
     figure, axes = plt.subplots(len(variants), 1, figsize=(12, 3.5 * len(variants)), squeeze=False)
     for name, axis in zip(variants, axes.ravel()):
         if thresholds is not None:
@@ -219,7 +222,7 @@ def plot_score_variants(rows, x_column, variants, output_path, thresholds=None):
         else:
             axis.plot(rows[x_column], rows[f'score_{name}'], label='Score', color='#2f78c4')
             axis.plot(rows[x_column], rows[f'threshold_{name}'], '--', label='Threshold', color='#c27524')
-        axis.set(title=labels[name] + ' - top 1%', xlabel='Matched nominal progress' if thresholds is not None else 'Observation time (s)',
+        axis.set(title=metric_title + ' - ' + labels[name] + ' - top 1%', xlabel='Matched nominal progress' if thresholds is not None else 'Observation time (s)',
                  ylabel='Dimensionless score')
         axis.legend()
         axis.grid(alpha=.2)

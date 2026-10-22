@@ -161,7 +161,7 @@ function drawDinoCameras(state){
   const chartKey=JSON.stringify([last?.metric,variants]);
   if(card.chartKey!==chartKey){card.chartKey=chartKey;charts.replaceChildren();card.charts={};
    for(const name of variants){const heading=document.createElement('h3'),canvas=document.createElement('canvas'),readout=document.createElement('p');
-    heading.textContent=(last?.metric==='mahalanobis'?'Mahalanobis: ':'')+labels[name];canvas.setAttribute('aria-label',labels[name]+' score and its own threshold');
+    heading.textContent=(last?.metric==='mahalanobis'?'Mahalanobis: ':'Euclidean: ')+labels[name];canvas.setAttribute('aria-label',labels[name]+' score and its own threshold');
     charts.append(heading,readout,canvas);card.charts[name]={canvas,readout};}
    if(!variants.length)charts.textContent='Waiting for this camera';
   }

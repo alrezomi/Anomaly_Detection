@@ -95,7 +95,8 @@ def memory_signature(signature):
     return {key: value for key, value in signature.items()
             if not key.startswith("threshold_") and key not in {
                 "min_points_per_bin", "calibration_sources", "calibration_method", "score_mode",
-                "top_k_cls", "attention_power", "min_weight", "stage_constrained_matching", "dino_metric"}}
+                "top_k_cls", "attention_power", "min_weight", "stage_constrained_matching", "dino_metric",
+                "attention_weighting"}}
 
 
 def load_nominal_cache(
@@ -114,6 +115,9 @@ def load_nominal_cache(
         return None
 
     saved_signature = json.loads(required[3].read_text(encoding="utf-8"))
+    if saved_signature.get('dino_metric') == 'mahalanobis':
+        # Existing Mahalanobis calibration already used direct attention.
+        saved_signature.setdefault('attention_weighting', 'direct')
     differences = [key for key, value in expected_signature.items()
                    if saved_signature.get(key, 'mean' if key == 'score_mode' else None) != value]
     if differences:
