@@ -15,6 +15,9 @@
   "dino_model_name": "facebook/dinov2-small",
   "dino_calibration_bags": [],
   "dino_threshold_scale": 1.0,
+  "dino_benchmark": {
+    "folders": []
+  },
   "rebuild_nominal_cache": false,
   "stage_topic": "/recording_stage",
   "stage_count": 3,

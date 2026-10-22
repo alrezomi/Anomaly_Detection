@@ -647,6 +647,114 @@ another directory rather than searching for reusable files elsewhere. Replacing
 bag contents under the same path requires `rebuild_nominal_cache: true` because
 feature signatures track sources/settings rather than hashing all bag contents.
 
+### DINO benchmark for selected folders
+
+Use the separate `dino-benchmark` service for pooled Euclidean/Mahalanobis
+statistics. It does not load RynnBrain/LoRA or run the existing VLM benchmark.
+Manually add this one selection block to your ignored `pipeline_config.json`:
+
+```json
+"dino_benchmark": {
+  "folders": [
+    "Nominal/setting 1",
+    "Failure_1_grasp_miss"
+  ]
+}
+```
+
+Paths are relative to the container data root `/data`; absolute paths inside
+that root are also accepted. List your actual desired folders. Subfolders are
+searched recursively for ROS 2 `metadata.yaml` files. A bag folder itself can
+also be selected. There is **no default scan of the entire data root**: empty,
+root-level, overlapping or outside-root selections are rejected. Bags in
+`nominal_bags` or `dino_calibration_bags` are excluded by full resolved path,
+even if their parent folder is selected. No folder-name-based labels are used.
+
+```bash
+docker compose stop online-replay
+docker compose run --rm --build dino-benchmark
+```
+
+Alternatively, override the selection for one run without editing config:
+
+```bash
+docker compose run --rm --build dino-benchmark --config /config/pipeline_config.json --folder "Nominal/setting 1" --folder "Failure_1_grasp_miss"
+```
+
+The command first builds/reuses nominal features and calibrates **both** metrics
+using your current `nominal_bags`, optional `dino_calibration_bags`, DINO model,
+input size and camera topics. `dino_metric` does not restrict this comparison.
+Keep `rebuild_nominal_cache: false` for reuse. Both metrics share nominal and
+separate-calibration extracted features. Compatible existing online calibration
+can be reused; otherwise benchmark calibrations are stored independently under
+`<nominal_cache_dir>/<vision_memory_name>/<camera>/benchmark_calibration/<metric>`.
+The benchmark does not replace the online metric's calibration. Subsequent runs
+reuse both benchmark calibrations. Nominal-only calibration still performs the
+existing expensive nested recording holdouts when a calibration is missing.
+
+Each sampled test image is extracted once and its representative nominal frame
+is selected once. Both metrics score the same features/match. Decisions use
+**attention-weighted 3x3 pooled evidence only**, averaging its highest **1%**.
+The no-pooling score is not used for any benchmark classification or ROC point.
+A bag is predicted **failure if any sampled image from any configured camera**
+exceeds its own pooled threshold times `dino_threshold_scale`; otherwise success.
+This camera OR is a benchmark bag decision, separate from independent replay
+camera plots. All images run at the existing DINO sampling rate (normally 2 fps),
+without replay pacing, VLM intervals, early stopping, or an eight-image limit.
+
+Ground-truth bag labels use the existing final-three eligible stage-message
+policy from `build_dataset_manifest.py`. Actual onset is the first explicit
+Error/Fail/Failure/Anomaly-family marker after `STAGE_STARTUP_IGNORE_SEC` (default
+0.1 seconds), read using the existing failure-timing helper. Both clocks are
+relative to bag start. When stage-constrained matching is enabled, scoring begins
+at the corrected stage-1 marker and retains retrospective numbered-stage matching.
+Failure markers are used for evaluation, never for matching or metric fitting.
+A normal final label with an earlier failure marker is flagged in `selection.csv`.
+Unknown labels are excluded from correctness/recall/FPR, and missing camera/data
+errors invalidate the entire bag rather than becoming a success or a partial-camera
+result. Those rows and errors remain visible. Failures without a detection or a
+valid onset never get a fabricated zero timing error.
+
+Reports are written into a new timestamped directory under
+`<output_dir>/dino_benchmark/` (Docker `/outputs` maps to `ANOMALY_OUTPUT_DIR`).
+
+| File | Contents |
+| --- | --- |
+| `selection.csv` | Selected folders/bags, training exclusions, recorded labels, onset markers and errors |
+| `bag_results.csv` | Both metrics, configured and exploratory-best scale decisions, correctness, first alarm, signed timing error and status |
+| `frame_results.csv` | Per-camera sampled pooled scores, unscaled thresholds, configured/best alarms, matched frame/progress and processing times |
+| `metrics.csv` | Overall and each selected folder: TP/FP/TN/FN, recall, FPR, precision, accuracy, F1, balanced accuracy, Wilson 95% intervals and failure-timing statistics |
+| `roc.png`, `<metric>_roc.csv` | Bag-level ROC/AUC, with configured and exploratory-best scale marked |
+| `<metric>_scale_sweep.csv`, `roc_summary.json` | Threshold-scale sweep and suggested scale for each metric |
+| `<metric>_failure_timing_*.png` | Actual onset and first alarm per failure demo, signed errors (negative=early), with misses/missing annotations visible |
+| `runtime.csv`, `runtime_summary.csv` | Model load, feature preparation/reuse, calibration, actual bag-inference wall times, and frame mean/median/p95 by metric/folder |
+| `run.json` | Effective model/memory signatures, selection/label policies, run status, ROC selection and total wall time |
+
+Both the configured and suggested scales are reported overall and per selected
+folder. Recall is TP/(TP+FN); FPR is FP/(FP+TN). Rates are blank when their class
+is absent, rather than incorrectly reported as zero. Include unseen nominal bags
+as well as failure bags to obtain an ROC curve. Runtime feature/matching values
+are shared by the metrics and should not be added together; per-metric processing
+time is feature extraction + representative-frame comparison + that metric's
+scoring. Read/decode time is separate. Phase durations can overlap (for example model load
+inside preparation or first-bag inference); `run.json` records the actual total
+wall time. These are offline throughput measurements,
+including cold first-frame effects, not live end-to-end ROS alarm latency.
+
+ROC ranks each bag by its maximum pooled `score/base_threshold` across all images
+and cameras. The scale sweep uses the actual strict `score > threshold * scale`
+rule (equality is no alarm), so tuning needs no repeated model inference. The
+suggested scale maximizes Youden J = recall - FPR, preferring lower FPR, usable
+interior/configured scales, and then proximity to the configured scale when
+performance ties. The JSON/CSV preserve full precision. Standard ROC endpoints may be
+unreachable by a positive scale for zero scores/zero thresholds; such cases are
+counted explicitly and the suggested operating point is evaluated using real
+positive finite scales. Scale suggestions are **exploratory tuning on the same
+selected bags**, not independently validated performance. Nothing rewrites your
+config. Use another held-out set to evaluate a chosen scale. Timing figures show
+both operating points; nominal false-alarm times remain in `bag_results.csv`
+because successful demonstrations have no actual failure onset to subtract.
+
 ### Independent top and flange DINO replay
 
 DINO uses the **top-level** `camera_topics` list, just like `vision-memory`.
