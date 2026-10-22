@@ -95,7 +95,7 @@ def memory_signature(signature):
     return {key: value for key, value in signature.items()
             if not key.startswith("threshold_") and key not in {
                 "min_points_per_bin", "calibration_sources", "calibration_method", "score_mode",
-                "top_k_cls", "attention_power", "min_weight", "stage_constrained_matching"}}
+                "top_k_cls", "attention_power", "min_weight", "stage_constrained_matching", "dino_metric"}}
 
 
 def load_nominal_cache(
@@ -140,6 +140,15 @@ def load_nominal_cache(
             return None
     memory, grid_size = _read_feature_arrays(required[0])
     threshold = pd.read_csv(required[1])
+    if profile is not None:
+        metric = str(profile.get('metric', 'euclidean'))
+        variants = ('mahalanobis',) if metric == 'mahalanobis' else ('baseline', 'scaled', 'weighted')
+        if metric != saved_signature.get('dino_metric', 'euclidean') or any(
+                f'threshold_{name}' not in threshold or
+                not np.isfinite(threshold[f'threshold_{name}']).all() or
+                (threshold[f'threshold_{name}'] < 0).any() for name in variants):
+            print('Missing or invalid DINO metric thresholds; rebuild vision-memory.')
+            return None
     threshold.attrs['score_mode'] = saved_signature.get('score_mode', 'mean')
     if profile is not None:
         validate_patch_profile(profile, grid_size ** 2)

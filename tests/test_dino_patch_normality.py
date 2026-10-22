@@ -26,7 +26,7 @@ class PatchNormalityTests(unittest.TestCase):
         np.testing.assert_allclose(stages['standardized'], stages['excess'] / stages['scale'])
         np.testing.assert_allclose(stages['weighted'], stages['standardized'] * stages['multiplier'])
         np.testing.assert_array_equal(stages['pooled'], heatmap)
-        self.assertAlmostEqual(score, np.sort(stages['pooled'])[-11:].mean())
+        self.assertAlmostEqual(score, np.sort(stages['pooled'])[-52:].mean())
 
     @staticmethod
     def memory():
@@ -57,7 +57,7 @@ class PatchNormalityTests(unittest.TestCase):
         changed[23:27, 10:14] += (8 * scale.reshape(32, 32))[23:27, 10:14]
         normal_score, _ = patch_evidence(normal, weights, .5, profile)
         failure_score, heatmap = patch_evidence(changed.ravel(), weights, .5, profile)
-        self.assertGreater(failure_score, 4 * normal_score)
+        self.assertGreater(failure_score, 3 * normal_score)
         y, x = divmod(int(heatmap.argmax()), 32)
         self.assertTrue(23 <= y < 27 and 10 <= x < 14)
         # No permanent arm ignore mask: a sufficiently unusual arm change counts.
@@ -74,14 +74,15 @@ class PatchNormalityTests(unittest.TestCase):
         self.assertGreater(score, 0)
         self.assertAlmostEqual(low_score, .55 * score)
         np.testing.assert_allclose(low_map, .55 * heatmap)
-        self.assertAlmostEqual(score, np.sort(heatmap)[-11:].mean())
+        self.assertAlmostEqual(score, np.sort(heatmap)[-52:].mean())
         self.assertEqual(heatmap.reshape(32, 32)[0, 0], 0)
 
     def test_previous_calibration_is_rejected_but_features_reusable(self):
         from vision_dinov2.threshold import ATTENTION_CALIBRATION_METHOD
         memory = self.memory()
         table, rows = build_attention_threshold(pd.DataFrame(dict(score=[1., 2.],
-            matched_progress=[.5, .5], held_out_video_id=[0, 1])))
+            matched_progress=[.5, .5], held_out_video_id=[0, 1],
+            score_baseline=[1., 2.], score_scaled=[1., 2.], score_weighted=[1., 2.])))
         table.attrs["patch_profile"] = fit_patch_profile(memory, n_bins=3)
         old = dict(calibration_method="matched_patch_normality_progress_v5_shortlist_local", score_mode="attention")
         new = dict(old, calibration_method=ATTENTION_CALIBRATION_METHOD)
@@ -156,7 +157,8 @@ class PatchNormalityTests(unittest.TestCase):
         from vision_dinov2.threshold import ATTENTION_CALIBRATION_METHOD
         memory = self.memory()
         table, rows = build_attention_threshold(pd.DataFrame(dict(score=[1., 2.],
-            matched_progress=[.5, .5], held_out_video_id=[0, 1])))
+            matched_progress=[.5, .5], held_out_video_id=[0, 1],
+            score_baseline=[1., 2.], score_scaled=[1., 2.], score_weighted=[1., 2.])))
         profile = fit_patch_profile(memory, n_bins=3)
         table.attrs["patch_profile"] = profile
         signature = dict(calibration_method=ATTENTION_CALIBRATION_METHOD, score_mode="attention")

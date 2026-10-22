@@ -120,6 +120,12 @@ def plot_adaptive_calibration(
     output_path: str | Path | None = None,
 ) -> None:
     """Plot held-out nominal scores and their adaptive threshold."""
+    from .threshold import SCORE_VARIANTS
+    variants = [name for name in SCORE_VARIANTS if f'score_{name}' in calibration_df]
+    if variants:
+        plot_score_variants(calibration_df, 'matched_progress', variants, output_path,
+                            thresholds=adaptive_threshold_df)
+        return
     plt.figure(figsize=(12, 4.5))
 
     plt.scatter(
@@ -155,6 +161,11 @@ def plot_test_scores(
     output_path: str | Path | None = None,
 ) -> None:
     """Plot raw anomaly score and threshold over video time."""
+    from .threshold import SCORE_VARIANTS
+    variants = [name for name in SCORE_VARIANTS if f'score_{name}' in result_df]
+    if variants:
+        plot_score_variants(result_df, 'timestamp_sec', variants, output_path)
+        return
     plt.figure(figsize=(12, 4.5))
 
     plt.plot(
@@ -195,6 +206,30 @@ def plot_test_scores(
         plt.savefig(output_path, dpi=180, bbox_inches="tight")
         print(f"Saved score/threshold graph: {output_path}")
     plt.close()
+
+
+def plot_score_variants(rows, x_column, variants, output_path, thresholds=None):
+    """Separate axes and calibrated limits for scores with different units."""
+    labels = dict(baseline='After baseline subtraction', scaled='After variability scaling',
+                  weighted='After attention (no pooling)', mahalanobis='Diagonal Mahalanobis with attention')
+    figure, axes = plt.subplots(len(variants), 1, figsize=(12, 3.5 * len(variants)), squeeze=False)
+    for name, axis in zip(variants, axes.ravel()):
+        if thresholds is not None:
+            axis.scatter(rows[x_column], rows[f'score_{name}'], s=8, alpha=.35, label='Held-out nominal score')
+            axis.plot(thresholds.stage_center, thresholds[f'threshold_{name}'], '--', label='Threshold', color='#c27524')
+        else:
+            axis.plot(rows[x_column], rows[f'score_{name}'], label='Score', color='#2f78c4')
+            axis.plot(rows[x_column], rows[f'threshold_{name}'], '--', label='Threshold', color='#c27524')
+        axis.set(title=labels[name] + ' - top 5%', xlabel='Matched nominal progress' if thresholds is not None else 'Observation time (s)',
+                 ylabel='Feature distance' if name == 'baseline' else 'Dimensionless score')
+        axis.legend()
+        axis.grid(alpha=.2)
+    figure.tight_layout()
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output_path, dpi=160, bbox_inches='tight')
+        print(f'Saved DINO comparison graphs: {output_path}')
+    plt.close(figure)
 
 
 def plot_test_epsilon(
@@ -412,7 +447,8 @@ def create_anomaly_heatmap_video(
             if adaptive_threshold_df is not None:
                 from .threshold import score_matched_frame
                 decision = score_matched_frame(score, matched_progress, adaptive_threshold_df,
-                                               patches=_patch_scores, attention_weights=_weights)
+                                               patches=_patch_scores, attention_weights=_weights,
+                                               query_features=test_features, reference_features=best_match['features'])
                 score, current_threshold = decision['score'], decision['threshold']
                 if decision["heatmap"] is not None:
                     weighted_patch_scores = decision["heatmap"]

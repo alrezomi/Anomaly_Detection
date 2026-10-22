@@ -141,6 +141,8 @@ def main() -> None:
     run_vision_test.MODEL_NAME, dino_input_size = model_settings(
         configuration, run_vision_test.DINO_INPUT_SIZE)
     run_vision_test.DINO_INPUT_SIZE = dino_input_size
+    from vision_dinov2.metrics import validate_metric
+    run_vision_test.DINO_METRIC = validate_metric(configuration.get('dino_metric', 'euclidean'))
     run_vision_test.STAGE_CONSTRAINED_MATCHING = bool(
         configuration.get("stage_constrained_matching", False)
     )
