@@ -118,6 +118,7 @@ def nominal_cache_signature() -> dict:
         "format_version": 1,
         "score_mode": "attention",
         "dino_metric": DINO_METRIC,
+        "attention_weighting": "direct",
         "sources": source_signatures(NOMINAL_VIDEO_PATHS),
         "model_name": MODEL_NAME,
         "dino_input_size": DINO_INPUT_SIZE,

@@ -401,8 +401,8 @@ For each sampled frame (normally 2 fps):
    no border wraparound, search across other frames, or unrestricted spatial search.
    At the matched progress, subtract each patch's expected nominal local residual and
    divide positive excess by its regularized nominal standard deviation:
-   `evidence = max(distance - mean, 0) / scale`. Restore softened attention
-   `0.5 + 0.5 * weight`. Similar local content contributes little through its small
+   `evidence = max(distance - mean, 0) / scale`. Multiply directly by the
+   attention weight: `weighted_evidence = evidence * weight`. Similar local content contributes little through its small
    residual; weights are not redistributed onto the remaining patches.
 6. Produce two attention-weighted maps: the original patch evidence, and its
    edge-padded **3x3 spatial average**. For each map average the highest **1%** of
@@ -434,14 +434,19 @@ computes `sqrt(sum((residual - mean)**2 / regularized_variance))` in each direct
 and takes their maximum at each patch. Multiply **directly by the existing attention
 weight**, without `0.5 + 0.5 * weight`. This is the normalized/powered query-reference
 attention weight with the existing minimum of 0.10, rather than raw attention
-probability. Euclidean mode retains softened attention. Aggregate the top 1% before
+probability. Euclidean also multiplies directly by this weight. Aggregate the top 1% before
 and after 3x3 pooling. This centers/scales the vector
 once; it does **not** subtract or divide by the scalar Euclidean profile again.
 The diagonal approximation does not model correlations between channels, and
 channel subsampling may lose useful information. Its detection accuracy needs lab
 validation; it is not guaranteed to improve over Euclidean scoring.
 
-The new calibration protocol is
+Euclidean thresholds calibrated with softened attention must be recalibrated once.
+The internal signature records `attention_weighting: direct`; compatible extracted
+features remain reusable. Existing direct-attention Mahalanobis calibration remains
+compatible. No new user config parameter is introduced.
+
+The calibration protocol is
 `matched_patch_metrics_progress_v7_top1_pooling_smooth`. Old profiles/thresholds and
 thresholds from the other metric are incompatible. With `rebuild_nominal_cache:
 false`, model-compatible extracted features are reused. Recalibrate with

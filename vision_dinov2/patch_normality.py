@@ -142,8 +142,8 @@ def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics
                    query_features=None, reference_features=None, scores=None):
     """Top-1% scores before and after edge-padded 3x3 spatial averaging.
 
-    Euclidean retains soft attention; Mahalanobis multiplies by the attention
-    weight directly. The primary score and returned map remain unpooled.
+    Both metrics multiply by the attention weight directly. The primary score
+    and returned map remain unpooled.
     """
     patches = np.asarray(patches, dtype=np.float64)
     weights = np.asarray(attention_weights, dtype=np.float64)
@@ -156,13 +156,12 @@ def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics
     if profile["mean"].shape[1] != patches.size:
         raise ValueError("Patch-normality grid does not match extracted features.")
     from .metrics import interpolate_profile
-    multiplier = .5 + .5 * weights
+    multiplier = weights
     if str(profile.get("metric", "euclidean")) == "mahalanobis":
         from .metrics import mahalanobis_patches
         if query_features is None or reference_features is None:
             raise ValueError("Mahalanobis scoring requires query and matched reference features.")
         patches = mahalanobis_patches(query_features, reference_features, progress, profile)
-        multiplier = weights
         # Mahalanobis already centers and scales the vector residual: never apply
         # the scalar Euclidean normality correction a second time.
         mean, scale = np.zeros_like(patches), np.ones_like(patches)
