@@ -404,46 +404,69 @@ For each sampled frame (normally 2 fps):
    `evidence = max(distance - mean, 0) / scale`. Restore softened attention
    `0.5 + 0.5 * weight`. Similar local content contributes little through its small
    residual; weights are not redistributed onto the remaining patches.
-6. Average evidence over 3x3 patch neighborhoods, then average the largest 1% of
-   neighborhood responses. This retains small coherent changes without a
-   whole-image average or a single-patch maximum. The score is now dimensionless.
-7. Interpolate the threshold at the matched nominal frame's progress and alarm
-   when `score > threshold`. The displayed epsilon is score divided by threshold.
+6. Average the highest **5%** of patch values directly, without spatial pooling.
+   Euclidean mode reports three scores: positive excess (baseline subtraction),
+   excess divided by nominal scale (variability scaling), and scaled evidence
+   multiplied by soft attention. Each score has its own calibrated threshold.
+7. Interpolate each threshold at the matched nominal frame's progress. Each chart
+   marks its own `score > threshold` crossings. The primary score used by the
+   existing summary, exported video and epsilon is the attention-weighted score;
+   the three experimental alarms are not fused into a new combined alarm.
 
-The single-frame matcher and calibration protocol
-`matched_patch_normality_progress_v4_symmetric_local` are restored. Features are
-reused with `rebuild_nominal_cache: false`; v5 shortlist profiles and thresholds
-must be rebuilt. Existing compatible v4 calibration can be reused. No new config
-parameter is needed. Restoring one local comparison per observation reduces
-calibration cost; nominal-only calibration still uses nested whole-run holdouts.
+Set just one new parameter manually in the ignored `pipeline_config.json`:
 
-Replay diagnostics now expose six views: raw local residuals, baseline-subtracted
-residuals, variability-scaled evidence, attention-weighted evidence before pooling,
-final pooled evidence, and the effective attention multiplier. Raw and subtracted
-views share a zero-based colour scale. Scaled, weighted and pooled views share a
-second zero-based scale (at least twice the current threshold); the two groups
-have different units. These scales are reported numerically and may change
-between observations. Do not compare brightness across groups or timestamps.
-The chart always plots the top-1% average of final pooled evidence; changing the
-view never changes the detector, score or threshold.
+```json
+"dino_metric": "euclidean"
+```
 
-Stop replay at the object, then click its location in the heatmap. The inspector
-shows the patch row/column, observation timestamp, raw distance, expected nominal
-distance, positive excess, variability denominator, standardized evidence,
-effective attention multiplier, weighted evidence, pooled evidence, and current
-frame score/threshold. It rejects an inspection if the observation advances while
-fetching the values. For example, a zero excess identifies baseline subtraction;
-a large denominator reduces standardized evidence; attention multiplies by
-0.55-1.0 with the usual minimum weight. The final patch value also includes its
-3x3 neighborhood, so it need not equal that patch's pre-pooling evidence.
+Omitting it defaults to `euclidean`. Use `"mahalanobis"` for the alternative.
+Only these exact spellings are accepted. Both modes keep CLS/stage frame
+retrieval and the one-selected-frame restriction. Neither uses final spatial
+pooling. The 5% fraction is fixed, not another configuration knob.
 
-All comparisons now use the displayed nominal frame. The diagnostics are produced
-by the same calculation used for decisions, not a second implementation. Only
-the latest per-camera numerical diagnostic is retained, outside the score history,
-and fetched when clicked. Extra diagnostic views add rendering work to replay
-but do not run DINO again or add work to memory calibration. The preceding
-shortlist experiment is commit `c8121c2`; this restoration can be reverted as a
-single commit followed by recalibration. Keep the model and threshold scale fixed.
+Mahalanobis mode uses a **regularized diagonal covariance**, not a full covariance
+matrix. A fixed, evenly spaced subset of at most 32 DINO channels bounds storage
+and fitting cost. Within the selected frame, find forward and reverse 3x3 local
+matches by Euclidean distance in that subspace; retain their signed feature
+residual vectors. Learn per-patch/per-progress vector means and variances from
+other nominal runs, with equal-run moments and sparse-bin shrinkage. Runtime
+computes `sqrt(sum((residual - mean)**2 / regularized_variance))` in each direction
+and takes their maximum at each patch. Multiply by the same soft attention
+`0.5 + 0.5 * weight`, then average the highest 5%. This centers/scales the vector
+once; it does **not** subtract or divide by the scalar Euclidean profile again.
+The diagonal approximation does not model correlations between channels, and
+channel subsampling may lose useful information. Its detection accuracy needs lab
+validation; it is not guaranteed to improve over Euclidean scoring.
+
+The new calibration protocol is
+`matched_patch_metrics_progress_v6_top5_unpooled`. Old profiles/thresholds and
+thresholds from the other metric are incompatible. With `rebuild_nominal_cache:
+false`, model-compatible extracted features are reused. Recalibrate with
+`vision-memory` after switching metrics, then restart replay. Use distinct
+`vision_memory_name` values if you want to retain each metric's calibration;
+changing the name to an empty cache requires extraction again. The three
+Euclidean scores share one matching/calibration pass, not three separate builds.
+Nominal-only calibration still uses nested whole-recording holdouts.
+
+Replay displays separate score/threshold charts because the baseline-subtracted
+score has feature-distance units and the other scores are dimensionless. The
+same per-variant scores, thresholds and alarms are saved as flat CSV columns and
+in JSON; exported calibration/replay score plots also show separate axes.
+
+Euclidean heatmap views show raw local residuals, baseline-subtracted residuals,
+variability-scaled evidence, attention-weighted evidence, and the effective
+attention multiplier. The final view is the same unpooled attention-weighted map.
+Mahalanobis shows its distance before attention, attention-weighted distance, and
+the attention multiplier; scalar baseline/scaling views are hidden. Raw/subtracted
+Euclidean views share one zero-based colour scale, and scaled/weighted views share
+another. Do not compare brightness across groups or timestamps. Selecting a
+heatmap never changes any graph or decision.
+
+Stop replay and click the object to inspect its numerical patch values. Diagnostics
+come from the decision calculation and reject inspection if the observation changes
+while fetching. They are retained only for the latest frame and do not rerun DINO.
+The legacy diagnostic array key `pooled` now aliases the unpooled final evidence
+for endpoint compatibility; it no longer performs any pooling.
 
 This tolerates movement by one patch, including an object moved by that amount;
 it cannot distinguish intentional task-critical small displacements from nuisance
@@ -568,7 +591,7 @@ Evaluate the result on held-out normal and failure recordings, including delay.
 `dino_threshold_scale` is the existing sensitivity control: 1.0 uses calibration,
 0.8 lowers the bound by 20%, and 1.1 raises it by 10%. It changes the decision
 limit only and requires a replay restart, not recalibration. Use 1.0 for an initial
-baseline. The scored heatmap now shows the same pooled evidence used for the
+baseline. The scored heatmap now shows the same unpooled attention-weighted evidence used for the
 score. Replay uses shared scales for the diagnostic groups described above;
 exported batch videos retain their threshold-relative scale. Colors are not
 probabilities, and the final decision uses the aggregated score.

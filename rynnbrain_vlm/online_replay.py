@@ -376,6 +376,11 @@ class OnlineDetector:
 def save_plot(rows, path, probability):
     if not rows:
         return
+    if rows[-1].get('score_variants'):
+        import pandas as pd
+        from vision_dinov2.visualization import plot_score_variants
+        plot_score_variants(pd.DataFrame(rows), 'timestamp_sec', list(rows[-1]['score_variants']), path)
+        return
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

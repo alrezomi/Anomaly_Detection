@@ -29,6 +29,7 @@ class DinoReplayDetector:
         from vision_dinov2.dinov2_features import DINOv2FeatureExtractor
         from vision_dinov2.threshold import validate_threshold_scale
         from vision_dinov2.model_settings import model_settings
+        from vision_dinov2.metrics import validate_metric
         from rosbag_io import RosbagImageSource
         self.config = config
         self.threshold_scale = validate_threshold_scale(config.get('dino_threshold_scale', 1.0))
@@ -43,6 +44,7 @@ class DinoReplayDetector:
         self.signature = settings.nominal_cache_runtime_signature()
         model_name, input_size = model_settings(config, settings.DINO_INPUT_SIZE)
         self.signature.update(model_name=model_name, dino_input_size=input_size,
+                              dino_metric=validate_metric(config.get('dino_metric', 'euclidean')),
                               stage_constrained_matching=config.get('stage_constrained_matching', False))
         calibration_bags = config.get('dino_calibration_bags', [])
         self.signature['calibration_sources'] = settings.source_signatures([
@@ -63,7 +65,7 @@ class DinoReplayDetector:
         self.note += (f" Patches use symmetric 3x3 residuals within one selected nominal frame, "
                       "then learned nominal variation and soft attention weighting. "
                       "The displayed reference frame supplies every patch comparison and anchors progress. "
-                      "The score averages the largest 1% of 3x3-pooled responses. "
+                      "Scores average the largest 5% without spatial pooling; each has its own threshold. "
                       f"Thresholds use per-recording progress quantiles from {calibration_label}. "
                       f"Threshold multiplier {self.threshold_scale:g}. "
                       "Calibration recordings are excluded from evaluation.")
@@ -131,7 +133,8 @@ class DinoReplayDetector:
         diagnostics = {}
         decision = score_matched_frame(score, float(best['progress']), self.thresholds,
                                       getattr(self, 'threshold_scale', 1.0),
-                                      patches=patches, attention_weights=weights, diagnostics=diagnostics)
+                                      patches=patches, attention_weights=weights, diagnostics=diagnostics,
+                                      query_features=features, reference_features=best['features'])
         score, threshold, base_threshold = decision['score'], decision['threshold'], decision['base_threshold']
         scoring_sec = time.monotonic() - started
         self.diagnostic_previews = {}
@@ -145,6 +148,7 @@ class DinoReplayDetector:
                     self.diagnostic_previews[name] = Image.fromarray(make_heatmap_overlay(image, values, grid,
                                                                                          scale_max=maximum))
             self.diagnostic_data = dict(timestamp_sec=float(timestamp), grid=grid,
+                metric=decision['metric'], score_variants=decision['score_variants'],
                 raw_color_max=raw_max, evidence_color_max=evidence_max,
                 score=float(score), threshold=float(threshold),
                 stages={name: values.tolist() for name, values in diagnostics.items()})

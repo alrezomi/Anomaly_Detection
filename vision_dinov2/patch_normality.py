@@ -1,6 +1,6 @@
 """Normal matched-patch residuals, learned only from retrieval recordings.
 
-This is a scalar residual model, not a full-covariance PaDiM implementation.
+Supports scalar Euclidean residuals and diagonal-covariance feature residuals.
 Match first using the existing CLS/attention matcher, then measure how unusual
 each patch difference is at that matched progress. No test-time adaptation.
 """
@@ -10,7 +10,7 @@ import numpy as np
 
 
 def fit_patch_profile(memory, n_bins=30, *, top_k_cls=5, attention_power=1.5,
-                      min_weight=.1, stage_constrained_matching=False):
+                      min_weight=.1, stage_constrained_matching=False, metric="euclidean"):
     """Cross-recording matches avoid the zero residual from matching oneself.
 
     Accumulate moments per recording/bin before combining them. Repeating frames
@@ -18,13 +18,19 @@ def fit_patch_profile(memory, n_bins=30, *, top_k_cls=5, attention_power=1.5,
     recording's small residual accumulator in RAM, not feature-vector copies.
     """
     from .anomaly_detection import compare_frame_to_nominal_memory
+    from .metrics import validate_metric, local_residual_vectors
+    validate_metric(metric)
     ids = sorted({item["video_id"] for item in memory})
     if len(ids) < 2:
         raise ValueError("Patch normality requires at least two nominal recordings.")
     if n_bins < 1:
         raise ValueError("Patch normality needs at least one progress bin.")
     patch_count = memory[0]["features"].shape[0]
-    totals = np.zeros((n_bins, patch_count), dtype=np.float64)
+    channels = np.linspace(0, memory[0]["features"].shape[1] - 1,
+                           min(32, memory[0]["features"].shape[1]), dtype=int)
+    shape = (n_bins, patch_count, len(channels)) if metric == "mahalanobis" else (n_bins, patch_count)
+    totals = np.zeros(shape, dtype=np.float64)
+    broadcast = (slice(None),) + (None,) * (totals.ndim - 1)
     squares = np.zeros_like(totals)
     runs = np.zeros(n_bins, dtype=int)
     global_means, global_squares = [], []
@@ -48,12 +54,17 @@ def fit_patch_profile(memory, n_bins=30, *, top_k_cls=5, attention_power=1.5,
             if residual.shape != (patch_count,) or not np.isfinite(residual).all():
                 raise ValueError("Nominal patch residuals have inconsistent shape or nonfinite values.")
             index = min(int(progress * n_bins), n_bins - 1)
-            sums[index] += residual
-            sums2[index] += residual ** 2
+            if metric == "mahalanobis":
+                vectors = local_residual_vectors(query["features"], match["features"], channels).astype(np.float64)
+                sums[index] += vectors.mean(axis=0)
+                sums2[index] += (vectors ** 2).mean(axis=0)
+            else:
+                sums[index] += residual
+                sums2[index] += residual ** 2
             counts[index] += 1
         valid = counts > 0
-        totals[valid] += sums[valid] / counts[valid, None]
-        squares[valid] += sums2[valid] / counts[valid, None]
+        totals[valid] += sums[valid] / counts[valid][broadcast]
+        squares[valid] += sums2[valid] / counts[valid][broadcast]
         runs[valid] += 1
         global_means.append(sums.sum(axis=0) / counts.sum())
         global_squares.append(sums2.sum(axis=0) / counts.sum())
@@ -61,15 +72,17 @@ def fit_patch_profile(memory, n_bins=30, *, top_k_cls=5, attention_power=1.5,
     global_square = np.mean(global_squares, axis=0)
     # Three recording-equivalents of shrinkage prevent sparse bins estimating
     # near-zero variance. This also gives empty bins a learned finite fallback.
-    trust = runs[:, None] / (runs[:, None] + 3.)
-    mean = trust * totals / np.maximum(runs[:, None], 1) + (1 - trust) * global_mean
-    second = trust * squares / np.maximum(runs[:, None], 1) + (1 - trust) * global_square
+    run_weights = runs[broadcast]
+    trust = run_weights / (run_weights + 3.)
+    mean = trust * totals / np.maximum(run_weights, 1) + (1 - trust) * global_mean
+    second = trust * squares / np.maximum(run_weights, 1) + (1 - trust) * global_square
     variance = np.maximum(second - mean ** 2, 0.)
     global_std = np.sqrt(np.maximum(global_square - global_mean ** 2, 0.))
     # Use the typical nonzero nominal residual as the noise scale too. A nearly
     # constant patch must not acquire enormous evidence from tiny numerical or
     # lighting differences merely because its estimated variance is near zero.
-    positive_mean = global_mean[global_mean > 0]
+    magnitude = np.abs(global_mean) if metric == 'mahalanobis' else global_mean
+    positive_mean = magnitude[magnitude > 0]
     floor = max(float(np.median(global_std)),
                 float(np.median(positive_mean)) if positive_mean.size else 0., 1e-6)
     profile = dict(centers=(np.arange(n_bins) + .5) / n_bins,
@@ -77,6 +90,13 @@ def fit_patch_profile(memory, n_bins=30, *, top_k_cls=5, attention_power=1.5,
                    scale=np.sqrt(variance + floor ** 2).astype(np.float32),
                    scale_floor=np.asarray(floor), run_count=runs,
                    training_runs=np.asarray(len(ids)))
+    profile["metric"] = np.asarray(metric)
+    if metric == "mahalanobis":
+        profile.update(channels=channels, feature_dimension=np.asarray(memory[0]["features"].shape[1]),
+                       vector_mean=mean.astype(np.float32),
+                       vector_variance=(variance + floor ** 2).astype(np.float32),
+                       mean=np.sqrt(np.mean(mean ** 2, axis=-1)).astype(np.float32),
+                       scale=np.sqrt(np.mean(variance + floor ** 2, axis=-1)).astype(np.float32))
     validate_patch_profile(profile, patch_count)
     print(f"Patch normality: {len(ids)} nominal runs; scale floor={floor:.6g}; "
           f"{int(np.sum(runs < 2))}/{n_bins} bins have fewer than two contributing runs.", flush=True)
@@ -84,6 +104,8 @@ def fit_patch_profile(memory, n_bins=30, *, top_k_cls=5, attention_power=1.5,
 
 
 def validate_patch_profile(profile, patch_count=None):
+    from .metrics import validate_metric
+    metric = validate_metric(str(profile.get("metric", "euclidean")))
     required = {"centers", "mean", "scale", "scale_floor", "run_count", "training_runs"}
     if not required.issubset(profile):
         raise ValueError("Incomplete DINO patch-normality profile; rebuild vision-memory.")
@@ -100,15 +122,29 @@ def validate_patch_profile(profile, patch_count=None):
             or not np.isfinite(profile["scale_floor"]) or float(profile["scale_floor"]) <= 0
             or int(profile["training_runs"]) < 2):
         raise ValueError("Invalid DINO patch-normality profile; rebuild vision-memory.")
+    if metric == "mahalanobis":
+        channels = np.asarray(profile.get("channels", []))
+        vm, vv = np.asarray(profile.get("vector_mean")), np.asarray(profile.get("vector_variance"))
+        if (channels.ndim != 1 or not len(channels) or channels.dtype.kind not in 'iu'
+                or (channels < 0).any() or (channels >= int(profile.get("feature_dimension", 0))).any()
+                or vm.shape != (*mean.shape, len(channels)) or vv.shape != vm.shape
+                or not np.isfinite(vm).all() or not np.isfinite(vv).all() or (vv <= 0).any()):
+            raise ValueError("Invalid Mahalanobis profile; rebuild vision-memory.")
 
 
-def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics=None):
-    """Return one dimensionless score and its spatially pooled evidence map.
+def top_five_percent(values):
+    values = np.asarray(values)
+    count = max(1, int(np.ceil(.05 * values.size)))
+    return float(np.partition(values, values.size - count)[-count:].mean())
 
-    Subtract expected residuals and divide by regularized nominal variability.
-    Restore soft attention (at least half weight), without redistributing weight
-    from matched regions. Average 3x3 neighborhoods, then the largest
-    1% of those responses, to retain small objects without relying on one pixel.
+
+def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics=None,
+                   query_features=None, reference_features=None, scores=None):
+    """Top-5% unpooled scores, with soft attention on the primary score.
+
+    Euclidean variants: baseline-subtracted, variability-scaled, and weighted.
+    Mahalanobis: centered/scaled vector residuals with soft attention. The
+    legacy diagnostic key 'pooled' aliases the final UNPOOLED evidence map.
     """
     patches = np.asarray(patches, dtype=np.float64)
     weights = np.asarray(attention_weights, dtype=np.float64)
@@ -120,21 +156,31 @@ def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics
         raise ValueError("Invalid patch distances, weights or progress.")
     if profile["mean"].shape[1] != patches.size:
         raise ValueError("Patch-normality grid does not match extracted features.")
-    centers = profile["centers"]
-    right = min(int(np.searchsorted(centers, progress, side="right")), len(centers) - 1)
-    left = max(right - 1, 0)
-    fraction = np.clip((progress - centers[left]) /
-                       max(float(centers[right] - centers[left]), 1e-12), 0., 1.)
-    mean = (1 - fraction) * profile["mean"][left] + fraction * profile["mean"][right]
-    scale = (1 - fraction) * profile["scale"][left] + fraction * profile["scale"][right]
-    excess = np.maximum(patches - mean, 0.)
-    standardized = excess / scale
+    from .metrics import interpolate_profile
     multiplier = .5 + .5 * weights
-    evidence = standardized * multiplier
-    padded = np.pad(evidence.reshape(grid, grid), 1, mode="edge")
-    heatmap = np.lib.stride_tricks.sliding_window_view(padded, (3, 3)).mean(axis=(-1, -2)).ravel()
-    count = max(1, int(np.ceil(.01 * heatmap.size)))
-    score = float(np.partition(heatmap, heatmap.size - count)[-count:].mean())
+    if str(profile.get("metric", "euclidean")) == "mahalanobis":
+        from .metrics import mahalanobis_patches
+        if query_features is None or reference_features is None:
+            raise ValueError("Mahalanobis scoring requires query and matched reference features.")
+        patches = mahalanobis_patches(query_features, reference_features, progress, profile)
+        # Mahalanobis already centers and scales the vector residual: never apply
+        # the scalar Euclidean normality correction a second time.
+        mean, scale = np.zeros_like(patches), np.ones_like(patches)
+        excess = standardized = patches
+        evidence = patches * multiplier
+        variants = dict(mahalanobis=top_five_percent(evidence))
+    else:
+        mean = interpolate_profile(profile, progress, 'mean')
+        scale = interpolate_profile(profile, progress, 'scale')
+        excess = np.maximum(patches - mean, 0.)
+        standardized = excess / scale
+        evidence = standardized * multiplier
+        variants = dict(baseline=top_five_percent(excess), scaled=top_five_percent(standardized),
+                        weighted=top_five_percent(evidence))
+    heatmap = evidence
+    score = top_five_percent(evidence)
+    if scores is not None:
+        scores.update(variants)
     if diagnostics is not None:
         diagnostics.update(raw=patches, mean=mean, scale=scale, excess=excess,
                            standardized=standardized, multiplier=multiplier,

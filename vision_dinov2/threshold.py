@@ -8,7 +8,8 @@ import pandas as pd
 from .anomaly_detection import compare_frame_to_nominal_memory
 
 
-ATTENTION_CALIBRATION_METHOD = "matched_patch_normality_progress_v4_symmetric_local"
+ATTENTION_CALIBRATION_METHOD = "matched_patch_metrics_progress_v6_top5_unpooled"
+SCORE_VARIANTS = ("baseline", "scaled", "weighted", "mahalanobis")
 THRESHOLD_QUANTILE = 0.95
 THRESHOLD_MARGIN = 1.10
 
@@ -26,6 +27,18 @@ def build_attention_threshold(calibration_df, n_bins=30, min_points_per_bin=2,
         quantile=THRESHOLD_QUANTILE, margin=THRESHOLD_MARGIN, min_points_per_bin=min_points_per_bin,
         smooth_window=smooth_window, threshold_floor_quantile=threshold_floor_quantile)
     table['method'] = ATTENTION_CALIBRATION_METHOD
+    for name in SCORE_VARIANTS:
+        if f'score_{name}' not in rows:
+            continue
+        variant_rows = rows.copy()
+        variant_rows['score'] = rows[f'score_{name}']
+        variant_table = build_adaptive_visual_threshold_from_scores(variant_rows, n_bins=n_bins,
+            quantile=THRESHOLD_QUANTILE, margin=THRESHOLD_MARGIN, min_points_per_bin=min_points_per_bin,
+            smooth_window=smooth_window, threshold_floor_quantile=threshold_floor_quantile)
+        table[f'threshold_{name}'] = variant_table.adaptive_threshold
+        rows[f'threshold_{name}'] = np.interp(rows.matched_progress, table.stage_center,
+                                             table[f'threshold_{name}'])
+        rows[f'alarm_{name}'] = rows[f'score_{name}'] > rows[f'threshold_{name}']
     table.attrs['score_mode'] = 'attention'
     rows['adaptive_threshold'] = np.interp(rows.matched_progress,
         table.stage_center, table.adaptive_threshold)
@@ -38,7 +51,7 @@ def build_attention_threshold(calibration_df, n_bins=30, min_points_per_bin=2,
 
 
 def calibrate_attention_leave_one_video_out(nominal_memory, stage_constrained_matching=False,
-        top_k_cls=5, attention_power=1.5, min_weight=.10, **threshold_settings):
+        top_k_cls=5, attention_power=1.5, min_weight=.10, metric="euclidean", **threshold_settings):
     from .patch_normality import fit_patch_profile
     ids = sorted({item['video_id'] for item in nominal_memory})
     if len(ids) < 3:
@@ -52,12 +65,12 @@ def calibrate_attention_leave_one_video_out(nominal_memory, stage_constrained_ma
         references = [item for item in nominal_memory if item['video_id'] != run_id]
         # The held-out execution must not influence either the matcher memory
         # or the variability model used to score its calibration frames.
-        profile = fit_patch_profile(references, n_bins=threshold_settings.get("n_bins", 30), **matcher)
+        profile = fit_patch_profile(references, n_bins=threshold_settings.get("n_bins", 30), metric=metric, **matcher)
         rows.extend(score_calibration_memory(queries, references, run_id,
                     patch_profile=profile, **matcher))
     table, rows = build_attention_threshold(pd.DataFrame(rows), **threshold_settings)
     table.attrs["patch_profile"] = fit_patch_profile(nominal_memory,
-        n_bins=threshold_settings.get("n_bins", 30), **matcher)
+        n_bins=threshold_settings.get("n_bins", 30), metric=metric, **matcher)
     rows["calibration_role"] = "cross_fitted_progress_calibration"
     return table, rows
 
@@ -77,12 +90,18 @@ def scaled_threshold(table: pd.DataFrame, scale: float) -> pd.DataFrame:
     result["base_threshold"] = result["adaptive_threshold"]
     result["threshold_scale"] = validate_threshold_scale(scale)
     result["adaptive_threshold"] *= result["threshold_scale"]
+    for name in SCORE_VARIANTS:
+        key = f'threshold_{name}'
+        if key in result:
+            result[f'base_{key}'] = result[key]
+            result[key] *= float(scale)
     result.attrs['threshold_scale'] = float(scale)
     return result
 
 
 def score_matched_frame(score, progress, threshold_table, threshold_scale=1.0,
-                        *, patches=None, attention_weights=None, diagnostics=None):
+                        *, patches=None, attention_weights=None, diagnostics=None,
+                        query_features=None, reference_features=None):
     """Apply the same decision rule in replay, batch CSVs and exported videos.
 
     A batch table may already be scaled; replay passes its multiplier directly.
@@ -91,18 +110,30 @@ def score_matched_frame(score, progress, threshold_table, threshold_scale=1.0,
     from .anomaly_detection import threshold_for_progress
     raw_score = float(score)
     heatmap = None
+    scores = {}
     if "patch_profile" in threshold_table.attrs:
         from .patch_normality import patch_evidence
         score, heatmap = patch_evidence(patches, attention_weights, progress, threshold_table.attrs["patch_profile"],
-                                       diagnostics=diagnostics)
+                                       diagnostics=diagnostics, query_features=query_features,
+                                       reference_features=reference_features, scores=scores)
     scale = validate_threshold_scale(threshold_scale)
     bound = threshold_for_progress(progress, threshold_table)
     base = (float(np.interp(progress, threshold_table.stage_center,
                             threshold_table.base_threshold))
             if "base_threshold" in threshold_table else bound)
+    comparisons = {}
+    for name, value in scores.items():
+        column = f'threshold_{name}'
+        if column not in threshold_table:
+            raise ValueError(f'Missing {name} threshold; rebuild vision-memory.')
+        limit = float(np.interp(progress, threshold_table.stage_center, threshold_table[column])) * scale
+        comparisons[name] = dict(score=value, threshold=limit, above_threshold=bool(value > limit))
+    metric = str(threshold_table.attrs.get('patch_profile', {}).get('metric', 'euclidean'))
     return dict(score=float(score), threshold=bound * scale,
                 base_threshold=base, score_mode="attention", raw_global_score=raw_score,
-                heatmap=heatmap)
+                metric=metric, score_variants=comparisons, heatmap=heatmap,
+                **{f'{field}_{name}': values[source] for name, values in comparisons.items()
+                   for field, source in [('score', 'score'), ('threshold', 'threshold'), ('alarm', 'above_threshold')]})
 
 
 def score_calibration_memory(query_memory, reference_memory, run_id, *, top_k_cls=5,
@@ -116,16 +147,19 @@ def score_calibration_memory(query_memory, reference_memory, run_id, *, top_k_cl
             top_k_cls=top_k_cls, attention_power=attention_power, min_weight=min_weight,
             required_stage=int(query["stage"]) if stage_constrained_matching else None)
         raw_score = float(score)
+        variants = {}
         if patch_profile is not None:
             from .patch_normality import patch_evidence
-            score, _ = patch_evidence(patches, weights, float(match["progress"]), patch_profile)
+            score, _ = patch_evidence(patches, weights, float(match["progress"]), patch_profile,
+                query_features=query["features"], reference_features=match["features"], scores=variants)
         rows.append(dict(held_out_video_id=run_id, query_frame_id=int(query["frame_id"]),
             query_bag=str(getattr(query.get('source'), 'bag_path', query.get('video_path', ''))),
             query_progress=float(query["progress"]), matched_progress=float(match["progress"]),
             matched_video_id=int(match["video_id"]), matched_frame_id=int(match["frame_id"]),
             matched_timestamp_sec=float(match["timestamp_sec"]), score=float(score), raw_global_score=raw_score,
             cls_distance=float(distance), query_stage=int(query.get("stage", -1)),
-            matched_stage=int(match.get("stage", -1))))
+            matched_stage=int(match.get("stage", -1)),
+            **{f'score_{name}': value for name, value in variants.items()}))
     return rows
 
 def build_adaptive_visual_threshold_from_scores(

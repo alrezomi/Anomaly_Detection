@@ -53,6 +53,7 @@ TEST_VIDEO_PATH = test_video_path()
 
 MODEL_NAME = "facebook/dinov2-small"
 DINO_INPUT_SIZE = 518
+DINO_METRIC = "euclidean"
 
 SAMPLE_FPS = 2.0
 START_SEC = None
@@ -116,6 +117,7 @@ def nominal_cache_signature() -> dict:
     signature = {
         "format_version": 1,
         "score_mode": "attention",
+        "dino_metric": DINO_METRIC,
         "sources": source_signatures(NOMINAL_VIDEO_PATHS),
         "model_name": MODEL_NAME,
         "dino_input_size": DINO_INPUT_SIZE,
@@ -268,6 +270,7 @@ def main(mode: str = "all") -> None:
         if CALIBRATION_VIDEO_PATHS:
             from .patch_normality import fit_patch_profile
             patch_profile = fit_patch_profile(nominal_memory, n_bins=THRESHOLD_BINS,
+                metric=DINO_METRIC,
                 top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
                 stage_constrained_matching=STAGE_CONSTRAINED_MATCHING)
             rows = []
@@ -304,7 +307,7 @@ def main(mode: str = "all") -> None:
             print("Calibrating from nominal_bags only: each complete query recording is excluded "
                   "from both reference matching and patch-normality fitting. No self-matches.", flush=True)
             adaptive_threshold_df, calibration_df = calibrate_attention_leave_one_video_out(
-                nominal_memory, stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
+                nominal_memory, metric=DINO_METRIC, stage_constrained_matching=STAGE_CONSTRAINED_MATCHING,
                 top_k_cls=TOP_K_CLS, attention_power=ATTENTION_POWER, min_weight=MIN_WEIGHT,
                 n_bins=THRESHOLD_BINS, min_points_per_bin=MIN_POINTS_PER_BIN,
                 smooth_window=THRESHOLD_SMOOTH_WINDOW, threshold_floor_quantile=THRESHOLD_FLOOR_QUANTILE)

@@ -148,7 +148,8 @@ class AttentionTests(unittest.TestCase):
                 with patch.multiple(runner, NOMINAL_VIDEO_PATHS=[source],
                         CALIBRATION_VIDEO_PATHS=[RosbagImageSource(x, '/camera') for x in calibration]):
                     signature = runner.nominal_cache_signature()
-                table, rows = build_attention_threshold(pd.DataFrame(dict(score=[.1, .2], held_out_video_id=[0, 1], matched_progress=[.5,.5])))
+                table, rows = build_attention_threshold(pd.DataFrame(dict(score=[.1, .2], held_out_video_id=[0, 1], matched_progress=[.5,.5], score_baseline=[.1,.2],
+                    score_scaled=[.1,.2], score_weighted=[.1,.2])))
                 table.attrs["patch_profile"] = fit_patch_profile([self.item(1, run=0), self.item(2, run=1)])
                 directory = Path(folder) / 'camera'
                 save_nominal_cache(directory, [self.item(1)], 4, table, rows, signature)
@@ -170,7 +171,8 @@ class AttentionTests(unittest.TestCase):
         image = Image.new('RGB', (56, 56))
         extractor = Mock()
         extractor.extract.return_value = query['features'], query['attention'], query['cls'], 4
-        table, _ = build_attention_threshold(pd.DataFrame(dict(score=[.05, .1], held_out_video_id=[0, 1], matched_progress=[.5,.5])))
+        table, _ = build_attention_threshold(pd.DataFrame(dict(score=[.05, .1], held_out_video_id=[0, 1], matched_progress=[.5,.5], score_baseline=[.1,.2],
+                    score_scaled=[.1,.2], score_weighted=[.1,.2])))
         table.attrs["patch_profile"] = fit_patch_profile([self.item(1, run=0), self.item(2, run=1)])
         detector = DinoReplayDetector.__new__(DinoReplayDetector)
         detector.extractor, detector.thresholds, detector.memory = extractor, table, memory
