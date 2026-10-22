@@ -96,28 +96,16 @@ class MetricTests(unittest.TestCase):
             with self.subTest(metric=metric):
                 table, rows = calibrate_attention_leave_one_video_out(data, metric=metric, n_bins=2,
                                                                       stage_constrained_matching=True)
-                variants = ['weighted'] if metric == 'mahalanobis' else ['weighted', 'pooled']
+                variants = ['weighted', 'pooled']
                 for name in variants:
                     self.assertIn(f'threshold_{name}', table)
                     self.assertTrue(np.isfinite(rows[f'score_{name}']).all())
-                if metric == 'mahalanobis':
-                    self.assertNotIn('score_pooled', rows)
-                    self.assertNotIn('threshold_pooled', table)
                 self.assertTrue((rows.matched_video_id != rows.held_out_video_id).all())
                 signature = dict(calibration_method=ATTENTION_CALIBRATION_METHOD, dino_metric=metric)
                 with tempfile.TemporaryDirectory() as directory:
-                    if metric == 'mahalanobis':
-                        # The correction must reuse earlier v7 calibration
-                        # without changing the primary threshold or score.
-                        table['threshold_pooled'] = table.adaptive_threshold / 2
-                        rows['score_pooled'] = rows.score / 2
                     save_nominal_cache(directory, data, 4, table, rows, signature)
                     loaded = load_nominal_cache(directory, signature)
                     self.assertIsNotNone(loaded)
-                    if metric == 'mahalanobis':
-                        self.assertNotIn('threshold_pooled', loaded[2])
-                        self.assertNotIn('score_pooled', loaded[3])
-                        np.testing.assert_array_equal(loaded[2].adaptive_threshold, table.adaptive_threshold)
                     changed = dict(signature, dino_metric='euclidean' if metric == 'mahalanobis' else 'mahalanobis')
                     self.assertIsNone(load_nominal_cache(directory, changed))
                     self.assertIsNotNone(load_feature_cache(directory, changed))

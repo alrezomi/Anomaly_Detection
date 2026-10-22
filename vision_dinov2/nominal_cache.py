@@ -143,7 +143,7 @@ def load_nominal_cache(
     if profile is not None:
         metric = str(profile.get('metric', 'euclidean'))
         from .threshold import SCORE_VARIANTS
-        variants = ('weighted',) if metric == 'mahalanobis' else SCORE_VARIANTS
+        variants = SCORE_VARIANTS
         if metric != saved_signature.get('dino_metric', 'euclidean') or any(
                 f'threshold_{name}' not in threshold or
                 not np.isfinite(threshold[f'threshold_{name}']).all() or
@@ -155,12 +155,6 @@ def load_nominal_cache(
         validate_patch_profile(profile, grid_size ** 2)
         threshold.attrs["patch_profile"] = profile
     calibration = pd.read_csv(required[2])
-    if profile is not None and str(profile.get('metric', 'euclidean')) == 'mahalanobis':
-        # v7's primary Mahalanobis score/threshold are unchanged. Ignore the
-        # accidentally added secondary comparison in already calibrated caches.
-        obsolete = ['score_pooled', 'threshold_pooled', 'alarm_pooled', 'base_threshold_pooled']
-        threshold.drop(columns=obsolete, errors='ignore', inplace=True)
-        calibration.drop(columns=obsolete, errors='ignore', inplace=True)
     print(f"Loaded reusable nominal cache: {directory}")
     print(f"Cached nominal frames: {len(memory)}")
     return memory, grid_size, threshold, calibration
