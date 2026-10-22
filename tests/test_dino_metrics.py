@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 from vision_dinov2.metrics import validate_metric, mahalanobis_patches, local_residual_vectors
-from vision_dinov2.patch_normality import fit_patch_profile, patch_evidence, top_five_percent
+from vision_dinov2.patch_normality import fit_patch_profile, patch_evidence, top_one_percent
 from vision_dinov2.threshold import (calibrate_attention_leave_one_video_out, score_calibration_memory,
     score_matched_frame, scaled_threshold, ATTENTION_CALIBRATION_METHOD)
 from vision_dinov2.nominal_cache import save_nominal_cache, load_nominal_cache, load_feature_cache
@@ -29,18 +29,21 @@ def memory():
 
 
 class MetricTests(unittest.TestCase):
-    def test_five_percent_not_max_or_whole_frame(self):
+    def test_one_percent_and_rounding(self):
         values = np.arange(100, dtype=float)
-        self.assertEqual(top_five_percent(values), 97.)
-        self.assertEqual(top_five_percent(np.arange(21.)), 19.5)
+        self.assertEqual(top_one_percent(values), 99.)
+        self.assertEqual(top_one_percent(np.arange(201.)), 199.)
 
-    def test_three_euclidean_scores_and_no_pooling(self):
+    def test_two_euclidean_scores_before_and_after_pooling(self):
         profile = dict(centers=np.array([.5]), mean=np.ones((1, 100)), scale=np.full((1, 100), 2.))
         raw = np.ones(100)
         raw[50:55] = 9.
         scores, diagnostics = {}, {}
         primary, heatmap = patch_evidence(raw, np.zeros(100), .5, profile, scores=scores, diagnostics=diagnostics)
-        self.assertEqual(scores, dict(baseline=8., scaled=4., weighted=2.))
+        self.assertEqual(set(scores), {'weighted', 'pooled'})
+        self.assertEqual(scores['weighted'], 2.)
+        self.assertEqual(scores['pooled'], top_one_percent(diagnostics['pooled']))
+        self.assertLess(scores['pooled'], scores['weighted'])
         self.assertEqual(primary, 2.)
         self.assertEqual(np.count_nonzero(heatmap), 5)  # no spatial spreading
         np.testing.assert_array_equal(heatmap, diagnostics['weighted'])
@@ -57,7 +60,10 @@ class MetricTests(unittest.TestCase):
         high, _ = patch_evidence(np.zeros(4), np.ones(4), .5, profile, **args)
         low, _ = patch_evidence(np.zeros(4), np.full(4, .1), .5, profile, **args)
         self.assertAlmostEqual(high, np.sqrt(2))
-        self.assertAlmostEqual(low, .55 * high)
+        self.assertAlmostEqual(low, .1 * high)
+        zero, zero_map = patch_evidence(np.zeros(4), np.zeros(4), .5, profile, **args)
+        self.assertEqual(zero, 0.)
+        np.testing.assert_array_equal(zero_map, 0.)
         with self.assertRaisesRegex(ValueError, 'requires'):
             patch_evidence(np.zeros(4), np.ones(4), .5, profile)
 
@@ -90,7 +96,7 @@ class MetricTests(unittest.TestCase):
             with self.subTest(metric=metric):
                 table, rows = calibrate_attention_leave_one_video_out(data, metric=metric, n_bins=2,
                                                                       stage_constrained_matching=True)
-                variants = ['mahalanobis'] if metric == 'mahalanobis' else ['baseline', 'scaled', 'weighted']
+                variants = ['weighted', 'pooled']
                 for name in variants:
                     self.assertIn(f'threshold_{name}', table)
                     self.assertTrue(np.isfinite(rows[f'score_{name}']).all())
@@ -142,11 +148,44 @@ class MetricTests(unittest.TestCase):
         from vision_dinov2.threshold import build_attention_threshold
         import pandas as pd
         data = pd.DataFrame([dict(held_out_video_id=i, matched_progress=.5, score=2.,
-                                 score_baseline=.1, score_scaled=4., score_weighted=2.) for i in range(4)])
+                                 score_pooled=.1, score_weighted=2.) for i in range(4)])
         table, _ = build_attention_threshold(data, n_bins=1)
-        self.assertAlmostEqual(table.threshold_scaled.iloc[0], 40 * table.threshold_baseline.iloc[0])
+        self.assertAlmostEqual(table.threshold_weighted.iloc[0], 20 * table.threshold_pooled.iloc[0])
         profile = dict(centers=np.array([.5]), mean=np.zeros((1, 4)), scale=np.ones((1, 4)))
         table.attrs['patch_profile'] = profile
         result = score_matched_frame(0, .5, table, patches=np.ones(4), attention_weights=np.ones(4))
-        self.assertTrue(result['score_variants']['baseline']['above_threshold'])
-        self.assertFalse(result['score_variants']['scaled']['above_threshold'])
+        self.assertTrue(result['score_variants']['pooled']['above_threshold'])
+        self.assertFalse(result['score_variants']['weighted']['above_threshold'])
+
+    def test_pooling_averages_neighbors_without_wrapping_edges(self):
+        profile = dict(centers=np.array([.5]), mean=np.zeros((1, 100)), scale=np.ones((1, 100)))
+        raw, stages, scores = np.zeros(100), {}, {}
+        raw[55] = 9.
+        patch_evidence(raw, np.ones(100), .5, profile, diagnostics=stages, scores=scores)
+        self.assertEqual(scores['weighted'], 9.)
+        self.assertEqual(scores['pooled'], 1.)
+        self.assertEqual(np.count_nonzero(stages['pooled']), 9)
+        self.assertEqual(stages['pooled'][55], 1.)
+        raw[:] = 0
+        raw[0] = 9.
+        patch_evidence(raw, np.ones(100), .5, profile, diagnostics=stages)
+        self.assertEqual(stages['pooled'][0], 4.)  # edge replication, same as previous pooling
+        self.assertEqual(stages['pooled'][-1], 0.)
+
+    def test_threshold_ramps_preserve_bounds_and_limit_adjacent_changes(self):
+        from vision_dinov2.threshold import build_attention_threshold
+        import pandas as pd
+        rows = pd.DataFrame([dict(held_out_video_id=run, matched_progress=p, score=value,
+                                 score_weighted=value, score_pooled=value / 2)
+                             for run in range(3)
+                             for p, value in zip(np.linspace(.05, .95, 10), [1, 1, 1, 1, 8, 1, 1, 1, 1, 1])])
+        raw, _ = build_attention_threshold(rows, n_bins=10, smooth_window=1)
+        smooth, _ = build_attention_threshold(rows, n_bins=10, smooth_window=3)
+        for column in ['adaptive_threshold', 'threshold_weighted', 'threshold_pooled']:
+            values = smooth[column].to_numpy()
+            self.assertTrue((values >= raw[column] - 1e-12).all())
+            self.assertTrue((values[1:] <= 1.25 * values[:-1] + 1e-12).all())
+            self.assertTrue((values[:-1] <= 1.25 * values[1:] + 1e-12).all())
+        rows[['score', 'score_weighted', 'score_pooled']] = 0.
+        zeros, _ = build_attention_threshold(rows, n_bins=10)
+        np.testing.assert_array_equal(zeros.adaptive_threshold, 0.)

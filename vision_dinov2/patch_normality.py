@@ -132,19 +132,18 @@ def validate_patch_profile(profile, patch_count=None):
             raise ValueError("Invalid Mahalanobis profile; rebuild vision-memory.")
 
 
-def top_five_percent(values):
+def top_one_percent(values):
     values = np.asarray(values)
-    count = max(1, int(np.ceil(.05 * values.size)))
+    count = max(1, int(np.ceil(.01 * values.size)))
     return float(np.partition(values, values.size - count)[-count:].mean())
 
 
 def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics=None,
                    query_features=None, reference_features=None, scores=None):
-    """Top-5% unpooled scores, with soft attention on the primary score.
+    """Top-1% scores before and after edge-padded 3x3 spatial averaging.
 
-    Euclidean variants: baseline-subtracted, variability-scaled, and weighted.
-    Mahalanobis: centered/scaled vector residuals with soft attention. The
-    legacy diagnostic key 'pooled' aliases the final UNPOOLED evidence map.
+    Euclidean retains soft attention; Mahalanobis multiplies by the attention
+    weight directly. The primary score and returned map remain unpooled.
     """
     patches = np.asarray(patches, dtype=np.float64)
     weights = np.asarray(attention_weights, dtype=np.float64)
@@ -163,28 +162,29 @@ def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics
         if query_features is None or reference_features is None:
             raise ValueError("Mahalanobis scoring requires query and matched reference features.")
         patches = mahalanobis_patches(query_features, reference_features, progress, profile)
+        multiplier = weights
         # Mahalanobis already centers and scales the vector residual: never apply
         # the scalar Euclidean normality correction a second time.
         mean, scale = np.zeros_like(patches), np.ones_like(patches)
         excess = standardized = patches
         evidence = patches * multiplier
-        variants = dict(mahalanobis=top_five_percent(evidence))
     else:
         mean = interpolate_profile(profile, progress, 'mean')
         scale = interpolate_profile(profile, progress, 'scale')
         excess = np.maximum(patches - mean, 0.)
         standardized = excess / scale
         evidence = standardized * multiplier
-        variants = dict(baseline=top_five_percent(excess), scaled=top_five_percent(standardized),
-                        weighted=top_five_percent(evidence))
+    padded = np.pad(evidence.reshape(grid, grid), 1, mode='edge')
+    pooled = np.lib.stride_tricks.sliding_window_view(padded, (3, 3)).mean(axis=(-1, -2)).ravel()
+    variants = dict(weighted=top_one_percent(evidence), pooled=top_one_percent(pooled))
     heatmap = evidence
-    score = top_five_percent(evidence)
+    score = variants['weighted']
     if scores is not None:
         scores.update(variants)
     if diagnostics is not None:
         diagnostics.update(raw=patches, mean=mean, scale=scale, excess=excess,
                            standardized=standardized, multiplier=multiplier,
-                           weighted=evidence, pooled=heatmap)
+                           weighted=evidence, pooled=pooled)
     return score, heatmap
 
 

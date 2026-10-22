@@ -142,7 +142,8 @@ def load_nominal_cache(
     threshold = pd.read_csv(required[1])
     if profile is not None:
         metric = str(profile.get('metric', 'euclidean'))
-        variants = ('mahalanobis',) if metric == 'mahalanobis' else ('baseline', 'scaled', 'weighted')
+        from .threshold import SCORE_VARIANTS
+        variants = SCORE_VARIANTS
         if metric != saved_signature.get('dino_metric', 'euclidean') or any(
                 f'threshold_{name}' not in threshold or
                 not np.isfinite(threshold[f'threshold_{name}']).all() or

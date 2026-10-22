@@ -63,9 +63,9 @@ class DinoReplayDetector:
         self.signature['dino_threshold_scale'] = self.threshold_scale
         calibration_label = 'separate nominal recordings' if calibration_bags else 'leave-one-recording-out'
         self.note += (f" Patches use symmetric 3x3 residuals within one selected nominal frame, "
-                      "then learned nominal variation and soft attention weighting. "
+                      "then learned nominal variation and metric-specific attention weighting. "
                       "The displayed reference frame supplies every patch comparison and anchors progress. "
-                      "Scores average the largest 5% without spatial pooling; each has its own threshold. "
+                      "Scores average the largest 1%, before and after 3x3 pooling, with separate thresholds. "
                       f"Thresholds use per-recording progress quantiles from {calibration_label}. "
                       f"Threshold multiplier {self.threshold_scale:g}. "
                       "Calibration recordings are excluded from evaluation.")
@@ -153,7 +153,7 @@ class DinoReplayDetector:
                 score=float(score), threshold=float(threshold),
                 stages={name: values.tolist() for name, values in diagnostics.items()})
             self.preview_image = self.diagnostic_previews['raw']
-            self.scored_preview_image = self.diagnostic_previews['pooled']
+            self.scored_preview_image = self.diagnostic_previews['weighted']
             self.attention_preview_image = self.diagnostic_previews['multiplier']
         else:
             self.preview_image = Image.fromarray(make_heatmap_overlay(image, patches, grid))

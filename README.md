@@ -404,14 +404,14 @@ For each sampled frame (normally 2 fps):
    `evidence = max(distance - mean, 0) / scale`. Restore softened attention
    `0.5 + 0.5 * weight`. Similar local content contributes little through its small
    residual; weights are not redistributed onto the remaining patches.
-6. Average the highest **5%** of patch values directly, without spatial pooling.
-   Euclidean mode reports three scores: positive excess (baseline subtraction),
-   excess divided by nominal scale (variability scaling), and scaled evidence
-   multiplied by soft attention. Each score has its own calibrated threshold.
-7. Interpolate each threshold at the matched nominal frame's progress. Each chart
-   marks its own `score > threshold` crossings. The primary score used by the
-   existing summary, exported video and epsilon is the attention-weighted score;
-   the three experimental alarms are not fused into a new combined alarm.
+6. Produce two attention-weighted maps: the original patch evidence, and its
+   edge-padded **3x3 spatial average**. For each map average the highest **1%** of
+   values into a separate frame score. Both Euclidean and Mahalanobis mode show
+   these two scores; baseline-subtracted/scaled-only scores are no longer charts.
+7. Interpolate each score's own smoothed threshold at the matched nominal frame's
+   progress. Each chart marks its own `score > threshold` crossings. The existing
+   summary, exported video and epsilon use the score **without pooling**. The two
+   experimental alarms are not combined.
 
 Set just one new parameter manually in the ignored `pipeline_config.json`:
 
@@ -421,8 +421,8 @@ Set just one new parameter manually in the ignored `pipeline_config.json`:
 
 Omitting it defaults to `euclidean`. Use `"mahalanobis"` for the alternative.
 Only these exact spellings are accepted. Both modes keep CLS/stage frame
-retrieval and the one-selected-frame restriction. Neither uses final spatial
-pooling. The 5% fraction is fixed, not another configuration knob.
+retrieval and the one-selected-frame restriction. Both report pooled and unpooled
+scores. The 1% fraction is fixed, not another configuration knob.
 
 Mahalanobis mode uses a **regularized diagonal covariance**, not a full covariance
 matrix. A fixed, evenly spaced subset of at most 32 DINO channels bounds storage
@@ -431,32 +431,36 @@ matches by Euclidean distance in that subspace; retain their signed feature
 residual vectors. Learn per-patch/per-progress vector means and variances from
 other nominal runs, with equal-run moments and sparse-bin shrinkage. Runtime
 computes `sqrt(sum((residual - mean)**2 / regularized_variance))` in each direction
-and takes their maximum at each patch. Multiply by the same soft attention
-`0.5 + 0.5 * weight`, then average the highest 5%. This centers/scales the vector
+and takes their maximum at each patch. Multiply **directly by the existing attention
+weight**, without `0.5 + 0.5 * weight`. This is the normalized/powered query-reference
+attention weight with the existing minimum of 0.10, rather than raw attention
+probability. Euclidean mode retains softened attention. Aggregate the top 1% before
+and after 3x3 pooling. This centers/scales the vector
 once; it does **not** subtract or divide by the scalar Euclidean profile again.
 The diagonal approximation does not model correlations between channels, and
 channel subsampling may lose useful information. Its detection accuracy needs lab
 validation; it is not guaranteed to improve over Euclidean scoring.
 
 The new calibration protocol is
-`matched_patch_metrics_progress_v6_top5_unpooled`. Old profiles/thresholds and
+`matched_patch_metrics_progress_v7_top1_pooling_smooth`. Old profiles/thresholds and
 thresholds from the other metric are incompatible. With `rebuild_nominal_cache:
 false`, model-compatible extracted features are reused. Recalibrate with
 `vision-memory` after switching metrics, then restart replay. Use distinct
 `vision_memory_name` values if you want to retain each metric's calibration;
-changing the name to an empty cache requires extraction again. The three
-Euclidean scores share one matching/calibration pass, not three separate builds.
+changing the name to an empty cache requires extraction again. The two scores
+share the same feature extraction, matching and normality fitting.
 Nominal-only calibration still uses nested whole-recording holdouts.
 
-Replay displays separate score/threshold charts because the baseline-subtracted
-score has feature-distance units and the other scores are dimensionless. The
-same per-variant scores, thresholds and alarms are saved as flat CSV columns and
+Replay displays two score/threshold charts: **After attention (no pooling)** and
+**After attention (3x3 pooling)**. Each has its own dimensionless score and limit.
+The per-variant scores, thresholds and alarms are saved as flat CSV columns and
 in JSON; exported calibration/replay score plots also show separate axes.
 
 Euclidean heatmap views show raw local residuals, baseline-subtracted residuals,
 variability-scaled evidence, attention-weighted evidence, and the effective
-attention multiplier. The final view is the same unpooled attention-weighted map.
-Mahalanobis shows its distance before attention, attention-weighted distance, and
+attention multiplier. Both pooled and unpooled heatmaps are available; the default
+view remains unpooled to match the summary score.
+Mahalanobis shows its distance before attention, both attention-weighted maps, and
 the attention multiplier; scalar baseline/scaling views are hidden. Raw/subtracted
 Euclidean views share one zero-based colour scale, and scaled/weighted views share
 another. Do not compare brightness across groups or timestamps. Selecting a
@@ -465,8 +469,8 @@ heatmap never changes any graph or decision.
 Stop replay and click the object to inspect its numerical patch values. Diagnostics
 come from the decision calculation and reject inspection if the observation changes
 while fetching. They are retained only for the latest frame and do not rerun DINO.
-The legacy diagnostic array key `pooled` now aliases the unpooled final evidence
-for endpoint compatibility; it no longer performs any pooling.
+The diagnostic array `weighted` is the unpooled map; `pooled` contains the actual
+3x3 averaged map. Pooling uses edge replication, as in the earlier implementation.
 
 This tolerates movement by one patch, including an object moved by that amount;
 it cannot distinguish intentional task-critical small displacements from nuisance
@@ -582,8 +586,12 @@ Within each progress bin, compute a 95th percentile for each recording, then
 the 95th percentile across those values times 1.10. Every recording has equal
 weight. Bins without two recordings/two frames interpolate populated bins; if all
 bins are sparse, the same two-level quantile is computed globally. The floor is
-the median of recording-level 20th-percentile frame scores. Three-bin median
-smoothing can raise low bounds but never lowers a valid nominal peak.
+the median of recording-level 20th-percentile frame scores. Three-bin
+smoothing retains every valid nominal-bin bound. It raises neighbors of high bins
+until adjacent thresholds differ by at most a factor of 1.25, then rounds the ramps
+with a short symmetric moving average, keeping the upper envelope. This can raise
+thresholds around nominal peaks. It smooths along progress, not elapsed replay time;
+a jump in the matched progress can still jump over several bins.
 These are empirical frame/run quantiles, not a conformal or guaranteed
 whole-execution false-alarm rate.
 Evaluate the result on held-out normal and failure recordings, including delay.

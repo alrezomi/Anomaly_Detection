@@ -22,12 +22,12 @@ class DinoThresholdTests(unittest.TestCase):
                 # Every nominal run has a short, harmless transient.
                 score = .02 + .02 * progress + run * .0001 + (.04 if index == 47 else 0)
                 rows.append(dict(held_out_video_id=run, matched_progress=progress, score=score,
-                                 score_baseline=score, score_scaled=score, score_weighted=score))
+                                 score_pooled=score, score_weighted=score))
         return pd.DataFrame(rows)
 
     def test_degenerate_scores_are_finite_and_invalid_data_is_rejected(self):
         data = self.scores()
-        data[['score', 'score_baseline', 'score_scaled', 'score_weighted']] = 0.
+        data[['score', 'score_pooled', 'score_weighted']] = 0.
         data['matched_progress'] = .5
         table, _ = build_attention_threshold(data)
         self.assertTrue(np.isfinite(table.adaptive_threshold).all())
