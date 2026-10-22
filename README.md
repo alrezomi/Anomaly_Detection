@@ -406,8 +406,8 @@ For each sampled frame (normally 2 fps):
    residual; weights are not redistributed onto the remaining patches.
 6. Produce two attention-weighted maps: the original patch evidence, and its
    edge-padded **3x3 spatial average**. For each map average the highest **1%** of
-   values into a separate frame score. Both Euclidean and Mahalanobis mode show
-   these two scores; baseline-subtracted/scaled-only scores are no longer charts.
+   values into a separate frame score. Euclidean shows these two scores;
+   Mahalanobis keeps only the score without pooling; baseline-subtracted/scaled-only scores are no longer charts.
 7. Interpolate each score's own smoothed threshold at the matched nominal frame's
    progress. Each chart marks its own `score > threshold` crossings. The existing
    summary, exported video and epsilon use the score **without pooling**. The two
@@ -421,8 +421,8 @@ Set just one new parameter manually in the ignored `pipeline_config.json`:
 
 Omitting it defaults to `euclidean`. Use `"mahalanobis"` for the alternative.
 Only these exact spellings are accepted. Both modes keep CLS/stage frame
-retrieval and the one-selected-frame restriction. Both report pooled and unpooled
-scores. The 1% fraction is fixed, not another configuration knob.
+retrieval and the one-selected-frame restriction. Euclidean reports pooled and
+unpooled scores; Mahalanobis reports only its unpooled attention-weighted score. The 1% fraction is fixed, not another configuration knob.
 
 Mahalanobis mode uses a **regularized diagonal covariance**, not a full covariance
 matrix. A fixed, evenly spaced subset of at most 32 DINO channels bounds storage
@@ -434,8 +434,8 @@ computes `sqrt(sum((residual - mean)**2 / regularized_variance))` in each direct
 and takes their maximum at each patch. Multiply **directly by the existing attention
 weight**, without `0.5 + 0.5 * weight`. This is the normalized/powered query-reference
 attention weight with the existing minimum of 0.10, rather than raw attention
-probability. Euclidean mode retains softened attention. Aggregate the top 1% before
-and after 3x3 pooling. This centers/scales the vector
+probability. Euclidean mode retains softened attention. Mahalanobis aggregates the top 1%
+without pooling. This centers/scales the vector
 once; it does **not** subtract or divide by the scalar Euclidean profile again.
 The diagonal approximation does not model correlations between channels, and
 channel subsampling may lose useful information. Its detection accuracy needs lab
@@ -451,8 +451,9 @@ changing the name to an empty cache requires extraction again. The two scores
 share the same feature extraction, matching and normality fitting.
 Nominal-only calibration still uses nested whole-recording holdouts.
 
-Replay displays two score/threshold charts: **After attention (no pooling)** and
-**After attention (3x3 pooling)**. Each has its own dimensionless score and limit.
+Euclidean replay displays two score/threshold charts: **After attention (no pooling)** and
+**After attention (3x3 pooling)**. Mahalanobis displays only **After attention (no pooling)**.
+Each has its own dimensionless score and limit.
 The per-variant scores, thresholds and alarms are saved as flat CSV columns and
 in JSON; exported calibration/replay score plots also show separate axes.
 
@@ -460,7 +461,7 @@ Euclidean heatmap views show raw local residuals, baseline-subtracted residuals,
 variability-scaled evidence, attention-weighted evidence, and the effective
 attention multiplier. Both pooled and unpooled heatmaps are available; the default
 view remains unpooled to match the summary score.
-Mahalanobis shows its distance before attention, both attention-weighted maps, and
+Mahalanobis shows its distance before attention, the unpooled attention-weighted map, and
 the attention multiplier; scalar baseline/scaling views are hidden. Raw/subtracted
 Euclidean views share one zero-based colour scale, and scaled/weighted views share
 another. Do not compare brightness across groups or timestamps. Selecting a
@@ -469,6 +470,9 @@ heatmap never changes any graph or decision.
 Stop replay and click the object to inspect its numerical patch values. Diagnostics
 come from the decision calculation and reject inspection if the observation changes
 while fetching. They are retained only for the latest frame and do not rerun DINO.
+Removing the accidental pooled Mahalanobis comparison does not require recalibration:
+existing v7 caches retain the identical unpooled score and threshold. Pull and restart replay.
+
 The diagnostic array `weighted` is the unpooled map; `pooled` contains the actual
 3x3 averaged map. Pooling uses edge replication, as in the earlier implementation.
 

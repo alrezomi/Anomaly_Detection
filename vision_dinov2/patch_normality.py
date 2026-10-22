@@ -140,7 +140,7 @@ def top_one_percent(values):
 
 def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics=None,
                    query_features=None, reference_features=None, scores=None):
-    """Top-1% scores before and after edge-padded 3x3 spatial averaging.
+    """Top-1% scores, with a pooled comparison only for Euclidean.
 
     Euclidean retains soft attention; Mahalanobis multiplies by the attention
     weight directly. The primary score and returned map remain unpooled.
@@ -157,7 +157,8 @@ def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics
         raise ValueError("Patch-normality grid does not match extracted features.")
     from .metrics import interpolate_profile
     multiplier = .5 + .5 * weights
-    if str(profile.get("metric", "euclidean")) == "mahalanobis":
+    mahalanobis = str(profile.get("metric", "euclidean")) == "mahalanobis"
+    if mahalanobis:
         from .metrics import mahalanobis_patches
         if query_features is None or reference_features is None:
             raise ValueError("Mahalanobis scoring requires query and matched reference features.")
@@ -174,9 +175,11 @@ def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics
         excess = np.maximum(patches - mean, 0.)
         standardized = excess / scale
         evidence = standardized * multiplier
-    padded = np.pad(evidence.reshape(grid, grid), 1, mode='edge')
-    pooled = np.lib.stride_tricks.sliding_window_view(padded, (3, 3)).mean(axis=(-1, -2)).ravel()
-    variants = dict(weighted=top_one_percent(evidence), pooled=top_one_percent(pooled))
+    variants = dict(weighted=top_one_percent(evidence))
+    if not mahalanobis:
+        padded = np.pad(evidence.reshape(grid, grid), 1, mode='edge')
+        pooled = np.lib.stride_tricks.sliding_window_view(padded, (3, 3)).mean(axis=(-1, -2)).ravel()
+        variants['pooled'] = top_one_percent(pooled)
     heatmap = evidence
     score = variants['weighted']
     if scores is not None:
@@ -184,7 +187,9 @@ def patch_evidence(patches, attention_weights, progress, profile, *, diagnostics
     if diagnostics is not None:
         diagnostics.update(raw=patches, mean=mean, scale=scale, excess=excess,
                            standardized=standardized, multiplier=multiplier,
-                           weighted=evidence, pooled=pooled)
+                           weighted=evidence)
+        if not mahalanobis:
+            diagnostics['pooled'] = pooled
     return score, heatmap
 
 

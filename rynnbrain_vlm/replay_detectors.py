@@ -65,7 +65,7 @@ class DinoReplayDetector:
         self.note += (f" Patches use symmetric 3x3 residuals within one selected nominal frame, "
                       "then learned nominal variation and metric-specific attention weighting. "
                       "The displayed reference frame supplies every patch comparison and anchors progress. "
-                      "Scores average the largest 1%, before and after 3x3 pooling, with separate thresholds. "
+                      "Scores average the largest 1%. Euclidean compares pooling choices; Mahalanobis uses no pooling. "
                       f"Thresholds use per-recording progress quantiles from {calibration_label}. "
                       f"Threshold multiplier {self.threshold_scale:g}. "
                       "Calibration recordings are excluded from evaluation.")
