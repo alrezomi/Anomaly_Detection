@@ -658,7 +658,8 @@ Manually add this one selection block to your ignored `pipeline_config.json`:
   "folders": [
     "Nominal/setting 1",
     "Failure_1_grasp_miss"
-  ]
+  ],
+  "labels_csv": "/outputs/dataset_labels.csv"
 }
 ```
 
@@ -702,10 +703,27 @@ This camera OR is a benchmark bag decision, separate from independent replay
 camera plots. All images run at the existing DINO sampling rate (normally 2 fps),
 without replay pacing, VLM intervals, early stopping, or an eight-image limit.
 
-Ground-truth bag labels use the existing final-three eligible stage-message
-policy from `build_dataset_manifest.py`. Actual onset is the first explicit
+When `labels_csv` is set (or `--labels-csv` is supplied), that CSV is the
+**authoritative ground truth**. It needs `bag_path,label` columns; paths may be
+absolute or relative to `/data`. A unique `bag_name` can be used when paths are
+unavailable, but duplicate basenames across selected folders are rejected.
+Labels are `normal`/`fail` (success/nominal/failure aliases are accepted). Missing,
+unknown or duplicate selected labels stop the benchmark. Stage-derived labels
+remain in the audit columns and cannot silently overwrite CSV labels.
+
+Without a CSV, the existing final-three eligible stage-message policy from
+`build_dataset_manifest.py` is used. A `Failure_*` folder name is never a label.
+**Preflight requires known labels and at least one evaluated bag of each class
+before memory preparation or model inference.** A dataset whose stage messages
+are only 1, 2, 3 will otherwise look entirely normal; an automatically generated
+`dataset_labels.csv` based on those same markers may need authoritative correction.
+Do not mark failures solely to obtain an ROC: the labels must reflect the dataset.
+Actual onset is the first explicit
 Error/Fail/Failure/Anomaly-family marker after `STAGE_STARTUP_IGNORE_SEC` (default
-0.1 seconds), read using the existing failure-timing helper. Both clocks are
+0.1 seconds), read using the existing failure-timing helper. Optionally, the
+labels CSV can supply an explicit bag-relative `failure_time_sec` (or
+`recorded_failure_time_sec`) for failure bags. Missing markers/timestamps remain
+missing; a failure label or folder name does not supply an onset time. Both clocks are
 relative to bag start. When stage-constrained matching is enabled, scoring begins
 at the corrected stage-1 marker and retains retrospective numbered-stage matching.
 Failure markers are used for evaluation, never for matching or metric fitting.
@@ -729,6 +747,7 @@ Reports are written into a new timestamped directory under
 | `<metric>_failure_timing_*.png` | Actual onset and first alarm per failure demo, signed errors (negative=early), with misses/missing annotations visible |
 | `runtime.csv`, `runtime_summary.csv` | Model load, feature preparation/reuse, calibration, actual bag-inference wall times, and frame mean/median/p95 by metric/folder |
 | `run.json` | Effective model/memory signatures, selection/label policies, run status, ROC selection and total wall time |
+| `alarm_diagnostics.csv` | Alarm-frame counts/fractions, first-frame crossings and first-alarm camera, for distinguishing isolated crossings from systematic startup alarms |
 
 Both the configured and suggested scales are reported overall and per selected
 folder. Recall is TP/(TP+FN); FPR is FP/(FP+TN). Rates are blank when their class
@@ -754,6 +773,30 @@ selected bags**, not independently validated performance. Nothing rewrites your
 config. Use another held-out set to evaluate a chosen scale. Timing figures show
 both operating points; nominal false-alarm times remain in `bag_results.csv`
 because successful demonstrations have no actual failure onset to subtract.
+
+### Recover DINO reports without repeating inference
+
+If an existing run has valid `frame_results.csv` but incorrect stage-derived
+labels, keep the saved run and regenerate reports with the authoritative CSV:
+
+```bash
+docker compose run --rm --build dino-benchmark \
+  --config /config/pipeline_config.json \
+  --report-only /outputs/experiments/YOUR_EXPERIMENT/dino_benchmark/YOUR_RUN \
+  --labels-csv /outputs/dataset_labels.csv
+```
+
+This reads the saved selection, pooled frame scores and unscaled thresholds.
+It checks both classes, saved frame counts and complete camera coverage. It does
+not read ROS bags, extract features, calibrate memory or load DINO. It preserves
+the original configured scale, selection and original outputs, writing a new
+`reports_<timestamp>/` subdirectory with corrected metrics, ROC, timings and alarm
+diagnostics. CSV labels change evaluation truth, never detector scores. If the
+CSV still labels all evaluated bags normal, recovery stops immediately with the
+class counts. Correct the authoritative labels or include a genuine failure set.
+An absent onset marker remains unavailable unless explicitly supplied in the CSV.
+High nominal false-alarm rates can remain after relabelling: the bag rule still
+uses any frame crossing, and the suggested scale is still exploratory tuning.
 
 ### Independent top and flange DINO replay
 

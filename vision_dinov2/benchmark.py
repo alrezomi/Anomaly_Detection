@@ -249,13 +249,14 @@ def score_bag(config, topic, bag, memory, tables, signature, extractor):
     return rows
 
 
-def run(config, folders, data_root='/data', output_root=None):
+def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
     """Build/reuse both metric memories, then score exactly the selected bags."""
     from .threshold import validate_threshold_scale
     from rosbag_io import resolve_bag_path
     from .benchmark_report import write_reports
     from .dinov2_features import DINOv2FeatureExtractor
     from .model_settings import model_settings
+    from .benchmark_labels import apply_csv_labels, validate_ground_truth
 
     config = deepcopy(config)
     config['output_dir'] = config.get('output_dir') or 'outputs'
@@ -308,7 +309,14 @@ def run(config, folders, data_root='/data', output_root=None):
         if not np.isfinite(startup) or startup < 0:
             raise ValueError('STAGE_STARTUP_IGNORE_SEC must be finite and nonnegative.')
         manifest = annotate_bags(selected, config.get('stage_topic', '/recording_stage'), startup)
+        labels_csv = labels_csv or (config.get('dino_benchmark') or {}).get('labels_csv')
+        if labels_csv:
+            manifest = apply_csv_labels(manifest, labels_csv, data_root)
+            report.update(labels_csv=str(Path(labels_csv).resolve()), label_policy='authoritative labels CSV')
         pd.DataFrame(manifest).to_csv(output / 'selection.csv', index=False)
+        counts = validate_ground_truth(manifest)
+        report['ground_truth_counts'] = counts
+        print(f'Ground-truth preflight: {counts["normal"]} normal, {counts["fail"]} failure, {counts["excluded"]} excluded.', flush=True)
         report['signatures'] = {}
         for topic in topics:
             print(f'DINO benchmark: preparing {topic}', flush=True)

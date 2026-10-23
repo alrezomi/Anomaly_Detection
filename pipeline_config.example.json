@@ -16,7 +16,8 @@
   "dino_calibration_bags": [],
   "dino_threshold_scale": 1.0,
   "dino_benchmark": {
-    "folders": []
+    "folders": [],
+    "labels_csv": "/outputs/dataset_labels.csv"
   },
   "rebuild_nominal_cache": false,
   "stage_topic": "/recording_stage",

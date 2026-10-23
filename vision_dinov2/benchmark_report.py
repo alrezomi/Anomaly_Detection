@@ -224,6 +224,26 @@ def write_reports(manifest, frames, output, scale, folders):
         if 'best_threshold' in frames:
             frames['best_alarm'] = (frames.pooled_score > frames.best_threshold).astype('boolean').where(frames.best_threshold.notna())
     frames.to_csv(output / 'frame_results.csv', index=False)
+    diagnostics = []
+    truth = {row['bag_path']: row for row in manifest}
+    if len(frames):
+        for (metric, bag), timeline in frames.groupby(['metric','bag_path']):
+            item = truth[bag]
+            if item['status'] != 'ok':
+                continue
+            ordered = timeline.sort_values(['timestamp_sec','camera_topic'], kind='stable')
+            first = ordered.iloc[0]
+            alarms = ordered.configured_alarm
+            first_alarm = ordered.loc[alarms].iloc[0] if alarms.any() else None
+            diagnostics.append(dict(metric=metric, bag_path=bag, folder=item['folder'],
+                ground_truth_label=item['ground_truth_label'], frames_scored=len(ordered),
+                alarm_frame_count=int(alarms.sum()), alarm_frame_fraction=float(alarms.mean()),
+                first_scored_time_sec=float(first.timestamp_sec), first_score=float(first.pooled_score),
+                first_threshold=float(first.configured_threshold), first_frame_alarm=bool(first.configured_alarm),
+                first_alarm_time_sec=float(first_alarm.timestamp_sec) if first_alarm is not None else None,
+                first_alarm_camera=first_alarm.camera_topic if first_alarm is not None else None,
+                max_score_ratio=bag_score(ordered)))
+    pd.DataFrame(diagnostics).to_csv(output/'alarm_diagnostics.csv', index=False)
     timing_rows = []
     good_bags = {item['bag_path'] for item in manifest if item['status'] == 'ok'}
     if len(frames):
