@@ -2508,6 +2508,38 @@ Then run the benchmark itself:
 docker compose run --rm benchmark
 ```
 
+To evaluate only particular folders, manually add this optional top-level block
+to your ignored `pipeline_config.json` (independent of `dino_benchmark`):
+
+```json
+"vlm_benchmark": {
+  "folders": ["Nominal/setting 1", "Failure_1_grasp_miss"]
+}
+```
+
+Only those subfolders under the data root are scanned for evaluation. Omit the
+block, omit `folders`, or use `"folders": []` to retain the existing scan of all
+bags under the data root. Existing memory/reference/LoRA/classifier-training
+exclusions still apply. Paths cannot escape the data root or overlap; CLI
+`--folder` (repeatable) overrides the config list. Existing `--bag`, manual label
+overrides, `--limit` and `--no-recursive` further restrict the selected folders.
+Folder validation occurs before classifier/model preparation. Classifier training
+and nominal reference settings remain independent of evaluation-folder selection.
+
+`benchmark_metrics.csv` and `benchmark_metrics.png` compare **overall and every
+evaluation folder**, separating generated VLM decisions, optional classifier
+decisions, and input modes. They include TP/FP/TN/FN, recall, FPR, precision,
+accuracy, F1, balanced accuracy, Wilson 95% intervals, decision coverage, timing
+summaries for available classifier timelines, and mean bag/model runtimes.
+Recall/FPR and confusion counts use parsed binary decisions; uncertain,
+unavailable/error cases are counted separately and reflected in coverage.
+Accuracy includes all known labels, with unavailable decisions counted incorrect;
+`accuracy_decided` and `failure_recall_all` make the denominators explicit.
+Undefined rates are N/A. `benchmark_metrics_notes.txt` records these definitions.
+The existing ROC/score reports and signed classifier-timing graphs remain unchanged;
+this adds no inference or new calibration. DINO's two-frame/stage-3 rule is specific
+to the DINO benchmark and is not silently applied to generated VLM decisions.
+
 For each remaining bag it writes a self-contained folder (videos, DINO CSVs,
 selected VLM frames, prompts/responses) under
 `<rynnbrain.output_dir>_benchmark/<bag_name>/`, and appends one row per

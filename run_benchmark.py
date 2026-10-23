@@ -1,6 +1,6 @@
-"""Benchmark the DINO + RynnBrain pipeline against every non-nominal demonstration.
+"""Benchmark the DINO + RynnBrain pipeline on selected folders or all eligible bags.
 
-For every ROS 2 bag under the data root that was not used to build the DINO
+For every selected ROS 2 bag that was not used to build the DINO
 nominal memory or the RynnBrain task memory, this:
 
 1. Runs DINO test mode when videos/heatmaps are needed or --with-dino is
@@ -64,6 +64,7 @@ def parse_arguments() -> argparse.Namespace:
         help="Defaults to '<rynnbrain.output_dir>_benchmark'.",
     )
     parser.add_argument("--no-recursive", action="store_true", help="Only scan immediate subdirectories for bags.")
+    parser.add_argument('--folder', action='append', help='Only scan this folder under the data root; repeat. Overrides vlm_benchmark.folders.')
     parser.add_argument(
         "--startup-ignore-sec", type=float, default=None,
         help="Defaults to $STAGE_STARTUP_IGNORE_SEC, then 0.1.",
@@ -117,6 +118,38 @@ def parse_arguments() -> argparse.Namespace:
 
 def _raw_rosbag_inputs(vlm):
     return vlm.get("source") == "rosbag" and list(vlm.get("input_modes", ["raw"])) == ["raw"]
+
+
+def _discover_benchmark_bags(data_root, folders, recursive=True):
+    """An omitted/empty selection preserves the existing whole-root discovery."""
+    root = Path(data_root).resolve()
+    if folders is None or folders == []:
+        return discover_bags(root, recursive=recursive), []
+    if not isinstance(folders, list) or any(not isinstance(value, str) or not value.strip() for value in folders):
+        raise ValueError('vlm_benchmark.folders must be a list of nonempty folder paths.')
+    selected = []
+    for value in folders:
+        folder = (root/value).resolve(strict=True)
+        if not folder.is_dir() or folder == root or not folder.is_relative_to(root):
+            raise ValueError(f'Select a folder strictly inside {root}: {value}')
+        if any(folder.is_relative_to(other) or other.is_relative_to(folder) for other in selected):
+            raise ValueError(f'Selected VLM benchmark folders overlap: {value}')
+        selected.append(folder)
+    bags = []
+    for folder in selected:
+        found = [folder] if (folder/'metadata.yaml').is_file() else discover_bags(folder, recursive=recursive)
+        if any(not path.resolve().is_relative_to(folder) for path in found):
+            raise ValueError(f'A discovered bag resolves outside selected folder: {folder}')
+        bags.extend(found)
+    return sorted(set(bags)), [str(folder.relative_to(root)).replace('\\', '/') for folder in selected]
+
+
+def _benchmark_folder(path, data_root, folders):
+    root, bag = Path(data_root).resolve(), Path(path).resolve()
+    for value in folders:
+        if bag.is_relative_to(root/value):
+            return value
+    return str(bag.parent.relative_to(root)).replace('\\', '/')
 
 
 def _should_run_dino(arguments, vlm):
@@ -424,6 +457,14 @@ def _run_benchmark(arguments, config, update) -> None:
     base_vlm_output = Path(vlm.get("output_dir", Path(config.get("output_dir", "outputs")) / "rynnbrain"))
     benchmark_root = arguments.benchmark_dir or Path(f"{base_vlm_output}_benchmark")
     benchmark_root.mkdir(parents=True, exist_ok=True)
+    selection = config.get('vlm_benchmark') or {}
+    if not isinstance(selection, dict):
+        raise ValueError('vlm_benchmark must be an object containing a folders list.')
+    folders = getattr(arguments, 'folder', None)
+    folders = folders if folders is not None else selection.get('folders', [])
+    all_bags, folder_names = _discover_benchmark_bags(data_root, folders, not arguments.no_recursive)
+    print(f'VLM benchmark folders: {folder_names or "all folders under data root"}')
+    update(selected_folders=folder_names, folder_selection='explicit' if folder_names else 'all')
 
     model: RynnBrainModel | None = None
     reference_response = None
@@ -470,14 +511,16 @@ def _run_benchmark(arguments, config, update) -> None:
         update(classifier_preparation_sec=clock() - preparation_started)
 
     update(phase="bag_selection")
-    print(f"Scanning bags under: {data_root}")
-    all_bags = discover_bags(data_root, recursive=not arguments.no_recursive)
+    print(f"Using bags discovered under: {data_root}")
     excluded_names = _excluded_bag_names(config, arguments.include_nominal_bags)
     records = [
         infer_bag_record(bag_path, stage_topic, startup_ignore_sec)
         for bag_path in all_bags
         if bag_path.name not in excluded_names
     ]
+    for record in records:
+        path = Path(record['bag_path'])
+        record['folder'] = _benchmark_folder(path if path.is_absolute() else data_root/path, data_root, folder_names)
     requested_names = (
         list(arguments.bag)
         + list(arguments.normal_bag)
@@ -495,7 +538,8 @@ def _run_benchmark(arguments, config, update) -> None:
     )
     selection_df = pd.DataFrame(records)
     selection_df.to_csv(benchmark_root / "benchmark_bag_selection.csv", index=False)
-    print(f"Found {len(all_bags)} bag(s), excluding {len(excluded_names)} nominal/reference/LoRA/classifier-training bag(s).")
+    excluded_count = sum(path.name in excluded_names for path in all_bags)
+    print(f"Found {len(all_bags)} bag(s), excluding {excluded_count} nominal/reference/LoRA/classifier-training bag(s) from this selection.")
     print(f"Benchmarking {len(records)} demonstration(s).")
     selection_columns = ["bag_name", "label"]
     if records and "label_source" in selection_df:
@@ -503,6 +547,10 @@ def _run_benchmark(arguments, config, update) -> None:
     print(selection_df[selection_columns].to_string(index=False) if records else "  (none)")
 
     candidates = records[: arguments.limit] if arguments.limit else records
+    duplicates = pd.Series([record['bag_name'] for record in candidates], dtype=str).duplicated(keep=False)
+    if duplicates.any():
+        raise ValueError('Selected bag names must be unique to avoid overwriting per-bag outputs. '
+                         'Narrow vlm_benchmark.folders or use --bag to select unique names.')
 
     if not arguments.skip_vlm and model is None:
         print("\nLoading RynnBrain model once for the whole benchmark...")
@@ -566,6 +614,7 @@ def _run_benchmark(arguments, config, update) -> None:
             master_rows.append({
                 "bag_name": bag_name,
                 "bag_path": str(bag_path),
+                "folder": record['folder'],
                 "ground_truth_label": ground_truth,
                 "input_mode": None,
                 "decision": "not_run" if arguments.skip_vlm else "failed",
@@ -597,6 +646,7 @@ def _run_benchmark(arguments, config, update) -> None:
             master_rows.append({
                 "bag_name": bag_name,
                 "bag_path": str(bag_path),
+                "folder": record['folder'],
                 "ground_truth_label": ground_truth,
                 "input_mode": row["input_mode"],
                 "decision": row["decision"],
@@ -649,6 +699,10 @@ def _run_benchmark(arguments, config, update) -> None:
     summary_path = benchmark_root / "benchmark_summary.csv"
     clean_report_path = benchmark_root / "benchmark_clean.csv"
     statistics = _report_statistics(master_rows)
+    from rynnbrain_vlm.benchmark_metrics import write_metrics_report
+    statistics['folder_metrics'] = write_metrics_report(master_rows, benchmark_root,
+        folder_names or list(dict.fromkeys(record['folder'] for record in candidates)),
+        input_modes=vlm.get('input_modes', ['raw']))
     statistics["failure_timing"] = write_failure_timing_report(
         master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"]),
         method=classifier_method(vlm.get("cop_classifier", {})),

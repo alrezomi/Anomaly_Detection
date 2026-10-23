@@ -61,7 +61,7 @@ class RuntimeTests(unittest.TestCase):
             config_path.write_text(json.dumps({"camera_topics": [], "output_dir": str(root),
                 "rynnbrain": {"output_dir": str(root / "rynnbrain"), "cop_classifier": {"enabled": False}}}))
             paths = [root / "bag_one", root / "bag_two"]
-            with patch.object(sys, "argv", ["benchmark", "--config", str(config_path), "--skip-vlm", "--skip-dino"]), \
+            with patch.object(sys, "argv", ["benchmark", "--config", str(config_path), "--data-root", str(root), "--skip-vlm", "--skip-dino"]), \
                  patch.object(benchmark, "discover_bags", return_value=paths), \
                  patch.object(benchmark, "infer_bag_record", side_effect=lambda path, *a: {
                      "bag_name": path.name, "bag_path": str(path), "label": "normal"}), \

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from types import ModuleType
+from pathlib import Path
+import tempfile
 import sys
 import unittest
 from unittest.mock import patch
@@ -28,6 +30,8 @@ from run_benchmark import (
     _excluded_bag_names,
     _report_statistics,
     _select_named_records,
+    _discover_benchmark_bags,
+    _benchmark_folder,
     parse_arguments,
 )
 
@@ -40,6 +44,32 @@ for _name, _previous in _previous_modules.items():
 
 
 class BenchmarkSelectionTests(unittest.TestCase):
+    def test_optional_folders_scan_only_selection_and_omission_scans_all(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ['selected/a', 'selected/nested/b', 'other/c']:
+                (root/name).mkdir(parents=True)
+                (root/name/'metadata.yaml').write_text('')
+            bags, folders = _discover_benchmark_bags(root, ['selected'])
+            self.assertEqual({bag.name for bag in bags}, {'a', 'b'})
+            self.assertEqual(folders, ['selected'])
+            self.assertEqual(_benchmark_folder(bags[0], root, folders), 'selected')
+            for omitted in [None, []]:
+                all_bags, names = _discover_benchmark_bags(root, omitted)
+                self.assertEqual({bag.name for bag in all_bags}, {'a', 'b', 'c'})
+                self.assertEqual(names, [])
+            direct, _ = _discover_benchmark_bags(root, ['selected/a'])
+            self.assertEqual([bag.name for bag in direct], ['a'])
+            shallow, _ = _discover_benchmark_bags(root, ['selected'], recursive=False)
+            self.assertEqual([bag.name for bag in shallow], ['a'])
+            for invalid in ['selected', [''], ['.'], ['selected', 'selected/nested'], ['../']]:
+                with self.assertRaises(ValueError):
+                    _discover_benchmark_bags(root, invalid)
+
+    def test_folder_cli_is_repeatable(self):
+        with patch.object(sys, 'argv', ['benchmark', '--folder', 'a', '--folder', 'b']):
+            self.assertEqual(parse_arguments().folder, ['a', 'b'])
+
     def test_knn_ignores_old_failure_selection_but_preserves_lora_exclusions(self) -> None:
         config = {
             "nominal_bags": ["/data/dino_memory"],
