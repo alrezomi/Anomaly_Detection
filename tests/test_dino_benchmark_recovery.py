@@ -126,6 +126,16 @@ class RecoveryTests(unittest.TestCase):
             for metric in ['euclidean','mahalanobis']:
                 self.assertEqual(state['roc'][metric]['status'],'unavailable')
                 self.assertTrue((output/f'{metric}_failure_timing_01.png').is_file())
+                target = output/metric
+                index = pd.read_csv(target/'bag_index.csv')
+                self.assertEqual(len(index), 2)
+                self.assertTrue(all((target/plot).is_file() for plot in index['plot']))
+                self.assertTrue((target/'failure_timing_01.png').is_file())
+                sweep = pd.read_csv(target/'scale_sweep.csv')
+                self.assertTrue(sweep.recall.isna().all())
+                self.assertTrue(sweep.alarm_rate.between(0, 1).all())
+                self.assertTrue(sweep.false_positive_rate.equals(sweep.alarm_rate))
+                self.assertIn('Recall and ROC are unavailable', (target/'summary.md').read_text())
             decisions=pd.read_csv(output/'bag_results.csv')
             configured=decisions[decisions.operating_point.eq('configured')]
             self.assertTrue(configured.ground_truth_label.eq('normal').all())

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .benchmark_labels import apply_csv_labels, validate_ground_truth
-from .benchmark_report import write_reports
+from .benchmark_report import write_reports, REPORT_FORMAT_VERSION
 
 
 def regenerate_reports(source, labels_csv=None, output_root=None):
@@ -56,7 +56,8 @@ def regenerate_reports(source, labels_csv=None, output_root=None):
     metrics, roc = write_reports(manifest, frames, output, float(state['configured_scale']), folders)
     if (source/'runtime.csv').is_file():
         shutil.copy2(source/'runtime.csv', output/'runtime.csv')
-    report = dict(state, mode='report_only', source_run=str(source), inference_rerun=False,
+    report = dict(state, mode='report_only', report_format_version=REPORT_FORMAT_VERSION,
+                  source_run=str(source), inference_rerun=False,
                   ground_truth_counts=counts, labels_csv=str(Path(labels_csv).resolve()) if labels_csv else None,
                   roc=roc, report_generation_sec=perf_counter()-started)
     if labels_csv:

@@ -102,8 +102,8 @@ class AttentionTests(unittest.TestCase):
             matched_progress=[.1]*3 + [.9]*3, held_out_video_id=[0,1,2]*2))
         table, _ = build_attention_threshold(rows, n_bins=2, smooth_window=1, threshold_floor_quantile=None)
         low, high = table.adaptive_threshold
-        self.assertAlmostEqual(low, np.quantile([.1, .2, .3], .95)*1.1)
-        self.assertAlmostEqual(high, np.quantile([.7, .8, .9], .95)*1.1)
+        self.assertAlmostEqual(low, np.quantile([.1, .2, .3], .95))
+        self.assertAlmostEqual(high, np.quantile([.7, .8, .9], .95))
         self.assertGreater(.5, threshold_for_progress(.1, table))
         self.assertLess(.5, threshold_for_progress(.9, table))
 
@@ -128,7 +128,7 @@ class AttentionTests(unittest.TestCase):
         np.testing.assert_allclose(rows.raw_global_score, expected)
         self.assertTrue((rows.matched_video_id != rows.held_out_video_id).all())
         self.assertAlmostEqual(table.adaptive_threshold.iloc[0],
-            np.quantile(rows.groupby("held_out_video_id").score.quantile(.95), .95) * 1.1)
+            np.quantile(rows.groupby("held_out_video_id").score.quantile(.95), .95))
         self.assertEqual(np.ptp(table.adaptive_threshold), 0.)
         self.assertEqual(table.attrs['score_mode'], 'attention')
         self.assertTrue((table.method == ATTENTION_CALIBRATION_METHOD).all())
@@ -229,7 +229,7 @@ class AttentionTests(unittest.TestCase):
                 self.assertEqual(table.attrs['score_mode'], 'attention')
                 self.assertEqual(signature['calibration_method'], ATTENTION_CALIBRATION_METHOD)
                 self.assertAlmostEqual(table.adaptive_threshold.iloc[0],
-                    np.quantile(rows.groupby("held_out_video_id").score.quantile(.95), .95) * 1.1)
+                    np.quantile(rows.groupby("held_out_video_id").score.quantile(.95), .95))
                 if not paths:
                     self.assertTrue((rows.matched_video_id != rows.held_out_video_id).all())
 

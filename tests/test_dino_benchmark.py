@@ -138,6 +138,20 @@ class BenchmarkStatisticsTests(unittest.TestCase):
             for metric in ['euclidean', 'mahalanobis']:
                 self.assertTrue(np.isfinite(roc[metric]['best']['threshold_scale']))
                 self.assertTrue((root/f'{metric}_scale_sweep.csv').is_file())
+                target = root/metric
+                self.assertTrue((target/'summary.md').is_file())
+                self.assertTrue((target/'failure_timing_01.png').is_file())
+                self.assertTrue((target/'alarm_rate_vs_scale.png').is_file())
+                index = pd.read_csv(target/'bag_index.csv')
+                self.assertEqual(set(index.bag_path), set(item['bag_path'] for item in self.manifest))
+                for row in index.itertuples():
+                    self.assertTrue((target/row.plot).is_file())
+                    saved = pd.read_csv((target/row.plot).parent/'frame_results.csv')
+                    original = self.frames[self.frames.metric.eq(metric) & self.frames.bag_path.eq(row.bag_path)]
+                    np.testing.assert_allclose(saved.configured_threshold, original.base_threshold)
+                    np.testing.assert_allclose(saved.pooled_score, original.pooled_score)
+            self.assertTrue((root/'SUMMARY.md').is_file())
+            self.assertEqual(json.loads((root/'report_manifest.json').read_text())['report_format_version'], 2)
 
 
 class BenchmarkEngineTests(unittest.TestCase):

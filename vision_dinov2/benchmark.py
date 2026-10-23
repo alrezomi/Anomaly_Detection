@@ -90,6 +90,7 @@ def _load_calibration(directory, signature, patch_count):
     try:
         saved = json.loads((directory / 'signature.json').read_text(encoding='utf-8'))
         if not isinstance(saved, dict):
+            print(f'Calibration cache rejected ({directory}): signature is not an object.', flush=True)
             return None
         if saved.get('dino_metric') == 'mahalanobis':
             saved.setdefault('attention_weighting', 'direct')
@@ -101,6 +102,17 @@ def _load_calibration(directory, signature, patch_count):
         if convert_margin:
             saved['threshold_margin'] = 1.
         if saved != signature:
+            keys = sorted(key for key in set(saved) | set(signature) if saved.get(key) != signature.get(key))
+            print(f'Calibration cache rejected ({directory}); different settings: {", ".join(keys)}.', flush=True)
+            for key in keys:
+                if key in {'sources', 'calibration_sources'}:
+                    print(f'  {key}: saved {len(saved.get(key, []))} sources; requested {len(signature.get(key, []))}; paths/order/settings must match.', flush=True)
+                    for old, new in zip(saved.get(key, []), signature.get(key, [])):
+                        if old != new:
+                            print(f'    first differing source: saved={old!r}; requested={new!r}', flush=True)
+                            break
+                else:
+                    print(f'  {key}: saved={saved.get(key)!r}; requested={signature.get(key)!r}', flush=True)
             return None
         with np.load(directory / 'patch_normality.npz', allow_pickle=False) as arrays:
             profile = {key: arrays[key] for key in arrays.files}
@@ -126,6 +138,8 @@ def _load_calibration(directory, signature, patch_count):
         table.attrs['score_mode'] = 'attention'
         return table
     except (OSError, ValueError, KeyError, TypeError):
+        import sys
+        print(f'Calibration cache unavailable ({directory}): {sys.exc_info()[1]}', flush=True)
         return None
 
 
@@ -144,6 +158,7 @@ def prepare_camera(config, topic, get_extractor, output):
         root /= config['vision_memory_name']
     root /= slug(topic)
     rebuild = bool(config.get('rebuild_nominal_cache', False))
+    print(f'Nominal cache: {root}; rebuild_nominal_cache={rebuild}', flush=True)
     cached = None if rebuild else load_feature_cache(root, signature)
     if cached is not None:
         memory, grid = cached
@@ -176,6 +191,7 @@ def prepare_camera(config, topic, get_extractor, output):
                 directory.mkdir(parents=True, exist_ok=True)
                 save_nominal_calibration(directory, table, pd.read_csv(root/'calibration.csv'), metric_signature)
         if table is None:
+            print(f'{metric}: no compatible calibration was found; fitting and saving {directory}.', flush=True)
             status = 'calibrated'
             if not calibration:
                 table, rows = calibrate_attention_leave_one_video_out(memory, metric=metric, **matcher, **bounds)
@@ -203,6 +219,7 @@ def prepare_camera(config, topic, get_extractor, output):
             directory.mkdir(parents=True, exist_ok=True)
             save_nominal_calibration(directory, table, rows, metric_signature)
         tables[metric] = table
+        print(f'{metric}: calibration {status} in {perf_counter()-started:.1f}s; cache: {directory}', flush=True)
         table.to_csv(output / f'{slug(topic)}_{metric}_threshold.csv', index=False)
         timings.append(dict(camera_topic=topic, metric=metric, phase='calibration',
                             seconds=perf_counter()-started, status=status, cache_directory=str(directory)))
@@ -268,6 +285,7 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
     from .threshold import validate_threshold_scale
     from rosbag_io import resolve_bag_path
     from .benchmark_report import write_reports
+    from .benchmark_report import REPORT_FORMAT_VERSION
     from .dinov2_features import DINOv2FeatureExtractor
     from .model_settings import model_settings
     from .benchmark_labels import apply_csv_labels, validate_ground_truth
@@ -300,8 +318,11 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
     selected, folder_names = select_bags(data_root, folders, nominal+calibration)
     output = Path(output_root or Path(config['output_dir']) / 'dino_benchmark') / datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
     output.mkdir(parents=True, exist_ok=False)
+    source_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    print(f'DINO benchmark report v{REPORT_FORMAT_VERSION}; source {source_hash}; fixed threshold margin=1 (sole gain: dino_threshold_scale).', flush=True)
     started = perf_counter()
-    report = dict(status='running', selected_folders=folder_names, data_root=str(Path(data_root).resolve()),
+    report = dict(status='running', report_format_version=REPORT_FORMAT_VERSION, benchmark_source_sha256=source_hash,
+        selected_folders=folder_names, data_root=str(Path(data_root).resolve()),
         camera_topics=topics, configured_scale=scale, score_variant='pooled', bag_rule='any pooled crossing in any selected camera',
         label_policy='existing final-three eligible stage messages',
         onset_policy='first failure marker after startup-ignore, bag-relative time',

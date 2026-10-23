@@ -748,6 +748,29 @@ valid onset never get a fabricated zero timing error.
 
 Reports are written into a new timestamped directory under
 `<output_dir>/dino_benchmark/` (Docker `/outputs` maps to `ANOMALY_OUTPUT_DIR`).
+Open **`SUMMARY.md` first**. Report format v2 creates separate `euclidean/` and
+`mahalanobis/` folders. Each contains `summary.md`, evaluation CSVs, always-present
+`failure_timing_*.png`, `roc.png`, `alarm_rate_vs_scale.png`, and `bag_index.csv`.
+Every evaluated/error bag has `bags/<name>_<path-hash>/score_threshold.png`, its
+frame CSV and its decision CSV. Separate camera panels show the actual pooled
+score and configured threshold in bag-relative seconds, crossings, first alarm,
+and the recorded failure onset when available. Errors remain visibly incomplete.
+Training/calibration bags remain excluded and are listed in the selection/results.
+The original combined CSVs and timing plots remain at the root for compatibility.
+
+Single-class sets still produce an alarm-rate-versus-scale curve and per-folder
+alarm rates. They cannot produce a true ROC, recall for an absent positive class,
+or an optimal scale balancing sensitivity/specificity. The ROC image explains
+this without drawing empty axes or a chance line. `metrics.csv` now separates
+training exclusions and errors and includes `alarm_bags`, `no_alarm_bags` and
+`alarm_rate`, so these can be read independently of the chosen label semantics.
+
+The console prints report format/source identity, cache directories, rebuild
+status, exact incompatible signature keys, and calibration reuse/fitting times.
+`report_manifest.json` lists generated artifacts and the report writer hash;
+`run.json` records the format version and benchmark source hash. A log claiming
+fixed calibration `x 1.1` is from code before the single-gain update. Compatible
+old margin-only caches are reused via saved scores, without fitting patch profiles.
 
 | File | Contents |
 | --- | --- |
@@ -789,8 +812,10 @@ because successful demonstrations have no actual failure onset to subtract.
 
 ### Recover DINO reports without repeating inference
 
-If an existing run has valid `frame_results.csv` but incorrect stage-derived
-labels, keep the saved run and regenerate reports with the authoritative CSV:
+If an existing run has valid `frame_results.csv`, regenerate the full report
+layout without repeating inference. This also supports correcting labels with
+an authoritative CSV; omit `--labels-csv` when keeping saved labels and no CSV
+is configured:
 
 ```bash
 docker compose run --rm --build dino-benchmark \
@@ -810,6 +835,10 @@ and task-label false-positive rate; ROC and best-scale selection are unavailable
 An absent onset marker remains unavailable unless explicitly supplied in the CSV.
 High nominal false-alarm rates can remain after relabelling: the bag rule still
 uses any frame crossing, and the suggested scale is still exploratory tuning.
+Report-only recovery uses the original stored scale and thresholds, even if the
+current config or calibration has changed. It does not retroactively apply the
+single-gain change to an old experiment. Generating many plot images takes CPU
+time, but requires neither DINO inference nor nominal-memory loading.
 
 ### Independent top and flange DINO replay
 

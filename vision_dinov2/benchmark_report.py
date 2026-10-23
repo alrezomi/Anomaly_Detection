@@ -6,12 +6,14 @@ selected benchmark, never an automatic config update or independent validation.
 """
 from pathlib import Path
 import json
+import hashlib
 
 import numpy as np
 import pandas as pd
 
 from rynnbrain_vlm.benchmark_roc import roc_curve
 
+REPORT_FORMAT_VERSION = 2
 
 def bag_score(frames):
     scores = frames.pooled_score.to_numpy(float)
@@ -93,6 +95,10 @@ def metrics_table(results, folders):
             rows.append(dict(metric=metric, operating_point=point, folder=folder,
                 threshold_scale=float(group.threshold_scale.iloc[0]), selected_bags=len(selected),
                 excluded_or_failed_bags=len(selected)-len(valid), evaluated_bags=len(valid),
+                excluded_training_bags=int(selected.status.eq('excluded_training').sum()),
+                error_bags=int(selected.status.eq('error').sum()),
+                alarm_bags=int(predicted.sum()), no_alarm_bags=int((~predicted).sum()),
+                alarm_rate=float(predicted.mean()) if len(valid) else None,
                 normal_count=n, failure_count=p, true_positive=tp, false_positive=fp,
                 true_negative=tn, false_negative=fn, recall=recall, false_positive_rate=fpr,
                 recall_ci95_low=recall_low, recall_ci95_high=recall_high,
@@ -114,14 +120,16 @@ def scale_sweep(results, configured_scale, frames=None):
     """One point per distinct bag score, using valid positive scales and exact > decisions."""
     valid = results[(results.status == 'ok') & results.ground_truth_label.isin(['normal', 'fail'])
                     & results.predicted_decision.notna()]
-    if valid.empty or valid.ground_truth_label.nunique() != 2:
+    if valid.empty:
         return dict(status='unavailable', reason='ROC needs both evaluated normal and failure bags.'), pd.DataFrame(), None
     scores = valid.max_score_ratio.to_numpy(float)
     targets = valid.ground_truth_label.eq('fail').to_numpy(int)
     # Dense ranks preserve ties and ordering, including infinite ratios from a
     # positive score with zero threshold. AUC is the standard ranking AUC.
-    ranks = pd.Series(scores).rank(method='dense').to_numpy(float)
-    fpr, tpr, _, area = roc_curve(targets, ranks)
+    both_classes = valid.ground_truth_label.nunique() == 2
+    if both_classes:
+        ranks = pd.Series(scores).rank(method='dense').to_numpy(float)
+        fpr, tpr, _, area = roc_curve(targets, ranks)
     unique = np.unique(scores[np.isfinite(scores) & (scores > 0)])
     candidates = {float(configured_scale), 1., float(np.nextafter(0., 1.)), float(np.finfo(float).max)}
     representative = {float(configured_scale), 1.}
@@ -150,10 +158,15 @@ def scale_sweep(results, configured_scale, frames=None):
                                         for path in valid.bag_path])
         tp = int((predictions & (targets == 1)).sum())
         fp = int((predictions & (targets == 0)).sum())
-        recall, false_positive = tp / targets.sum(), fp / (len(targets)-targets.sum())
-        points.append(dict(threshold_scale=scale, recall=float(recall), false_positive_rate=float(false_positive),
-                           youden_j=float(recall-false_positive)))
+        recall = float(tp / targets.sum()) if targets.sum() else None
+        false_positive = float(fp / (len(targets)-targets.sum())) if (targets == 0).any() else None
+        points.append(dict(threshold_scale=scale, recall=recall, false_positive_rate=false_positive,
+                           alarm_rate=float(predictions.mean()),
+                           youden_j=recall-false_positive if both_classes else None))
     table = pd.DataFrame(points)
+    if not both_classes:
+        return dict(status='unavailable', reason='ROC and best scale are undefined with only one ground-truth class.',
+                    normal_count=int((targets == 0).sum()), failure_count=int(targets.sum())), table, None
     # Prefer a usable interior/configured value over a nextafter boundary, then
     # the value closest to the configured scale when performance is identical.
     table['boundary_only'] = ~table.threshold_scale.isin(representative)
@@ -185,6 +198,8 @@ def write_reports(manifest, frames, output, scale, folders):
         selected = configured[configured.metric == metric]
         report, sweep, curve = scale_sweep(selected, scale, frames[frames.metric.eq(metric)] if len(frames) else None)
         roc_reports[metric] = report
+        if len(sweep):
+            sweep.to_csv(output / f'{metric}_scale_sweep.csv', index=False)
         if curve is not None:
             best = report['best']
             axis.plot(*curve, label=f"ROC; AUC={report['auc']:.3f}")
@@ -198,8 +213,12 @@ def write_reports(manifest, frames, output, scale, folders):
             results.append(extra[extra.metric.eq(metric)])
             axis.legend(fontsize=8)
         else:
-            axis.text(.5, .5, report['reason'], ha='center', wrap=True)
-        axis.plot([0, 1], [0, 1], '--', color='gray', alpha=.5)
+            axis.text(.5, .5, f"ROC unavailable\nNormal labels: {report.get('normal_count', 0)}; failure labels: {report.get('failure_count', 0)}\n"
+                      'See alarm_rate_vs_scale.png in the metric folder.\nTask success is not a visual-anomaly label.',
+                      ha='center', va='center', transform=axis.transAxes, fontsize=9)
+            axis.set_axis_off()
+        if curve is not None:
+            axis.plot([0, 1], [0, 1], '--', color='gray', alpha=.5)
         axis.set(title=f'{metric.title()} - attention + 3x3 pooling', xlabel='False-positive rate',
                  ylabel='Recall / true-positive rate', xlim=(-.02, 1.02), ylim=(-.02, 1.02))
         axis.grid(alpha=.2)
@@ -243,7 +262,9 @@ def write_reports(manifest, frames, output, scale, folders):
                 first_alarm_time_sec=float(first_alarm.timestamp_sec) if first_alarm is not None else None,
                 first_alarm_camera=first_alarm.camera_topic if first_alarm is not None else None,
                 max_score_ratio=bag_score(ordered)))
-    pd.DataFrame(diagnostics).to_csv(output/'alarm_diagnostics.csv', index=False)
+    pd.DataFrame(diagnostics, columns=['metric', 'bag_path', 'folder', 'ground_truth_label', 'frames_scored',
+        'alarm_frame_count', 'alarm_frame_fraction', 'first_scored_time_sec', 'first_score', 'first_threshold',
+        'first_frame_alarm', 'first_alarm_time_sec', 'first_alarm_camera', 'max_score_ratio']).to_csv(output/'alarm_diagnostics.csv', index=False)
     timing_rows = []
     good_bags = {item['bag_path'] for item in manifest if item['status'] == 'ok'}
     if len(frames):
@@ -262,6 +283,13 @@ def write_reports(manifest, frames, output, scale, folders):
     timing_data = pd.DataFrame(timing_rows) if timing_rows else pd.DataFrame(columns=['metric','folder','images_scored'])
     timing_data.to_csv(output / 'runtime_summary.csv', index=False)
     _timing_plots(all_results, output, plt)
+    from .benchmark_plots import write_metric_reports
+    write_metric_reports(manifest, frames, all_results, metrics, roc_reports, output, scale, plt)
+    artifact = dict(report_format_version=REPORT_FORMAT_VERSION,
+                    writer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                    files=sorted(str(path.relative_to(output)).replace('\\', '/') for path in output.rglob('*') if path.is_file()))
+    (output/'report_manifest.json').write_text(json.dumps(artifact, indent=2), encoding='utf-8')
+    print(f'DINO report format v{REPORT_FORMAT_VERSION}: {output}/SUMMARY.md; metric folders: euclidean/, mahalanobis/.', flush=True)
     return metrics, roc_reports
 
 
