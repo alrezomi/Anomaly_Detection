@@ -90,10 +90,29 @@ def _load_calibration(directory, signature, patch_count):
     try:
         saved = json.loads((directory / 'signature.json').read_text(encoding='utf-8'))
         if not isinstance(saved, dict):
+            print(f'Calibration cache rejected ({directory}): signature is not an object.', flush=True)
             return None
         if saved.get('dino_metric') == 'mahalanobis':
             saved.setdefault('attention_weighting', 'direct')
+        from .threshold import ATTENTION_CALIBRATION_METHOD, build_attention_threshold
+        convert_margin = (saved.get('calibration_method') == ATTENTION_CALIBRATION_METHOD
+                          and signature.get('calibration_method') == ATTENTION_CALIBRATION_METHOD
+                          and saved.get('threshold_margin') == 1.1
+                          and signature.get('threshold_margin') == 1.)
+        if convert_margin:
+            saved['threshold_margin'] = 1.
         if saved != signature:
+            keys = sorted(key for key in set(saved) | set(signature) if saved.get(key) != signature.get(key))
+            print(f'Calibration cache rejected ({directory}); different settings: {", ".join(keys)}.', flush=True)
+            for key in keys:
+                if key in {'sources', 'calibration_sources'}:
+                    print(f'  {key}: saved {len(saved.get(key, []))} sources; requested {len(signature.get(key, []))}; paths/order/settings must match.', flush=True)
+                    for old, new in zip(saved.get(key, []), signature.get(key, [])):
+                        if old != new:
+                            print(f'    first differing source: saved={old!r}; requested={new!r}', flush=True)
+                            break
+                else:
+                    print(f'  {key}: saved={saved.get(key)!r}; requested={signature.get(key)!r}', flush=True)
             return None
         with np.load(directory / 'patch_normality.npz', allow_pickle=False) as arrays:
             profile = {key: arrays[key] for key in arrays.files}
@@ -101,6 +120,13 @@ def _load_calibration(directory, signature, patch_count):
         if str(profile.get('metric', 'euclidean')) != signature['dino_metric']:
             return None
         table = pd.read_csv(directory / 'adaptive_threshold.csv')
+        if convert_margin:
+            table, _ = build_attention_threshold(pd.read_csv(directory/'calibration.csv'),
+                n_bins=signature.get('threshold_bins', 30),
+                min_points_per_bin=signature.get('min_points_per_bin', 2),
+                smooth_window=signature.get('threshold_smooth_window', 3),
+                threshold_floor_quantile=signature.get('threshold_floor_quantile', .20))
+            print(f'Reused benchmark calibration scores without the legacy 1.1 margin: {directory}', flush=True)
         centers = table['stage_center'].to_numpy(float)
         if (not len(centers) or not np.isfinite(centers).all() or (np.diff(centers) <= 0).any()
                 or (centers < 0).any() or (centers > 1).any()):
@@ -112,6 +138,8 @@ def _load_calibration(directory, signature, patch_count):
         table.attrs['score_mode'] = 'attention'
         return table
     except (OSError, ValueError, KeyError, TypeError):
+        import sys
+        print(f'Calibration cache unavailable ({directory}): {sys.exc_info()[1]}', flush=True)
         return None
 
 
@@ -130,6 +158,7 @@ def prepare_camera(config, topic, get_extractor, output):
         root /= config['vision_memory_name']
     root /= slug(topic)
     rebuild = bool(config.get('rebuild_nominal_cache', False))
+    print(f'Nominal cache: {root}; rebuild_nominal_cache={rebuild}', flush=True)
     cached = None if rebuild else load_feature_cache(root, signature)
     if cached is not None:
         memory, grid = cached
@@ -162,6 +191,7 @@ def prepare_camera(config, topic, get_extractor, output):
                 directory.mkdir(parents=True, exist_ok=True)
                 save_nominal_calibration(directory, table, pd.read_csv(root/'calibration.csv'), metric_signature)
         if table is None:
+            print(f'{metric}: no compatible calibration was found; fitting and saving {directory}.', flush=True)
             status = 'calibrated'
             if not calibration:
                 table, rows = calibrate_attention_leave_one_video_out(memory, metric=metric, **matcher, **bounds)
@@ -189,6 +219,7 @@ def prepare_camera(config, topic, get_extractor, output):
             directory.mkdir(parents=True, exist_ok=True)
             save_nominal_calibration(directory, table, rows, metric_signature)
         tables[metric] = table
+        print(f'{metric}: calibration {status} in {perf_counter()-started:.1f}s; cache: {directory}', flush=True)
         table.to_csv(output / f'{slug(topic)}_{metric}_threshold.csv', index=False)
         timings.append(dict(camera_topic=topic, metric=metric, phase='calibration',
                             seconds=perf_counter()-started, status=status, cache_directory=str(directory)))
@@ -249,13 +280,15 @@ def score_bag(config, topic, bag, memory, tables, signature, extractor):
     return rows
 
 
-def run(config, folders, data_root='/data', output_root=None):
+def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
     """Build/reuse both metric memories, then score exactly the selected bags."""
     from .threshold import validate_threshold_scale
     from rosbag_io import resolve_bag_path
     from .benchmark_report import write_reports
+    from .benchmark_report import REPORT_FORMAT_VERSION
     from .dinov2_features import DINOv2FeatureExtractor
     from .model_settings import model_settings
+    from .benchmark_labels import apply_csv_labels, validate_ground_truth, update_labels_csv
 
     config = deepcopy(config)
     config['output_dir'] = config.get('output_dir') or 'outputs'
@@ -285,8 +318,11 @@ def run(config, folders, data_root='/data', output_root=None):
     selected, folder_names = select_bags(data_root, folders, nominal+calibration)
     output = Path(output_root or Path(config['output_dir']) / 'dino_benchmark') / datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
     output.mkdir(parents=True, exist_ok=False)
+    source_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    print(f'DINO benchmark report v{REPORT_FORMAT_VERSION}; source {source_hash}; fixed threshold margin=1 (sole gain: dino_threshold_scale).', flush=True)
     started = perf_counter()
-    report = dict(status='running', selected_folders=folder_names, data_root=str(Path(data_root).resolve()),
+    report = dict(status='running', report_format_version=REPORT_FORMAT_VERSION, benchmark_source_sha256=source_hash,
+        selected_folders=folder_names, data_root=str(Path(data_root).resolve()),
         camera_topics=topics, configured_scale=scale, score_variant='pooled', bag_rule='any pooled crossing in any selected camera',
         label_policy='existing final-three eligible stage messages',
         onset_policy='first failure marker after startup-ignore, bag-relative time',
@@ -308,7 +344,15 @@ def run(config, folders, data_root='/data', output_root=None):
         if not np.isfinite(startup) or startup < 0:
             raise ValueError('STAGE_STARTUP_IGNORE_SEC must be finite and nonnegative.')
         manifest = annotate_bags(selected, config.get('stage_topic', '/recording_stage'), startup)
+        labels_csv = (labels_csv or (config.get('dino_benchmark') or {}).get('labels_csv')
+                      or Path(os.environ.get('ANOMALY_OUTPUT_ROOT') or Path(config['output_dir']).parent)/'dataset_labels.csv')
+        labels_csv = update_labels_csv(manifest, labels_csv, data_root)
+        manifest = apply_csv_labels(manifest, labels_csv, data_root)
+        report.update(labels_csv=str(labels_csv), label_policy='authoritative labels CSV; missing selected entries generated from recorded stages')
         pd.DataFrame(manifest).to_csv(output / 'selection.csv', index=False)
+        counts = validate_ground_truth(manifest)
+        report['ground_truth_counts'] = counts
+        print(f'Ground-truth preflight: {counts["normal"]} normal, {counts["fail"]} failure, {counts["excluded"]} excluded.', flush=True)
         report['signatures'] = {}
         for topic in topics:
             print(f'DINO benchmark: preparing {topic}', flush=True)

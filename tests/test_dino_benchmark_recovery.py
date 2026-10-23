@@ -1,0 +1,175 @@
+"""Regression for an overnight run whose recorded-stage labels contained no failures."""
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import pandas as pd
+
+from vision_dinov2.benchmark_labels import apply_csv_labels, validate_ground_truth, update_labels_csv
+from vision_dinov2.benchmark_recovery import regenerate_reports
+from vision_dinov2.benchmark_report import write_reports
+from tests.test_dino_benchmark import manifest, timeline
+
+
+class LabelTests(unittest.TestCase):
+    def test_auto_update_adds_new_selected_bags_and_preserves_manual_labels_and_columns(self):
+        rows = [manifest('/data/old/a', 'normal'), manifest('/data/new/b', 'fail', 2.),
+                manifest('/data/train/c', 'unknown', status='excluded_training')]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'labels.csv'
+            pd.DataFrame([dict(bag_path='old/a', bag_name='a', label='fail',
+                               failure_time_sec='0', note='manual correction'),
+                          dict(bag_path='unselected/d', bag_name='d', label='normal',
+                               failure_time_sec='', note='keep unselected')]).to_csv(path, index=False)
+            with patch('rosbag_io.read_stage_events', side_effect=AssertionError('already annotated')):
+                update_labels_csv(rows, path, '/data')
+            saved = pd.read_csv(path, dtype=str, keep_default_na=False).set_index('bag_path')
+            self.assertEqual(set(saved.index), {'old/a', 'new/b', 'unselected/d'})
+            self.assertEqual(saved.loc['old/a', 'label'], 'fail')
+            self.assertEqual(saved.loc['old/a', 'failure_time_sec'], '0')
+            self.assertEqual(saved.loc['old/a', 'note'], 'manual correction')
+            self.assertEqual(saved.loc['new/b', 'label'], 'fail')
+            original = path.read_bytes()
+            update_labels_csv(rows, path, '/data')
+            self.assertEqual(original, path.read_bytes())
+
+    def test_auto_update_creates_missing_csv_and_rejects_ambiguity_without_overwriting(self):
+        rows = [manifest('/data/new/a', 'normal')]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'nested/labels.csv'
+            update_labels_csv(rows, path, '/data')
+            self.assertEqual(apply_csv_labels(rows, path, '/data')[0]['ground_truth_label'], 'normal')
+            pd.DataFrame([dict(bag_name='a', label='normal')]).to_csv(path, index=False)
+            original = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, 'Ambiguous'):
+                update_labels_csv(rows+[manifest('/data/other/a', 'fail')], path, '/data')
+            self.assertEqual(original, path.read_bytes())
+
+    def test_csv_paths_override_stage_labels_and_do_not_invent_missing_onsets(self):
+        rows = [manifest('/data/Nominal/n', 'normal'), manifest('/data/Failure_8/f', 'normal')]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'labels.csv'
+            pd.DataFrame([dict(bag_path='Nominal/n',label='normal'),
+                          dict(bag_path='/data/Failure_8/f',label='fail')]).to_csv(path,index=False)
+            result = apply_csv_labels(rows, path, '/data')
+            self.assertEqual(validate_ground_truth(result), dict(normal=1,fail=1,excluded=0))
+            self.assertEqual(result[1]['ground_truth_label'], 'fail')
+            self.assertEqual(result[1]['stage_ground_truth_label'], 'normal')
+            self.assertTrue(result[1]['label_disagrees_with_stage'])
+            self.assertIsNone(result[1]['recorded_failure_time_sec'])
+            pd.DataFrame([dict(bag_path='Nominal/n',label='normal'),
+                          dict(bag_path='Failure_8/f',label='fail',failure_time_sec=0.)]).to_csv(path,index=False)
+            timed = apply_csv_labels(rows, path, '/data')
+            self.assertEqual(timed[1]['recorded_failure_time_sec'], 0.)
+            self.assertEqual(timed[1]['annotation_status'], 'available')
+
+    def test_missing_duplicate_ambiguous_and_unknown_labels_stop_instead_of_falling_back(self):
+        rows = [manifest('/data/a/same', 'normal'), manifest('/data/b/same', 'normal')]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'labels.csv'
+            for records, message in [([dict(bag_path='a/same',label='normal')], 'no entry'),
+                    ([dict(bag_path='a/same',label='normal')]*2,'Duplicate'),
+                    ([dict(bag_name='same',label='fail')],'Ambiguous')]:
+                pd.DataFrame(records).to_csv(path,index=False)
+                with self.assertRaisesRegex(ValueError,message):
+                    apply_csv_labels(rows,path,'/data')
+        self.assertEqual(validate_ground_truth(rows), dict(normal=2,fail=0,excluded=0))
+        with self.assertRaisesRegex(ValueError, 'missing/unknown'):
+            validate_ground_truth([manifest('unknown','unknown')])
+
+    def test_preflight_stops_before_memory_and_model_loading(self):
+        from vision_dinov2.benchmark import run
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            for name in ['train/a','train/b','train/c','test/n']:
+                (root/name).mkdir(parents=True)
+                (root/name/'metadata.yaml').write_text('')
+            config=dict(output_dir=str(root/'output'),camera_topics=['/camera'],
+                        nominal_bags=[str(root/f'train/{name}') for name in ['a','b','c']])
+            def unknown_labels(rows,*args):
+                return [dict(row,ground_truth_label='unknown',recorded_failure_time_sec=None) for row in rows]
+            with patch('vision_dinov2.benchmark.annotate_bags',side_effect=unknown_labels), \
+                 patch('vision_dinov2.benchmark.prepare_camera') as prepare, \
+                 patch('vision_dinov2.dinov2_features.DINOv2FeatureExtractor') as model:
+                with self.assertRaisesRegex(ValueError,'missing/unknown'):
+                    run(config,['test'],root)
+                prepare.assert_not_called()
+                model.assert_not_called()
+
+
+class RecoveryTests(unittest.TestCase):
+    def source_run(self, root):
+        source=root/'saved_run'
+        source.mkdir()
+        rows=[manifest('/data/Nominal/n','normal',folder='Nominal'),
+              manifest('/data/Failure_8/f','normal',folder='Failure_8')]
+        frames=pd.DataFrame([row for metric in ['euclidean','mahalanobis'] for row in
+                            timeline(rows[0]['bag_path'],metric,[.1,.2])+
+                            timeline(rows[1]['bag_path'],metric,[.1,2.])])
+        pd.DataFrame(rows).to_csv(source/'selection.csv',index=False)
+        write_reports(rows,frames,source,1.1,['Nominal','Failure_8'])
+        (source/'run.json').write_text(json.dumps(dict(score_variant='pooled',data_root='/data',
+            camera_topics=['/camera'],selected_folders=['Nominal','Failure_8'],configured_scale=1.1,
+            label_policy='existing final-three eligible stage messages',status='completed')))
+        labels=root/'labels.csv'
+        pd.DataFrame([dict(bag_path='Nominal/n',label='normal'),
+                      dict(bag_path='Failure_8/f',label='fail')]).to_csv(labels,index=False)
+        return source,labels
+
+    def test_recovery_uses_saved_frames_and_preserves_original_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source,labels=self.source_run(Path(directory))
+            original=(source/'frame_results.csv').read_bytes(),(source/'bag_results.csv').read_bytes()
+            with patch('rosbag_io.read_stage_events',side_effect=AssertionError('no bag reads')), \
+                 patch('vision_dinov2.benchmark.prepare_camera',side_effect=AssertionError('no calibration')), \
+                 patch('vision_dinov2.benchmark.score_bag',side_effect=AssertionError('no inference')):
+                output=regenerate_reports(source,labels)
+            self.assertEqual(original,((source/'frame_results.csv').read_bytes(),(source/'bag_results.csv').read_bytes()))
+            state=json.loads((output/'run.json').read_text())
+            self.assertFalse(state['inference_rerun'])
+            self.assertEqual(state['ground_truth_counts']['fail'],1)
+            for metric in ['euclidean','mahalanobis']:
+                self.assertEqual(state['roc'][metric]['status'],'created')
+                self.assertEqual(state['roc'][metric]['auc'],1.)
+            decisions=pd.read_csv(output/'bag_results.csv')
+            configured=decisions[decisions.operating_point.eq('configured')]
+            failures=configured[configured.ground_truth_label.eq('fail')]
+            self.assertTrue(failures.first_alarm_time_sec.eq(2.).all())
+            self.assertTrue(failures.failure_time_error_sec.isna().all())
+            self.assertTrue(failures.timing_status.eq('missing_failure_marker').all())
+            self.assertTrue((output/'alarm_diagnostics.csv').is_file())
+
+    def test_recovery_rejects_truncated_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source,labels=self.source_run(Path(directory))
+            path=source/'frame_results.csv'
+            frames=pd.read_csv(path)
+            frames.iloc[:-1].to_csv(path,index=False)
+            with self.assertRaisesRegex(ValueError,'frame count differs'):
+                regenerate_reports(source,labels)
+
+    def test_stage_only_one_class_cannot_be_reported_as_a_valid_roc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source,_=self.source_run(Path(directory))
+            output=regenerate_reports(source)
+            state=json.loads((output/'run.json').read_text())
+            self.assertEqual(state['ground_truth_counts'], dict(normal=2,fail=0,excluded=0))
+            for metric in ['euclidean','mahalanobis']:
+                self.assertEqual(state['roc'][metric]['status'],'unavailable')
+                self.assertTrue((output/f'{metric}_failure_timing_01.png').is_file())
+                target = output/metric
+                index = pd.read_csv(target/'bag_index.csv')
+                self.assertEqual(len(index), 2)
+                self.assertTrue(all((target/plot).is_file() for plot in index['plot']))
+                self.assertTrue((target/'failure_timing_01.png').is_file())
+                sweep = pd.read_csv(target/'scale_sweep.csv')
+                self.assertTrue(sweep.recall.isna().all())
+                self.assertTrue(sweep.alarm_rate.between(0, 1).all())
+                self.assertTrue(sweep.false_positive_rate.equals(sweep.alarm_rate))
+                self.assertIn('Recall and ROC are unavailable', (target/'summary.md').read_text())
+            decisions=pd.read_csv(output/'bag_results.csv')
+            configured=decisions[decisions.operating_point.eq('configured')]
+            self.assertTrue(configured.ground_truth_label.eq('normal').all())
+            self.assertEqual(configured.predicted_decision.eq('failure').sum(),2)

@@ -589,7 +589,8 @@ The previous local method's minimum of 18 calibration bags no longer applies.
 The supplied 16 calibration recordings can be used by this method.
 
 Within each progress bin, compute a 95th percentile for each recording, then
-the 95th percentile across those values times 1.10. Every recording has equal
+the 95th percentile across those values. These quantiles select score values;
+they do not multiply the scores by 0.95. Every recording has equal
 weight. Bins without two recordings/two frames interpolate populated bins; if all
 bins are sparse, the same two-level quantile is computed globally. The floor is
 the median of recording-level 20th-percentile frame scores. Three-bin
@@ -605,7 +606,14 @@ Evaluate the result on held-out normal and failure recordings, including delay.
 `dino_threshold_scale` is the existing sensitivity control: 1.0 uses calibration,
 0.8 lowers the bound by 20%, and 1.1 raises it by 10%. It changes the decision
 limit only and requires a replay restart, not recalibration. Use 1.0 for an initial
-baseline. The scored heatmap now shows the same unpooled attention-weighted evidence used for the
+baseline. This is the sole multiplicative gain; the previous fixed 1.10 margin
+has been removed. Compatible legacy calibration is converted on load by rebuilding
+the small quantile tables from saved scores, with no feature extraction or patch
+profile fitting. Old files and benchmark reports remain unchanged. Multiplying
+the previous scale by 1.1 compensates for the removed margin where the quantile
+bound dominates; floor-dominated bins can differ because the floor was never
+multiplied by that margin.
+The scored heatmap now shows the same unpooled attention-weighted evidence used for the
 score. Replay uses shared scales for the diagnostic groups described above;
 exported batch videos retain their threshold-relative scale. Colors are not
 probabilities, and the final decision uses the aggregated score.
@@ -658,7 +666,8 @@ Manually add this one selection block to your ignored `pipeline_config.json`:
   "folders": [
     "Nominal/setting 1",
     "Failure_1_grasp_miss"
-  ]
+  ],
+  "labels_csv": "/outputs/dataset_labels.csv"
 }
 ```
 
@@ -702,10 +711,41 @@ This camera OR is a benchmark bag decision, separate from independent replay
 camera plots. All images run at the existing DINO sampling rate (normally 2 fps),
 without replay pacing, VLM intervals, early stopping, or an eight-image limit.
 
-Ground-truth bag labels use the existing final-three eligible stage-message
-policy from `build_dataset_manifest.py`. Actual onset is the first explicit
+When `labels_csv` is set (or `--labels-csv` is supplied), that CSV is the
+**authoritative ground truth**. It needs `bag_path,label` columns; paths may be
+absolute or relative to `/data`. A unique `bag_name` can be used when paths are
+unavailable, but duplicate basenames across selected folders are rejected.
+Labels are `normal`/`fail` (success/nominal/failure aliases are accepted). The
+benchmark automatically creates/updates the labels CSV before model preparation:
+missing selected bags are added using their recorded stage labels. Existing
+entries, manual corrections, onset columns, and unselected rows are preserved.
+No separate `bag-labels` command is needed. Unknown or duplicate labels still
+stop the benchmark. Stage-derived labels
+remain in the audit columns and cannot silently overwrite CSV labels.
+
+When no CSV path is configured, it defaults to `dataset_labels.csv` under
+`ANOMALY_OUTPUT_ROOT` (Docker `/outputs`), or the parent of the experiment output
+directory outside Docker. New rows use the existing final-three eligible
+stage-message policy from `build_dataset_manifest.py`. A `Failure_*` folder name is never a label.
+Only selected, eligible bags are added; other dataset folders are not scanned.
+To regenerate existing recorded labels deliberately, use the separate `bag-labels`
+command, which overwrites its output rather than preserving edits.
+**Preflight requires known labels before memory preparation or model inference.**
+Single-class evaluation is supported: decisions, alarm times and the applicable
+class rate are reported, while ROC and best-scale selection remain unavailable.
+Task success and visual normality are different ground truths. A completed task
+with an unrelated object may correctly have a normal task label and still trigger
+DINO. Against task labels that alarm counts as a false positive; this does not
+establish whether it correctly detected a visual change. For visual-anomaly recall
+and ROC, supply a separate labels CSV identifying visually changed cases as fail
+and visually normal cases as normal. Preserve the original task-outcome CSV.
+Never change task labels merely to obtain an ROC.
+Actual onset is the first explicit
 Error/Fail/Failure/Anomaly-family marker after `STAGE_STARTUP_IGNORE_SEC` (default
-0.1 seconds), read using the existing failure-timing helper. Both clocks are
+0.1 seconds), read using the existing failure-timing helper. Optionally, the
+labels CSV can supply an explicit bag-relative `failure_time_sec` (or
+`recorded_failure_time_sec`) for failure bags. Missing markers/timestamps remain
+missing; a failure label or folder name does not supply an onset time. Both clocks are
 relative to bag start. When stage-constrained matching is enabled, scoring begins
 at the corrected stage-1 marker and retains retrospective numbered-stage matching.
 Failure markers are used for evaluation, never for matching or metric fitting.
@@ -717,6 +757,29 @@ valid onset never get a fabricated zero timing error.
 
 Reports are written into a new timestamped directory under
 `<output_dir>/dino_benchmark/` (Docker `/outputs` maps to `ANOMALY_OUTPUT_DIR`).
+Open **`SUMMARY.md` first**. Report format v2 creates separate `euclidean/` and
+`mahalanobis/` folders. Each contains `summary.md`, evaluation CSVs, always-present
+`failure_timing_*.png`, `roc.png`, `alarm_rate_vs_scale.png`, and `bag_index.csv`.
+Every evaluated/error bag has `bags/<name>_<path-hash>/score_threshold.png`, its
+frame CSV and its decision CSV. Separate camera panels show the actual pooled
+score and configured threshold in bag-relative seconds, crossings, first alarm,
+and the recorded failure onset when available. Errors remain visibly incomplete.
+Training/calibration bags remain excluded and are listed in the selection/results.
+The original combined CSVs and timing plots remain at the root for compatibility.
+
+Single-class sets still produce an alarm-rate-versus-scale curve and per-folder
+alarm rates. They cannot produce a true ROC, recall for an absent positive class,
+or an optimal scale balancing sensitivity/specificity. The ROC image explains
+this without drawing empty axes or a chance line. `metrics.csv` now separates
+training exclusions and errors and includes `alarm_bags`, `no_alarm_bags` and
+`alarm_rate`, so these can be read independently of the chosen label semantics.
+
+The console prints report format/source identity, cache directories, rebuild
+status, exact incompatible signature keys, and calibration reuse/fitting times.
+`report_manifest.json` lists generated artifacts and the report writer hash;
+`run.json` records the format version and benchmark source hash. A log claiming
+fixed calibration `x 1.1` is from code before the single-gain update. Compatible
+old margin-only caches are reused via saved scores, without fitting patch profiles.
 
 | File | Contents |
 | --- | --- |
@@ -726,9 +789,10 @@ Reports are written into a new timestamped directory under
 | `metrics.csv` | Overall and each selected folder: TP/FP/TN/FN, recall, FPR, precision, accuracy, F1, balanced accuracy, Wilson 95% intervals and failure-timing statistics |
 | `roc.png`, `<metric>_roc.csv` | Bag-level ROC/AUC, with configured and exploratory-best scale marked |
 | `<metric>_scale_sweep.csv`, `roc_summary.json` | Threshold-scale sweep and suggested scale for each metric |
-| `<metric>_failure_timing_*.png` | Actual onset and first alarm per failure demo, signed errors (negative=early), with misses/missing annotations visible |
+| `<metric>_failure_timing_*.png` | Always generated: actual onset and first alarm for all selected demos, with task labels, no alarms and missing annotations visible; signed errors (negative=early) where failure timing can be compared |
 | `runtime.csv`, `runtime_summary.csv` | Model load, feature preparation/reuse, calibration, actual bag-inference wall times, and frame mean/median/p95 by metric/folder |
 | `run.json` | Effective model/memory signatures, selection/label policies, run status, ROC selection and total wall time |
+| `alarm_diagnostics.csv` | Alarm-frame counts/fractions, first-frame crossings and first-alarm camera, for distinguishing isolated crossings from systematic startup alarms |
 
 Both the configured and suggested scales are reported overall and per selected
 folder. Recall is TP/(TP+FN); FPR is FP/(FP+TN). Rates are blank when their class
@@ -754,6 +818,39 @@ selected bags**, not independently validated performance. Nothing rewrites your
 config. Use another held-out set to evaluate a chosen scale. Timing figures show
 both operating points; nominal false-alarm times remain in `bag_results.csv`
 because successful demonstrations have no actual failure onset to subtract.
+
+### Recover DINO reports without repeating inference
+
+If an existing run has valid `frame_results.csv`, regenerate the full report
+layout without repeating inference. This also supports correcting labels with
+an authoritative CSV; omit `--labels-csv` when keeping saved labels and no CSV
+is configured:
+
+```bash
+docker compose run --rm --build dino-benchmark \
+  --config /config/pipeline_config.json \
+  --report-only /outputs/experiments/YOUR_EXPERIMENT/dino_benchmark/YOUR_RUN \
+  --labels-csv /outputs/dataset_labels.csv
+```
+
+This reads the saved selection, pooled frame scores and unscaled thresholds.
+It checks known labels, saved frame counts and complete camera coverage. It does
+not read ROS bags, extract features, calibrate memory or load DINO. It preserves
+the original configured scale, selection and original outputs, writing a new
+`reports_<timestamp>/` subdirectory with corrected metrics, ROC, timings and alarm
+diagnostics. CSV labels change evaluation truth, never detector scores. If the
+CSV labels all evaluated bags normal, reports still show the detector decisions
+and task-label false-positive rate; ROC and best-scale selection are unavailable.
+An absent onset marker remains unavailable unless explicitly supplied in the CSV.
+High nominal false-alarm rates can remain after relabelling: the bag rule still
+uses any frame crossing, and the suggested scale is still exploratory tuning.
+Report-only recovery uses the original stored scale and thresholds, even if the
+current config or calibration has changed. It does not retroactively apply the
+single-gain change to an old experiment. Generating many plot images takes CPU
+time, but requires neither DINO inference nor nominal-memory loading.
+If a labels CSV is supplied/configured for report-only, missing entries are filled
+from saved stage annotations without ROS reads. This does not add new recordings
+to the old run; newly selected recordings require a fresh benchmark.
 
 ### Independent top and flange DINO replay
 

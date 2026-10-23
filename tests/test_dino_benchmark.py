@@ -138,6 +138,20 @@ class BenchmarkStatisticsTests(unittest.TestCase):
             for metric in ['euclidean', 'mahalanobis']:
                 self.assertTrue(np.isfinite(roc[metric]['best']['threshold_scale']))
                 self.assertTrue((root/f'{metric}_scale_sweep.csv').is_file())
+                target = root/metric
+                self.assertTrue((target/'summary.md').is_file())
+                self.assertTrue((target/'failure_timing_01.png').is_file())
+                self.assertTrue((target/'alarm_rate_vs_scale.png').is_file())
+                index = pd.read_csv(target/'bag_index.csv')
+                self.assertEqual(set(index.bag_path), set(item['bag_path'] for item in self.manifest))
+                for row in index.itertuples():
+                    self.assertTrue((target/row.plot).is_file())
+                    saved = pd.read_csv((target/row.plot).parent/'frame_results.csv')
+                    original = self.frames[self.frames.metric.eq(metric) & self.frames.bag_path.eq(row.bag_path)]
+                    np.testing.assert_allclose(saved.configured_threshold, original.base_threshold)
+                    np.testing.assert_allclose(saved.pooled_score, original.pooled_score)
+            self.assertTrue((root/'SUMMARY.md').is_file())
+            self.assertEqual(json.loads((root/'report_manifest.json').read_text())['report_format_version'], 2)
 
 
 class BenchmarkEngineTests(unittest.TestCase):
@@ -161,6 +175,18 @@ class BenchmarkEngineTests(unittest.TestCase):
                     _, reused, _, phases, _ = prepare_camera(config, '/camera', get_extractor, Path(directory))
                 self.assertTrue(all(x['status']=='reused' for x in phases))
                 camera_root = Path(directory)/'cache/test/camera'
+                # A removed constant margin must not trigger expensive fitting.
+                for metric in ['euclidean', 'mahalanobis']:
+                    cached = camera_root/'benchmark_calibration'/metric
+                    marker = cached/'signature.json'
+                    legacy_signature = json.loads(marker.read_text())
+                    legacy_signature['threshold_margin'] = 1.1
+                    marker.write_text(json.dumps(legacy_signature))
+                with patch('vision_dinov2.threshold.calibrate_attention_leave_one_video_out', side_effect=AssertionError('reuse legacy scores')):
+                    _, converted, _, phases, _ = prepare_camera(config, '/camera', get_extractor, Path(directory))
+                for metric in ['euclidean', 'mahalanobis']:
+                    np.testing.assert_allclose(converted[metric].threshold_pooled, tables[metric].threshold_pooled)
+                self.assertTrue(all(x['status']=='reused' for x in phases))
                 euclidean_cache = camera_root/'benchmark_calibration/euclidean'
                 for filename in ['signature.json','patch_normality.npz','adaptive_threshold.csv','calibration.csv']:
                     shutil.copy2(euclidean_cache/filename, camera_root/filename)
