@@ -52,6 +52,26 @@ class DinoThresholdTests(unittest.TestCase):
         np.testing.assert_allclose(scaled.adaptive_threshold, 1.2 * before.adaptive_threshold)
         pd.testing.assert_frame_equal(table, before)
 
+    def test_calibration_has_no_hidden_gain_and_legacy_cache_converts_without_rebuild(self):
+        data = self.scores(3)
+        data[['score', 'score_weighted', 'score_pooled']] = 2.
+        table, rows = build_attention_threshold(data)
+        np.testing.assert_allclose(table.adaptive_threshold, 2.)
+        table.attrs['patch_profile'] = fit_patch_profile([self.item(), dict(self.item(.1), video_id=1)])
+        old = dict(calibration_method=ATTENTION_CALIBRATION_METHOD, threshold_margin=1.1,
+                   dino_metric='euclidean', attention_weighting='direct')
+        legacy = table.copy()
+        for column in ['adaptive_threshold', 'threshold_weighted', 'threshold_pooled']:
+            legacy[column] *= 1.1
+        with tempfile.TemporaryDirectory() as directory:
+            save_nominal_cache(directory, [self.item()], 2, legacy, rows, old)
+            before = {p.name: p.read_bytes() for p in Path(directory).iterdir()}
+            loaded = load_nominal_cache(directory, dict(old, threshold_margin=1.))
+            self.assertIsNotNone(loaded)
+            for column in ['adaptive_threshold', 'threshold_weighted', 'threshold_pooled']:
+                np.testing.assert_allclose(loaded[2][column], table[column])
+            self.assertEqual(before, {p.name: p.read_bytes() for p in Path(directory).iterdir()})
+
     @staticmethod
     def item(delta=0., stage=1):
         return dict(features=np.ones((4, 2), dtype=np.float32) * delta,

@@ -118,6 +118,16 @@ def load_nominal_cache(
     if saved_signature.get('dino_metric') == 'mahalanobis':
         # Existing Mahalanobis calibration already used direct attention.
         saved_signature.setdefault('attention_weighting', 'direct')
+    from .threshold import ATTENTION_CALIBRATION_METHOD
+    margin_conversion = (
+        saved_signature.get('calibration_method') == ATTENTION_CALIBRATION_METHOD
+        and expected_signature.get('calibration_method') == ATTENTION_CALIBRATION_METHOD
+        and saved_signature.get('threshold_margin') == 1.1
+        and expected_signature.get('threshold_margin') == 1.0)
+    if margin_conversion:
+        # Rebuild only the inexpensive quantile table from cached scores below.
+        # Preserve features, patch profiles and the saved files.
+        saved_signature['threshold_margin'] = 1.0
     differences = [key for key, value in expected_signature.items()
                    if saved_signature.get(key, 'mean' if key == 'score_mode' else None) != value]
     if differences:
@@ -159,6 +169,20 @@ def load_nominal_cache(
         validate_patch_profile(profile, grid_size ** 2)
         threshold.attrs["patch_profile"] = profile
     calibration = pd.read_csv(required[2])
+    if margin_conversion:
+        from .threshold import build_attention_threshold
+        attrs = threshold.attrs.copy()
+        role = calibration.get('calibration_role')
+        threshold, calibration = build_attention_threshold(calibration,
+            n_bins=expected_signature.get('threshold_bins', 30),
+            min_points_per_bin=expected_signature.get('min_points_per_bin', 2),
+            smooth_window=expected_signature.get('threshold_smooth_window', 3),
+            threshold_floor_quantile=expected_signature.get('threshold_floor_quantile', .20))
+        threshold.attrs.update(attrs)
+        if role is not None:
+            calibration['calibration_role'] = role
+        print('Removed legacy fixed 1.1 margin using cached calibration scores; '
+              'dino_threshold_scale is the sole gain. No feature extraction or patch fitting; saved files are unchanged.')
     print(f"Loaded reusable nominal cache: {directory}")
     print(f"Cached nominal frames: {len(memory)}")
     return memory, grid_size, threshold, calibration

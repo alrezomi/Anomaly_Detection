@@ -589,7 +589,8 @@ The previous local method's minimum of 18 calibration bags no longer applies.
 The supplied 16 calibration recordings can be used by this method.
 
 Within each progress bin, compute a 95th percentile for each recording, then
-the 95th percentile across those values times 1.10. Every recording has equal
+the 95th percentile across those values. These quantiles select score values;
+they do not multiply the scores by 0.95. Every recording has equal
 weight. Bins without two recordings/two frames interpolate populated bins; if all
 bins are sparse, the same two-level quantile is computed globally. The floor is
 the median of recording-level 20th-percentile frame scores. Three-bin
@@ -605,7 +606,14 @@ Evaluate the result on held-out normal and failure recordings, including delay.
 `dino_threshold_scale` is the existing sensitivity control: 1.0 uses calibration,
 0.8 lowers the bound by 20%, and 1.1 raises it by 10%. It changes the decision
 limit only and requires a replay restart, not recalibration. Use 1.0 for an initial
-baseline. The scored heatmap now shows the same unpooled attention-weighted evidence used for the
+baseline. This is the sole multiplicative gain; the previous fixed 1.10 margin
+has been removed. Compatible legacy calibration is converted on load by rebuilding
+the small quantile tables from saved scores, with no feature extraction or patch
+profile fitting. Old files and benchmark reports remain unchanged. Multiplying
+the previous scale by 1.1 compensates for the removed margin where the quantile
+bound dominates; floor-dominated bins can differ because the floor was never
+multiplied by that margin.
+The scored heatmap now shows the same unpooled attention-weighted evidence used for the
 score. Replay uses shared scales for the diagnostic groups described above;
 exported batch videos retain their threshold-relative scale. Colors are not
 probabilities, and the final decision uses the aggregated score.

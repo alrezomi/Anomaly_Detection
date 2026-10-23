@@ -11,7 +11,8 @@ from .anomaly_detection import compare_frame_to_nominal_memory
 ATTENTION_CALIBRATION_METHOD = "matched_patch_metrics_progress_v7_top1_pooling_smooth"
 SCORE_VARIANTS = ("weighted", "pooled")
 THRESHOLD_QUANTILE = 0.95
-THRESHOLD_MARGIN = 1.10
+# The sole decision gain is dino_threshold_scale, applied after calibration.
+THRESHOLD_MARGIN = 1.0
 
 
 def build_attention_threshold(calibration_df, n_bins=30, min_points_per_bin=2,
