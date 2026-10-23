@@ -713,11 +713,16 @@ remain in the audit columns and cannot silently overwrite CSV labels.
 
 Without a CSV, the existing final-three eligible stage-message policy from
 `build_dataset_manifest.py` is used. A `Failure_*` folder name is never a label.
-**Preflight requires known labels and at least one evaluated bag of each class
-before memory preparation or model inference.** A dataset whose stage messages
-are only 1, 2, 3 will otherwise look entirely normal; an automatically generated
-`dataset_labels.csv` based on those same markers may need authoritative correction.
-Do not mark failures solely to obtain an ROC: the labels must reflect the dataset.
+**Preflight requires known labels before memory preparation or model inference.**
+Single-class evaluation is supported: decisions, alarm times and the applicable
+class rate are reported, while ROC and best-scale selection remain unavailable.
+Task success and visual normality are different ground truths. A completed task
+with an unrelated object may correctly have a normal task label and still trigger
+DINO. Against task labels that alarm counts as a false positive; this does not
+establish whether it correctly detected a visual change. For visual-anomaly recall
+and ROC, supply a separate labels CSV identifying visually changed cases as fail
+and visually normal cases as normal. Preserve the original task-outcome CSV.
+Never change task labels merely to obtain an ROC.
 Actual onset is the first explicit
 Error/Fail/Failure/Anomaly-family marker after `STAGE_STARTUP_IGNORE_SEC` (default
 0.1 seconds), read using the existing failure-timing helper. Optionally, the
@@ -787,13 +792,13 @@ docker compose run --rm --build dino-benchmark \
 ```
 
 This reads the saved selection, pooled frame scores and unscaled thresholds.
-It checks both classes, saved frame counts and complete camera coverage. It does
+It checks known labels, saved frame counts and complete camera coverage. It does
 not read ROS bags, extract features, calibrate memory or load DINO. It preserves
 the original configured scale, selection and original outputs, writing a new
 `reports_<timestamp>/` subdirectory with corrected metrics, ROC, timings and alarm
 diagnostics. CSV labels change evaluation truth, never detector scores. If the
-CSV still labels all evaluated bags normal, recovery stops immediately with the
-class counts. Correct the authoritative labels or include a genuine failure set.
+CSV labels all evaluated bags normal, reports still show the detector decisions
+and task-label false-positive rate; ROC and best-scale selection are unavailable.
 An absent onset marker remains unavailable unless explicitly supplied in the CSV.
 High nominal false-alarm rates can remain after relabelling: the bag rule still
 uses any frame crossing, and the suggested scale is still exploratory tuning.

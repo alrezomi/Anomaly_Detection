@@ -88,9 +88,10 @@ def validate_ground_truth(manifest):
     if unknown:
         raise ValueError('Ground truth is missing/unknown for selected bags: '+', '.join(unknown[:10])+
                          '. Supply authoritative labels with --labels-csv before running inference.')
+    if not eligible:
+        raise ValueError('No eligible labelled bags remain for evaluation.')
     if not counts['normal'] or not counts['fail']:
-        raise ValueError(f'ROC preflight failed: {counts["normal"]} normal and {counts["fail"]} failure bags. '
-                         'Both classes are required. A Failure_* folder name is not a recorded failure label. '
-                         'Supply dataset_labels.csv with --labels-csv, and include unseen normal and failure bags. '
-                         'No model preparation or inference has started.')
+        print(f'Ground truth has {counts["normal"]} normal and {counts["fail"]} failure bags. '
+              'Single-class evaluation is valid; ROC and best-scale selection are unavailable. '
+              'Task-success labels do not establish whether a visual change is anomalous.', flush=True)
     return dict(normal=counts['normal'], fail=counts['fail'], excluded=len(manifest)-len(eligible))
