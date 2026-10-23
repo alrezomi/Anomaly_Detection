@@ -289,6 +289,7 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
     from .dinov2_features import DINOv2FeatureExtractor
     from .model_settings import model_settings
     from .benchmark_labels import apply_csv_labels, validate_ground_truth, update_labels_csv
+    from .benchmark_alarm import ensure_stage_windows, ALARM_POLICY
 
     config = deepcopy(config)
     config['output_dir'] = config.get('output_dir') or 'outputs'
@@ -323,7 +324,8 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
     started = perf_counter()
     report = dict(status='running', report_format_version=REPORT_FORMAT_VERSION, benchmark_source_sha256=source_hash,
         selected_folders=folder_names, data_root=str(Path(data_root).resolve()),
-        camera_topics=topics, configured_scale=scale, score_variant='pooled', bag_rule='any pooled crossing in any selected camera',
+        camera_topics=topics, configured_scale=scale, score_variant='pooled', bag_rule=ALARM_POLICY,
+        stage_topic=config.get('stage_topic', '/recording_stage'),
         label_policy='existing final-three eligible stage messages',
         onset_policy='first failure marker after startup-ignore, bag-relative time',
         camera_fusion='OR', retrospective_stages=bool(config.get('stage_constrained_matching')),
@@ -352,6 +354,8 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
         pd.DataFrame(manifest).to_csv(output / 'selection.csv', index=False)
         counts = validate_ground_truth(manifest)
         report['ground_truth_counts'] = counts
+        manifest = ensure_stage_windows(manifest, report['stage_topic'])
+        pd.DataFrame(manifest).to_csv(output/'selection.csv', index=False)
         print(f'Ground-truth preflight: {counts["normal"]} normal, {counts["fail"]} failure, {counts["excluded"]} excluded.', flush=True)
         report['signatures'] = {}
         for topic in topics:

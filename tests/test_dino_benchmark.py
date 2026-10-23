@@ -16,7 +16,7 @@ from vision_dinov2.benchmark_report import decisions, metrics_table, scale_sweep
 
 def manifest(path, label, onset=None, folder='test', status='ok'):
     return dict(bag_path=path, bag_name=Path(path).name, folder=folder, ground_truth_label=label,
-                status=status, recorded_failure_time_sec=onset)
+                status=status, recorded_failure_time_sec=onset, stage3_start_sec=100.)
 
 
 def timeline(path, metric, values, bounds=None, camera='/camera'):
@@ -73,13 +73,13 @@ class BenchmarkStatisticsTests(unittest.TestCase):
         rows = decisions(self.manifest, self.frames, 1., 'configured')
         group = rows[rows.metric.eq('euclidean')].set_index('bag_path')
         self.assertEqual(group.loc['normal', 'predicted_decision'], 'success')  # equality is no alarm
-        self.assertEqual(group.loc['failure', 'first_alarm_time_sec'], 2.)
-        self.assertEqual(group.loc['failure', 'failure_time_error_sec'], 0.)
+        self.assertEqual(group.loc['failure', 'first_alarm_time_sec'], 3.)
+        self.assertEqual(group.loc['failure', 'failure_time_error_sec'], 1.)
         self.assertEqual(group.loc['miss', 'timing_status'], 'missed_failure')
         self.assertTrue(pd.isna(group.loc['broken', 'predicted_decision']))
-        second = pd.DataFrame(timeline('normal', 'euclidean', [2.], camera='/other'))
+        second = pd.DataFrame(timeline('normal', 'euclidean', [2., 2.], camera='/other'))
         extra = decisions(self.manifest, pd.concat([self.frames, second]), 1., 'configured')
-        self.assertEqual(extra[(extra.metric=='euclidean') & (extra.bag_path=='normal')].iloc[0].first_alarm_time_sec, 1.)
+        self.assertEqual(extra[(extra.metric=='euclidean') & (extra.bag_path=='normal')].iloc[0].first_alarm_time_sec, 2.)
 
     def test_confusion_counts_errors_not_successes_and_single_class_rates_are_undefined(self):
         results = decisions(self.manifest, self.frames, 1., 'configured')
@@ -117,8 +117,8 @@ class BenchmarkStatisticsTests(unittest.TestCase):
 
     def test_zero_threshold_and_zero_score_follow_actual_decision_rule(self):
         rows = [manifest('zero', 'normal'), manifest('positive', 'fail', 1.)]
-        frames = pd.DataFrame(timeline('zero', 'euclidean', [0.], [0.]) +
-                              timeline('positive', 'euclidean', [1.], [0.]))
+        frames = pd.DataFrame(timeline('zero', 'euclidean', [0., 0.], [0., 0.]) +
+                              timeline('positive', 'euclidean', [1., 1.], [0., 0.]))
         result = decisions(rows, frames, 1., 'configured')
         report, _, _ = scale_sweep(result[result.metric.eq('euclidean')], 1., frames)
         self.assertEqual(report['best']['threshold_scale'], 1.)
@@ -131,7 +131,8 @@ class BenchmarkStatisticsTests(unittest.TestCase):
             metrics, roc = write_reports(self.manifest, self.frames, directory, 1., ['test'])
             root = Path(directory)
             self.assertTrue((root/'roc.png').is_file())
-            self.assertTrue((root/'euclidean_failure_timing_01.png').is_file())
+            self.assertTrue((root/'failure_time_difference.png').is_file())
+            self.assertTrue((root/'metrics.png').is_file())
             results = pd.read_csv(root/'bag_results.csv')
             self.assertEqual(set(results.operating_point), {'configured','exploratory_best'})
             self.assertTrue(results[(results.operating_point=='configured') & (results.bag_path=='miss')].failure_time_error_sec.isna().all())
@@ -140,7 +141,6 @@ class BenchmarkStatisticsTests(unittest.TestCase):
                 self.assertTrue((root/f'{metric}_scale_sweep.csv').is_file())
                 target = root/metric
                 self.assertTrue((target/'summary.md').is_file())
-                self.assertTrue((target/'failure_timing_01.png').is_file())
                 self.assertTrue((target/'alarm_rate_vs_scale.png').is_file())
                 index = pd.read_csv(target/'bag_index.csv')
                 self.assertEqual(set(index.bag_path), set(item['bag_path'] for item in self.manifest))
@@ -151,7 +151,7 @@ class BenchmarkStatisticsTests(unittest.TestCase):
                     np.testing.assert_allclose(saved.configured_threshold, original.base_threshold)
                     np.testing.assert_allclose(saved.pooled_score, original.pooled_score)
             self.assertTrue((root/'SUMMARY.md').is_file())
-            self.assertEqual(json.loads((root/'report_manifest.json').read_text())['report_format_version'], 2)
+            self.assertEqual(json.loads((root/'report_manifest.json').read_text())['report_format_version'], 3)
 
 
 class BenchmarkEngineTests(unittest.TestCase):
@@ -255,7 +255,7 @@ class BenchmarkEngineTests(unittest.TestCase):
                           camera_topics=['/one', '/two'], dino_threshold_scale=1., stage_constrained_matching=False)
             def annotated(rows, *args):
                 return [dict(item, ground_truth_label='normal' if item['bag_name']=='normal' else 'fail',
-                             recorded_failure_time_sec=None if item['bag_name']=='normal' else 1.) for item in rows]
+                             recorded_failure_time_sec=None if item['bag_name']=='normal' else 1., stage3_start_sec=100.) for item in rows]
             def score(config, topic, bag, *args):
                 if topic == '/two' and Path(bag).name == 'fail':
                     raise ValueError('missing camera')
