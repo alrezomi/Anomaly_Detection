@@ -161,6 +161,18 @@ class BenchmarkEngineTests(unittest.TestCase):
                     _, reused, _, phases, _ = prepare_camera(config, '/camera', get_extractor, Path(directory))
                 self.assertTrue(all(x['status']=='reused' for x in phases))
                 camera_root = Path(directory)/'cache/test/camera'
+                # A removed constant margin must not trigger expensive fitting.
+                for metric in ['euclidean', 'mahalanobis']:
+                    cached = camera_root/'benchmark_calibration'/metric
+                    marker = cached/'signature.json'
+                    legacy_signature = json.loads(marker.read_text())
+                    legacy_signature['threshold_margin'] = 1.1
+                    marker.write_text(json.dumps(legacy_signature))
+                with patch('vision_dinov2.threshold.calibrate_attention_leave_one_video_out', side_effect=AssertionError('reuse legacy scores')):
+                    _, converted, _, phases, _ = prepare_camera(config, '/camera', get_extractor, Path(directory))
+                for metric in ['euclidean', 'mahalanobis']:
+                    np.testing.assert_allclose(converted[metric].threshold_pooled, tables[metric].threshold_pooled)
+                self.assertTrue(all(x['status']=='reused' for x in phases))
                 euclidean_cache = camera_root/'benchmark_calibration/euclidean'
                 for filename in ['signature.json','patch_normality.npz','adaptive_threshold.csv','calibration.csv']:
                     shutil.copy2(euclidean_cache/filename, camera_root/filename)

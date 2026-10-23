@@ -93,6 +93,13 @@ def _load_calibration(directory, signature, patch_count):
             return None
         if saved.get('dino_metric') == 'mahalanobis':
             saved.setdefault('attention_weighting', 'direct')
+        from .threshold import ATTENTION_CALIBRATION_METHOD, build_attention_threshold
+        convert_margin = (saved.get('calibration_method') == ATTENTION_CALIBRATION_METHOD
+                          and signature.get('calibration_method') == ATTENTION_CALIBRATION_METHOD
+                          and saved.get('threshold_margin') == 1.1
+                          and signature.get('threshold_margin') == 1.)
+        if convert_margin:
+            saved['threshold_margin'] = 1.
         if saved != signature:
             return None
         with np.load(directory / 'patch_normality.npz', allow_pickle=False) as arrays:
@@ -101,6 +108,13 @@ def _load_calibration(directory, signature, patch_count):
         if str(profile.get('metric', 'euclidean')) != signature['dino_metric']:
             return None
         table = pd.read_csv(directory / 'adaptive_threshold.csv')
+        if convert_margin:
+            table, _ = build_attention_threshold(pd.read_csv(directory/'calibration.csv'),
+                n_bins=signature.get('threshold_bins', 30),
+                min_points_per_bin=signature.get('min_points_per_bin', 2),
+                smooth_window=signature.get('threshold_smooth_window', 3),
+                threshold_floor_quantile=signature.get('threshold_floor_quantile', .20))
+            print(f'Reused benchmark calibration scores without the legacy 1.1 margin: {directory}', flush=True)
         centers = table['stage_center'].to_numpy(float)
         if (not len(centers) or not np.isfinite(centers).all() or (np.diff(centers) <= 0).any()
                 or (centers < 0).any() or (centers > 1).any()):
