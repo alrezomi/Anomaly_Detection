@@ -7,13 +7,46 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from vision_dinov2.benchmark_labels import apply_csv_labels, validate_ground_truth
+from vision_dinov2.benchmark_labels import apply_csv_labels, validate_ground_truth, update_labels_csv
 from vision_dinov2.benchmark_recovery import regenerate_reports
 from vision_dinov2.benchmark_report import write_reports
 from tests.test_dino_benchmark import manifest, timeline
 
 
 class LabelTests(unittest.TestCase):
+    def test_auto_update_adds_new_selected_bags_and_preserves_manual_labels_and_columns(self):
+        rows = [manifest('/data/old/a', 'normal'), manifest('/data/new/b', 'fail', 2.),
+                manifest('/data/train/c', 'unknown', status='excluded_training')]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'labels.csv'
+            pd.DataFrame([dict(bag_path='old/a', bag_name='a', label='fail',
+                               failure_time_sec='0', note='manual correction'),
+                          dict(bag_path='unselected/d', bag_name='d', label='normal',
+                               failure_time_sec='', note='keep unselected')]).to_csv(path, index=False)
+            with patch('rosbag_io.read_stage_events', side_effect=AssertionError('already annotated')):
+                update_labels_csv(rows, path, '/data')
+            saved = pd.read_csv(path, dtype=str, keep_default_na=False).set_index('bag_path')
+            self.assertEqual(set(saved.index), {'old/a', 'new/b', 'unselected/d'})
+            self.assertEqual(saved.loc['old/a', 'label'], 'fail')
+            self.assertEqual(saved.loc['old/a', 'failure_time_sec'], '0')
+            self.assertEqual(saved.loc['old/a', 'note'], 'manual correction')
+            self.assertEqual(saved.loc['new/b', 'label'], 'fail')
+            original = path.read_bytes()
+            update_labels_csv(rows, path, '/data')
+            self.assertEqual(original, path.read_bytes())
+
+    def test_auto_update_creates_missing_csv_and_rejects_ambiguity_without_overwriting(self):
+        rows = [manifest('/data/new/a', 'normal')]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'nested/labels.csv'
+            update_labels_csv(rows, path, '/data')
+            self.assertEqual(apply_csv_labels(rows, path, '/data')[0]['ground_truth_label'], 'normal')
+            pd.DataFrame([dict(bag_name='a', label='normal')]).to_csv(path, index=False)
+            original = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, 'Ambiguous'):
+                update_labels_csv(rows+[manifest('/data/other/a', 'fail')], path, '/data')
+            self.assertEqual(original, path.read_bytes())
+
     def test_csv_paths_override_stage_labels_and_do_not_invent_missing_onsets(self):
         rows = [manifest('/data/Nominal/n', 'normal'), manifest('/data/Failure_8/f', 'normal')]
         with tempfile.TemporaryDirectory() as directory:

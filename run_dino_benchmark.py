@@ -11,7 +11,7 @@ def main():
     parser.add_argument('--data-root', type=Path, default=Path(os.environ.get('ANOMALY_DATA_ROOT', '/data')))
     parser.add_argument('--folder', action='append', help='Folder under the data root; repeat to select several. Overrides config list.')
     parser.add_argument('--output-dir', type=Path, help='Parent for a new timestamped report directory.')
-    parser.add_argument('--labels-csv', type=Path, help='Authoritative dataset labels; overrides dino_benchmark.labels_csv.')
+    parser.add_argument('--labels-csv', type=Path, help='Dataset labels; missing selected bags are added from recorded stages, existing entries preserved. Overrides dino_benchmark.labels_csv.')
     parser.add_argument('--report-only', type=Path, metavar='SAVED_RUN', help='Regenerate reports from saved frame results, without memory building or inference.')
     arguments = parser.parse_args()
     config = (json.loads(arguments.config.read_text(encoding='utf-8'))

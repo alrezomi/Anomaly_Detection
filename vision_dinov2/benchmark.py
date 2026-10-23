@@ -288,7 +288,7 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
     from .benchmark_report import REPORT_FORMAT_VERSION
     from .dinov2_features import DINOv2FeatureExtractor
     from .model_settings import model_settings
-    from .benchmark_labels import apply_csv_labels, validate_ground_truth
+    from .benchmark_labels import apply_csv_labels, validate_ground_truth, update_labels_csv
 
     config = deepcopy(config)
     config['output_dir'] = config.get('output_dir') or 'outputs'
@@ -344,10 +344,11 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
         if not np.isfinite(startup) or startup < 0:
             raise ValueError('STAGE_STARTUP_IGNORE_SEC must be finite and nonnegative.')
         manifest = annotate_bags(selected, config.get('stage_topic', '/recording_stage'), startup)
-        labels_csv = labels_csv or (config.get('dino_benchmark') or {}).get('labels_csv')
-        if labels_csv:
-            manifest = apply_csv_labels(manifest, labels_csv, data_root)
-            report.update(labels_csv=str(Path(labels_csv).resolve()), label_policy='authoritative labels CSV')
+        labels_csv = (labels_csv or (config.get('dino_benchmark') or {}).get('labels_csv')
+                      or Path(os.environ.get('ANOMALY_OUTPUT_ROOT') or Path(config['output_dir']).parent)/'dataset_labels.csv')
+        labels_csv = update_labels_csv(manifest, labels_csv, data_root)
+        manifest = apply_csv_labels(manifest, labels_csv, data_root)
+        report.update(labels_csv=str(labels_csv), label_policy='authoritative labels CSV; missing selected entries generated from recorded stages')
         pd.DataFrame(manifest).to_csv(output / 'selection.csv', index=False)
         counts = validate_ground_truth(manifest)
         report['ground_truth_counts'] = counts

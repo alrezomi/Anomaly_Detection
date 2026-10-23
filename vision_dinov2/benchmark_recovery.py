@@ -8,7 +8,7 @@ import shutil
 import numpy as np
 import pandas as pd
 
-from .benchmark_labels import apply_csv_labels, validate_ground_truth
+from .benchmark_labels import apply_csv_labels, validate_ground_truth, update_labels_csv
 from .benchmark_report import write_reports, REPORT_FORMAT_VERSION
 
 
@@ -24,6 +24,7 @@ def regenerate_reports(source, labels_csv=None, output_root=None):
         value = row.get('recorded_failure_time_sec')
         row['recorded_failure_time_sec'] = float(value) if value not in (None, '') else None
     if labels_csv:
+        labels_csv = update_labels_csv(manifest, labels_csv, state['data_root'])
         manifest = apply_csv_labels(manifest, labels_csv, state['data_root'])
     counts = validate_ground_truth(manifest)
     frames = pd.read_csv(source/'frame_results.csv')

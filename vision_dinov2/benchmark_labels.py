@@ -3,6 +3,8 @@ from collections import Counter
 from pathlib import Path
 import posixpath
 import re
+import os
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -13,6 +15,55 @@ def label_path(value, data_root):
     root = str(data_root).replace('\\', '/')
     absolute = value.startswith('/') or re.match(r'^[a-zA-Z]:/', value)
     return posixpath.normpath(value if absolute else root.rstrip('/')+'/'+value)
+
+
+def update_labels_csv(manifest, csv_path, data_root):
+    """Add newly selected bags using recorded labels; preserve existing edits/columns.
+
+    The manifest is already annotated by the benchmark (or saved by report-only).
+    No whole-dataset scan or duplicate ROS reads are needed.
+    """
+    path = Path(csv_path).resolve()
+    if path.is_file():
+        apply_csv_labels([], path, data_root)  # Reject malformed existing data before writing.
+        table = pd.read_csv(path, dtype=str, keep_default_na=False)
+    else:
+        table = pd.DataFrame(columns=['bag_name', 'bag_path', 'label'])
+    columns = list(dict.fromkeys([*table.columns, 'bag_name', 'bag_path', 'label']))
+    records = table.reindex(columns=columns, fill_value='').to_dict('records')
+    paths = {label_path(row['bag_path'], data_root) for row in records if row['bag_path'].strip()}
+    names = {row['bag_name'].strip() for row in records if not row['bag_path'].strip()}
+    additions = []
+    for row in manifest:
+        if row['status'] != 'ok':
+            continue
+        key = label_path(row['bag_path'], data_root)
+        if key in paths or row['bag_name'] in names:
+            continue
+        record = dict.fromkeys(columns, '')
+        record.update(bag_name=row['bag_name'],
+                      bag_path=posixpath.relpath(key, label_path('.', data_root)),
+                      label=row.get('stage_ground_truth_label', row.get('ground_truth_label', 'unknown')))
+        additions.append(record)
+        paths.add(key)
+    if path.is_file() and not additions:
+        apply_csv_labels(manifest, path, data_root)
+        print(f'Labels CSV current: {path}; existing labels preserved.', flush=True)
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='',
+                dir=path.parent, prefix=path.name+'.', suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            pd.DataFrame(records+additions, columns=columns).to_csv(stream, index=False)
+        apply_csv_labels(manifest, temporary, data_root)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    print(f'Labels CSV updated: {path}; added {len(additions)} selected bags; existing labels preserved.', flush=True)
+    return path
 
 
 def apply_csv_labels(manifest, csv_path, data_root):

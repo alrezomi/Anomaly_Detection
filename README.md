@@ -715,12 +715,21 @@ When `labels_csv` is set (or `--labels-csv` is supplied), that CSV is the
 **authoritative ground truth**. It needs `bag_path,label` columns; paths may be
 absolute or relative to `/data`. A unique `bag_name` can be used when paths are
 unavailable, but duplicate basenames across selected folders are rejected.
-Labels are `normal`/`fail` (success/nominal/failure aliases are accepted). Missing,
-unknown or duplicate selected labels stop the benchmark. Stage-derived labels
+Labels are `normal`/`fail` (success/nominal/failure aliases are accepted). The
+benchmark automatically creates/updates the labels CSV before model preparation:
+missing selected bags are added using their recorded stage labels. Existing
+entries, manual corrections, onset columns, and unselected rows are preserved.
+No separate `bag-labels` command is needed. Unknown or duplicate labels still
+stop the benchmark. Stage-derived labels
 remain in the audit columns and cannot silently overwrite CSV labels.
 
-Without a CSV, the existing final-three eligible stage-message policy from
-`build_dataset_manifest.py` is used. A `Failure_*` folder name is never a label.
+When no CSV path is configured, it defaults to `dataset_labels.csv` under
+`ANOMALY_OUTPUT_ROOT` (Docker `/outputs`), or the parent of the experiment output
+directory outside Docker. New rows use the existing final-three eligible
+stage-message policy from `build_dataset_manifest.py`. A `Failure_*` folder name is never a label.
+Only selected, eligible bags are added; other dataset folders are not scanned.
+To regenerate existing recorded labels deliberately, use the separate `bag-labels`
+command, which overwrites its output rather than preserving edits.
 **Preflight requires known labels before memory preparation or model inference.**
 Single-class evaluation is supported: decisions, alarm times and the applicable
 class rate are reported, while ROC and best-scale selection remain unavailable.
@@ -839,6 +848,9 @@ Report-only recovery uses the original stored scale and thresholds, even if the
 current config or calibration has changed. It does not retroactively apply the
 single-gain change to an old experiment. Generating many plot images takes CPU
 time, but requires neither DINO inference nor nominal-memory loading.
+If a labels CSV is supplied/configured for report-only, missing entries are filled
+from saved stage annotations without ROS reads. This does not add new recordings
+to the old run; newly selected recordings require a fresh benchmark.
 
 ### Independent top and flange DINO replay
 
