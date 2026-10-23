@@ -125,6 +125,7 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(state['ground_truth_counts'], dict(normal=2,fail=0,excluded=0))
             for metric in ['euclidean','mahalanobis']:
                 self.assertEqual(state['roc'][metric]['status'],'unavailable')
+                self.assertTrue((output/f'{metric}_failure_timing_01.png').is_file())
             decisions=pd.read_csv(output/'bag_results.csv')
             configured=decisions[decisions.operating_point.eq('configured')]
             self.assertTrue(configured.ground_truth_label.eq('normal').all())

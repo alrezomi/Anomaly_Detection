@@ -267,16 +267,22 @@ def write_reports(manifest, frames, output, scale, folders):
 
 def _timing_plots(results, output, plt):
     for metric in ('euclidean', 'mahalanobis'):
-        failures = results[results.metric.eq(metric) & results.ground_truth_label.eq('fail')]
-        bags = sorted(failures.bag_path.unique())
+        selected_results = results[results.metric.eq(metric)]
+        bags = sorted(selected_results.bag_path.unique())
         if not bags:
+            figure, axis = plt.subplots(figsize=(10, 4))
+            axis.text(.5, .5, 'No bags available for timing evaluation.', ha='center', va='center', transform=axis.transAxes)
+            axis.set_axis_off()
+            figure.suptitle(f'{metric.title()} - attention + 3x3 pooling')
+            figure.savefig(output / f'{metric}_failure_timing_01.png', dpi=160)
+            plt.close(figure)
             continue
-        # Keep missed failures visible and paginate large benchmarks.
+        # Always show every bag, including successful tasks and missing annotations.
         for page, start in enumerate(range(0, len(bags), 25), 1):
             names = bags[start:start+25]
             figure, axes = plt.subplots(1, 2, figsize=(15, max(4, len(names)*.35)), sharey=True)
             for index, bag in enumerate(names):
-                group = failures[failures.bag_path.eq(bag)]
+                group = selected_results[selected_results.bag_path.eq(bag)]
                 onset = group.recorded_failure_time_sec.iloc[0]
                 if pd.notna(onset):
                     axes[0].scatter(onset, index, marker='|', color='black', s=100)
@@ -287,13 +293,23 @@ def _timing_plots(results, output, plt):
                     row = selected.iloc[0]
                     if pd.notna(row.first_alarm_time_sec):
                         axes[0].scatter(row.first_alarm_time_sec, index+offset, color=color, s=22)
+                    else:
+                        axes[0].annotate('no alarm' if row.status == 'ok' else row.status.replace('_', ' '),
+                                         (0, index+offset), fontsize=7, color=color)
                     if pd.notna(row.failure_time_error_sec):
                         axes[1].scatter(row.failure_time_error_sec, index+offset, color=color, s=22)
                     else:
-                        axes[1].annotate(row.timing_status.replace('_', ' '), (0, index+offset),
+                        reason = row.timing_status.replace('_', ' ')
+                        if row.status == 'ok' and pd.isna(onset):
+                            reason = 'no recorded failure onset'
+                        elif row.ground_truth_label == 'normal' and row.status == 'ok':
+                            reason = 'task success; onset comparison not applied'
+                        axes[1].annotate(reason, (0, index+offset),
                                          fontsize=7, color=color)
-            axes[0].set_yticks(range(len(names)), ['/'.join(filter(None, [Path(bag).parent.name, Path(bag).name]))
-                                                   for bag in names], fontsize=8)
+            axes[0].set_yticks(range(len(names)), [
+                '/'.join(filter(None, [Path(bag).parent.name, Path(bag).name])) +
+                f' [{selected_results.loc[selected_results.bag_path.eq(bag), "ground_truth_label"].iloc[0]}]'
+                for bag in names], fontsize=8)
             axes[0].set_ylim(len(names)-.5, -.5)
             axes[0].set(xlabel='Bag-relative observation time (s)', title='Black: actual marker; blue: configured; orange: exploratory best')
             axes[1].axvline(0, color='black', linewidth=1)

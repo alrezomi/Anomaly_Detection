@@ -749,7 +749,7 @@ Reports are written into a new timestamped directory under
 | `metrics.csv` | Overall and each selected folder: TP/FP/TN/FN, recall, FPR, precision, accuracy, F1, balanced accuracy, Wilson 95% intervals and failure-timing statistics |
 | `roc.png`, `<metric>_roc.csv` | Bag-level ROC/AUC, with configured and exploratory-best scale marked |
 | `<metric>_scale_sweep.csv`, `roc_summary.json` | Threshold-scale sweep and suggested scale for each metric |
-| `<metric>_failure_timing_*.png` | Actual onset and first alarm per failure demo, signed errors (negative=early), with misses/missing annotations visible |
+| `<metric>_failure_timing_*.png` | Always generated: actual onset and first alarm for all selected demos, with task labels, no alarms and missing annotations visible; signed errors (negative=early) where failure timing can be compared |
 | `runtime.csv`, `runtime_summary.csv` | Model load, feature preparation/reuse, calibration, actual bag-inference wall times, and frame mean/median/p95 by metric/folder |
 | `run.json` | Effective model/memory signatures, selection/label policies, run status, ROC selection and total wall time |
 | `alarm_diagnostics.csv` | Alarm-frame counts/fractions, first-frame crossings and first-alarm camera, for distinguishing isolated crossings from systematic startup alarms |
