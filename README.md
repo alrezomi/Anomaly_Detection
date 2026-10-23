@@ -705,8 +705,12 @@ Each sampled test image is extracted once and its representative nominal frame
 is selected once. Both metrics score the same features/match. Decisions use
 **attention-weighted 3x3 pooled evidence only**, averaging its highest **1%**.
 The no-pooling score is not used for any benchmark classification or ROC point.
-A bag is predicted **failure if any sampled image from any configured camera**
-exceeds its own pooled threshold times `dino_threshold_scale`; otherwise success.
+A bag is predicted **failure only after two consecutive sampled images in the same
+camera exceed their pooled thresholds**, strictly before the recorded **start of
+stage 3**. The alarm timestamp is the second crossing, when it can be confirmed.
+One spike, equal-to-threshold values, cross-camera alternating crossings, or
+crossings at/after stage 3 do not confirm an alarm. Any one camera can confirm.
+Scores after stage 3 remain visible but are shaded/ignored for evaluation.
 This camera OR is a benchmark bag decision, separate from independent replay
 camera plots. All images run at the existing DINO sampling rate (normally 2 fps),
 without replay pacing, VLM intervals, early stopping, or an eight-image limit.
@@ -757,15 +761,20 @@ valid onset never get a fabricated zero timing error.
 
 Reports are written into a new timestamped directory under
 `<output_dir>/dino_benchmark/` (Docker `/outputs` maps to `ANOMALY_OUTPUT_DIR`).
-Open **`SUMMARY.md` first**. Report format v2 creates separate `euclidean/` and
-`mahalanobis/` folders. Each contains `summary.md`, evaluation CSVs, always-present
-`failure_timing_*.png`, `roc.png`, `alarm_rate_vs_scale.png`, and `bag_index.csv`.
+Open **`SUMMARY.md` first**. Report format v3 creates separate `euclidean/` and
+`mahalanobis/` folders. Each contains `summary.md`, evaluation CSVs,
+`roc.png`, `alarm_rate_vs_scale.png`, and `bag_index.csv`.
+At the root, **`failure_time_difference.png`** shows all demos/folders and both
+metrics together on one signed-delay axis, using the configured scale. Missing
+onsets/misses are annotated, never drawn as zero delay. **`metrics.png`** compares
+recall, FPR, precision, accuracy, F1 and confirmed-alarm rate for both metrics and
+all folders in one figure; undefined rates are labelled N/A.
 Every evaluated/error bag has `bags/<name>_<path-hash>/score_threshold.png`, its
 frame CSV and its decision CSV. Separate camera panels show the actual pooled
 score and configured threshold in bag-relative seconds, crossings, first alarm,
 and the recorded failure onset when available. Errors remain visibly incomplete.
 Training/calibration bags remain excluded and are listed in the selection/results.
-The original combined CSVs and timing plots remain at the root for compatibility.
+The original combined CSVs remain at the root for compatibility.
 
 Single-class sets still produce an alarm-rate-versus-scale curve and per-folder
 alarm rates. They cannot produce a true ROC, recall for an absent positive class,
@@ -789,7 +798,8 @@ old margin-only caches are reused via saved scores, without fitting patch profil
 | `metrics.csv` | Overall and each selected folder: TP/FP/TN/FN, recall, FPR, precision, accuracy, F1, balanced accuracy, Wilson 95% intervals and failure-timing statistics |
 | `roc.png`, `<metric>_roc.csv` | Bag-level ROC/AUC, with configured and exploratory-best scale marked |
 | `<metric>_scale_sweep.csv`, `roc_summary.json` | Threshold-scale sweep and suggested scale for each metric |
-| `<metric>_failure_timing_*.png` | Always generated: actual onset and first alarm for all selected demos, with task labels, no alarms and missing annotations visible; signed errors (negative=early) where failure timing can be compared |
+| `failure_time_difference.png` | All folders/both metrics in one plot: confirmed alarm minus actual onset, negative=early; missing timestamps/misses explicit |
+| `metrics.png` | All-folder comparison of both metrics: recall/FPR/precision/accuracy/F1/alarm rate; undefined rates marked N/A |
 | `runtime.csv`, `runtime_summary.csv` | Model load, feature preparation/reuse, calibration, actual bag-inference wall times, and frame mean/median/p95 by metric/folder |
 | `run.json` | Effective model/memory signatures, selection/label policies, run status, ROC selection and total wall time |
 | `alarm_diagnostics.csv` | Alarm-frame counts/fractions, first-frame crossings and first-alarm camera, for distinguishing isolated crossings from systematic startup alarms |
@@ -805,9 +815,10 @@ inside preparation or first-bag inference); `run.json` records the actual total
 wall time. These are offline throughput measurements,
 including cold first-frame effects, not live end-to-end ROS alarm latency.
 
-ROC ranks each bag by its maximum pooled `score/base_threshold` across all images
-and cameras. The scale sweep uses the actual strict `score > threshold * scale`
-rule (equality is no alarm), so tuning needs no repeated model inference. The
+ROC ranks each bag by the largest minimum `score/base_threshold` of adjacent
+eligible frame pairs in one camera. This represents the two-crossing rule, not
+an isolated maximum. The scale sweep uses the actual strict comparisons for both
+frames before stage 3 (equality is no alarm), so tuning needs no repeated model inference. The
 suggested scale maximizes Youden J = recall - FPR, preferring lower FPR, usable
 interior/configured scales, and then proximity to the configured scale when
 performance ties. The JSON/CSV preserve full precision. Standard ROC endpoints may be
@@ -815,8 +826,8 @@ unreachable by a positive scale for zero scores/zero thresholds; such cases are
 counted explicitly and the suggested operating point is evaluated using real
 positive finite scales. Scale suggestions are **exploratory tuning on the same
 selected bags**, not independently validated performance. Nothing rewrites your
-config. Use another held-out set to evaluate a chosen scale. Timing figures show
-both operating points; nominal false-alarm times remain in `bag_results.csv`
+config. Use another held-out set to evaluate a chosen scale. The combined timing
+figure uses the configured scale; both operating points remain in `bag_results.csv`
 because successful demonstrations have no actual failure onset to subtract.
 
 ### Recover DINO reports without repeating inference
@@ -835,19 +846,23 @@ docker compose run --rm --build dino-benchmark \
 
 This reads the saved selection, pooled frame scores and unscaled thresholds.
 It checks known labels, saved frame counts and complete camera coverage. It does
-not read ROS bags, extract features, calibrate memory or load DINO. It preserves
-the original configured scale, selection and original outputs, writing a new
+not extract features, calibrate memory or load DINO. When stage-3 timestamps
+are missing in an older run, it reads only the stage metadata from those bags;
+the bags must still be available. Later runs reuse saved stage-3 timestamps.
+It preserves the original configured scale, selection and original outputs, writing a new
 `reports_<timestamp>/` subdirectory with corrected metrics, ROC, timings and alarm
 diagnostics. CSV labels change evaluation truth, never detector scores. If the
 CSV labels all evaluated bags normal, reports still show the detector decisions
 and task-label false-positive rate; ROC and best-scale selection are unavailable.
 An absent onset marker remains unavailable unless explicitly supplied in the CSV.
 High nominal false-alarm rates can remain after relabelling: the bag rule still
-uses any frame crossing, and the suggested scale is still exploratory tuning.
+uses confirmed two-frame crossings before stage 3, and the suggested scale is still exploratory tuning.
 Report-only recovery uses the original stored scale and thresholds, even if the
 current config or calibration has changed. It does not retroactively apply the
 single-gain change to an old experiment. Generating many plot images takes CPU
 time, but requires neither DINO inference nor nominal-memory loading.
+Report-only applies the current alarm confirmation/window policy to saved raw
+scores, so bag decisions, onset errors, metric graphs and ROC are recomputed together.
 If a labels CSV is supplied/configured for report-only, missing entries are filled
 from saved stage annotations without ROS reads. This does not add new recordings
 to the old run; newly selected recordings require a fresh benchmark.

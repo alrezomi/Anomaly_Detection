@@ -107,7 +107,7 @@ class RecoveryTests(unittest.TestCase):
               manifest('/data/Failure_8/f','normal',folder='Failure_8')]
         frames=pd.DataFrame([row for metric in ['euclidean','mahalanobis'] for row in
                             timeline(rows[0]['bag_path'],metric,[.1,.2])+
-                            timeline(rows[1]['bag_path'],metric,[.1,2.])])
+                            timeline(rows[1]['bag_path'],metric,[.1,2.,2.])])
         pd.DataFrame(rows).to_csv(source/'selection.csv',index=False)
         write_reports(rows,frames,source,1.1,['Nominal','Failure_8'])
         (source/'run.json').write_text(json.dumps(dict(score_variant='pooled',data_root='/data',
@@ -136,7 +136,7 @@ class RecoveryTests(unittest.TestCase):
             decisions=pd.read_csv(output/'bag_results.csv')
             configured=decisions[decisions.operating_point.eq('configured')]
             failures=configured[configured.ground_truth_label.eq('fail')]
-            self.assertTrue(failures.first_alarm_time_sec.eq(2.).all())
+            self.assertTrue(failures.first_alarm_time_sec.eq(3.).all())
             self.assertTrue(failures.failure_time_error_sec.isna().all())
             self.assertTrue(failures.timing_status.eq('missing_failure_marker').all())
             self.assertTrue((output/'alarm_diagnostics.csv').is_file())
@@ -158,12 +158,12 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(state['ground_truth_counts'], dict(normal=2,fail=0,excluded=0))
             for metric in ['euclidean','mahalanobis']:
                 self.assertEqual(state['roc'][metric]['status'],'unavailable')
-                self.assertTrue((output/f'{metric}_failure_timing_01.png').is_file())
+                self.assertTrue((output/'failure_time_difference.png').is_file())
+                self.assertTrue((output/'metrics.png').is_file())
                 target = output/metric
                 index = pd.read_csv(target/'bag_index.csv')
                 self.assertEqual(len(index), 2)
                 self.assertTrue(all((target/plot).is_file() for plot in index['plot']))
-                self.assertTrue((target/'failure_timing_01.png').is_file())
                 sweep = pd.read_csv(target/'scale_sweep.csv')
                 self.assertTrue(sweep.recall.isna().all())
                 self.assertTrue(sweep.alarm_rate.between(0, 1).all())

@@ -12,8 +12,9 @@ import numpy as np
 import pandas as pd
 
 from rynnbrain_vlm.benchmark_roc import roc_curve
+from .benchmark_alarm import eligible_frames, confirmed_alarms, confirmation_pairs, ALARM_POLICY
 
-REPORT_FORMAT_VERSION = 2
+REPORT_FORMAT_VERSION = 3
 
 def bag_score(frames):
     scores = frames.pooled_score.to_numpy(float)
@@ -23,24 +24,27 @@ def bag_score(frames):
         raise ValueError('Invalid or empty pooled score timeline.')
     ratios = np.divide(scores, bounds, out=np.zeros_like(scores), where=bounds > 0)
     ratios[(bounds == 0) & (scores > 0)] = np.inf
-    return float(ratios.max())
+    first, second = confirmation_pairs(frames)
+    return float(np.minimum(ratios[first], ratios[second]).max()) if len(first) else 0.
 
 
 def decisions(manifest, frames, scale, operating_point):
-    """Any crossing across sampled frames/cameras is failure; incomplete bags aren't successes."""
+    """Confirm on the second consecutive eligible crossing in the same camera."""
+    frames = eligible_frames(manifest, frames)
     rows = []
     grouped = {key: group for key, group in frames.groupby(['metric', 'bag_path'])} if len(frames) else {}
     for metric in ('euclidean', 'mahalanobis'):
         for item in manifest:
             row = dict(item, metric=metric, operating_point=operating_point, threshold_scale=float(scale),
+                       alarm_policy=ALARM_POLICY,
                        predicted_decision=None, correct=None, first_alarm_time_sec=None,
                        failure_time_error_sec=None, timing_status='not_scored', max_score_ratio=None)
             timeline = grouped.get((metric, item['bag_path']))
             if item['status'] != 'ok' or timeline is None or timeline.empty:
                 rows.append(row)
                 continue
-            alarms = timeline.pooled_score > timeline.base_threshold * scale
-            first = float(timeline.loc[alarms, 'timestamp_sec'].min()) if alarms.any() else None
+            alarms = confirmed_alarms(timeline, scale)
+            first = float(timeline.iloc[np.flatnonzero(alarms)].timestamp_sec.min()) if alarms.any() else None
             predicted = 'failure' if first is not None else 'success'
             row.update(predicted_decision=predicted, first_alarm_time_sec=first,
                        max_score_ratio=bag_score(timeline), frames_scored=len(timeline),
@@ -57,6 +61,8 @@ def decisions(manifest, frames, scale, operating_point):
                 row['timing_status'] = 'false_alarm' if label == 'normal' and first is not None else 'not_failure'
             elif onset is None or not np.isfinite(onset):
                 row['timing_status'] = 'missing_failure_marker'
+            elif onset >= float(item['stage3_start_sec']):
+                row['timing_status'] = 'annotation_after_alarm_window'
             elif not timeline.timestamp_sec.min() <= onset <= timeline.timestamp_sec.max():
                 row['timing_status'] = 'annotation_outside_scored_window'
             elif first is None:
@@ -147,14 +153,19 @@ def scale_sweep(results, configured_scale, frames=None):
     points = []
     timelines = None
     if frames is not None:
-        timelines = {path: (group.pooled_score.to_numpy(float), group.base_threshold.to_numpy(float))
-                     for path, group in frames.groupby('bag_path')}
+        frames = eligible_frames(results.to_dict('records'), frames)
+        timelines = {}
+        for path, group in frames.groupby('bag_path'):
+            left, right = confirmation_pairs(group)
+            values, bounds = group.pooled_score.to_numpy(float), group.base_threshold.to_numpy(float)
+            timelines[path] = values[left], bounds[left], values[right], bounds[right]
     for scale in sorted(candidates):
         if timelines is None:
             predictions = scores > scale
         else:
             with np.errstate(over='ignore', under='ignore'):
-                predictions = np.array([bool((timelines[path][0] > timelines[path][1] * scale).any())
+                predictions = np.array([bool(((timelines[path][0] > timelines[path][1] * scale)
+                                             & (timelines[path][2] > timelines[path][3] * scale)).any())
                                         for path in valid.bag_path])
         tp = int((predictions & (targets == 1)).sum())
         fp = int((predictions & (targets == 0)).sum())
@@ -190,6 +201,7 @@ def write_reports(manifest, frames, output, scale, folders):
         frames = frames.reindex(columns=['metric', 'bag_path', 'camera_topic', 'timestamp_sec',
             'pooled_score', 'base_threshold', 'feature_sec', 'comparison_sec', 'metric_score_sec',
             'processing_sec', 'read_decode_sec'])
+    frames = eligible_frames(manifest, frames)
     configured = decisions(manifest, frames, scale, 'configured')
     results = [configured]
     roc_reports = {}
@@ -222,7 +234,7 @@ def write_reports(manifest, frames, output, scale, folders):
         axis.set(title=f'{metric.title()} - attention + 3x3 pooling', xlabel='False-positive rate',
                  ylabel='Recall / true-positive rate', xlim=(-.02, 1.02), ylim=(-.02, 1.02))
         axis.grid(alpha=.2)
-    figure.suptitle('Bag-level ROC: any sampled pooled-score crossing is failure')
+    figure.suptitle('Bag-level ROC: two consecutive crossings in one camera, before stage 3')
     figure.tight_layout()
     figure.savefig(output / 'roc.png', dpi=160)
     plt.close(figure)
@@ -234,14 +246,16 @@ def write_reports(manifest, frames, output, scale, folders):
     frames = frames.copy()
     if len(frames):
         frames['configured_threshold'] = frames.base_threshold * scale
-        frames['configured_alarm'] = frames.pooled_score > frames.configured_threshold
+        frames['configured_crossing'] = frames.pooled_score > frames.configured_threshold
+        frames['configured_alarm'] = confirmed_alarms(frames, scale)
         for metric, report in roc_reports.items():
             mask = frames.metric.eq(metric)
             if report['status'] == 'created':
                 best = report['best']['threshold_scale']
                 frames.loc[mask, 'best_threshold'] = frames.loc[mask, 'base_threshold'] * best
+                frames.loc[mask, 'best_alarm'] = confirmed_alarms(frames.loc[mask], best)
         if 'best_threshold' in frames:
-            frames['best_alarm'] = (frames.pooled_score > frames.best_threshold).astype('boolean').where(frames.best_threshold.notna())
+            frames['best_alarm'] = frames.best_alarm.astype('boolean').where(frames.best_threshold.notna())
     frames.to_csv(output / 'frame_results.csv', index=False)
     diagnostics = []
     truth = {row['bag_path']: row for row in manifest}
@@ -285,7 +299,7 @@ def write_reports(manifest, frames, output, scale, folders):
     _timing_plots(all_results, output, plt)
     from .benchmark_plots import write_metric_reports
     write_metric_reports(manifest, frames, all_results, metrics, roc_reports, output, scale, plt)
-    artifact = dict(report_format_version=REPORT_FORMAT_VERSION,
+    artifact = dict(report_format_version=REPORT_FORMAT_VERSION, alarm_policy=ALARM_POLICY,
                     writer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                     files=sorted(str(path.relative_to(output)).replace('\\', '/') for path in output.rglob('*') if path.is_file()))
     (output/'report_manifest.json').write_text(json.dumps(artifact, indent=2), encoding='utf-8')
@@ -294,57 +308,35 @@ def write_reports(manifest, frames, output, scale, folders):
 
 
 def _timing_plots(results, output, plt):
-    for metric in ('euclidean', 'mahalanobis'):
-        selected_results = results[results.metric.eq(metric)]
-        bags = sorted(selected_results.bag_path.unique())
-        if not bags:
-            figure, axis = plt.subplots(figsize=(10, 4))
-            axis.text(.5, .5, 'No bags available for timing evaluation.', ha='center', va='center', transform=axis.transAxes)
-            axis.set_axis_off()
-            figure.suptitle(f'{metric.title()} - attention + 3x3 pooling')
-            figure.savefig(output / f'{metric}_failure_timing_01.png', dpi=160)
-            plt.close(figure)
-            continue
-        # Always show every bag, including successful tasks and missing annotations.
-        for page, start in enumerate(range(0, len(bags), 25), 1):
-            names = bags[start:start+25]
-            figure, axes = plt.subplots(1, 2, figsize=(15, max(4, len(names)*.35)), sharey=True)
-            for index, bag in enumerate(names):
-                group = selected_results[selected_results.bag_path.eq(bag)]
-                onset = group.recorded_failure_time_sec.iloc[0]
-                if pd.notna(onset):
-                    axes[0].scatter(onset, index, marker='|', color='black', s=100)
-                for point, color, offset in [('configured', '#2878b5', -.18), ('exploratory_best', '#c87925', .18)]:
-                    selected = group[group.operating_point.eq(point)]
-                    if selected.empty:
-                        continue
-                    row = selected.iloc[0]
-                    if pd.notna(row.first_alarm_time_sec):
-                        axes[0].scatter(row.first_alarm_time_sec, index+offset, color=color, s=22)
-                    else:
-                        axes[0].annotate('no alarm' if row.status == 'ok' else row.status.replace('_', ' '),
-                                         (0, index+offset), fontsize=7, color=color)
-                    if pd.notna(row.failure_time_error_sec):
-                        axes[1].scatter(row.failure_time_error_sec, index+offset, color=color, s=22)
-                    else:
-                        reason = row.timing_status.replace('_', ' ')
-                        if row.status == 'ok' and pd.isna(onset):
-                            reason = 'no recorded failure onset'
-                        elif row.ground_truth_label == 'normal' and row.status == 'ok':
-                            reason = 'task success; onset comparison not applied'
-                        axes[1].annotate(reason, (0, index+offset),
-                                         fontsize=7, color=color)
-            axes[0].set_yticks(range(len(names)), [
-                '/'.join(filter(None, [Path(bag).parent.name, Path(bag).name])) +
-                f' [{selected_results.loc[selected_results.bag_path.eq(bag), "ground_truth_label"].iloc[0]}]'
-                for bag in names], fontsize=8)
-            axes[0].set_ylim(len(names)-.5, -.5)
-            axes[0].set(xlabel='Bag-relative observation time (s)', title='Black: actual marker; blue: configured; orange: exploratory best')
-            axes[1].axvline(0, color='black', linewidth=1)
-            axes[1].set(xlabel='First alarm - recorded failure time (s)', title='Negative = early alarm; positive = late alarm')
-            for axis in axes:
-                axis.grid(alpha=.2)
-            figure.suptitle(f'{metric.title()} - attention + 3x3 pooling')
-            figure.tight_layout()
-            figure.savefig(output / f'{metric}_failure_timing_{page:02d}.png', dpi=160)
-            plt.close(figure)
+    selected = results[results.operating_point.eq('configured') & ~results.status.eq('excluded_training')]
+    bags = sorted(selected.bag_path.unique())
+    figure, axis = plt.subplots(figsize=(12, max(4, len(bags)*.36)))
+    labels = []
+    for index, bag in enumerate(bags):
+        group = selected[selected.bag_path.eq(bag)]
+        labels.append(f'{group.iloc[0].folder}/{group.iloc[0].bag_name}')
+        for metric, color, offset in [('euclidean', '#2878b5', -.13), ('mahalanobis', '#c87925', .13)]:
+            row = group[group.metric.eq(metric)].iloc[0]
+            if pd.notna(row.failure_time_error_sec):
+                axis.scatter(row.failure_time_error_sec, index+offset, color=color, s=25)
+            else:
+                reason = row.timing_status.replace('_', ' ')
+                if row.status != 'ok':
+                    reason = 'not evaluated: '+row.status
+                elif pd.isna(row.recorded_failure_time_sec):
+                    reason = 'no recorded onset'
+                axis.annotate(reason, (0, index+offset), xytext=(5, 0), textcoords='offset points', fontsize=7, color=color)
+    for metric, color in [('Euclidean', '#2878b5'), ('Mahalanobis', '#c87925')]:
+        axis.scatter([], [], color=color, label=metric)
+    if not bags:
+        axis.text(.5, .5, 'No evaluated demos.', ha='center', transform=axis.transAxes)
+    axis.axvline(0, color='black', linewidth=1)
+    axis.set_yticks(range(len(bags)), labels, fontsize=8)
+    axis.set_ylim(len(bags)-.6, -.6)
+    axis.set(xlabel='Confirmed alarm time - recorded failure onset (s)',
+             title='All folders: signed detection delay (negative = early, positive = late)')
+    axis.legend(loc='best')
+    axis.grid(alpha=.2)
+    figure.tight_layout()
+    figure.savefig(output/'failure_time_difference.png', dpi=160)
+    plt.close(figure)

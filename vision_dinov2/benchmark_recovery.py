@@ -10,9 +10,10 @@ import pandas as pd
 
 from .benchmark_labels import apply_csv_labels, validate_ground_truth, update_labels_csv
 from .benchmark_report import write_reports, REPORT_FORMAT_VERSION
+from .benchmark_alarm import ensure_stage_windows, ALARM_POLICY
 
 
-def regenerate_reports(source, labels_csv=None, output_root=None):
+def regenerate_reports(source, labels_csv=None, output_root=None, stage_topic=None):
     started = perf_counter()
     source = Path(source).resolve(strict=True)
     state = json.loads((source/'run.json').read_text(encoding='utf-8'))
@@ -27,6 +28,8 @@ def regenerate_reports(source, labels_csv=None, output_root=None):
         labels_csv = update_labels_csv(manifest, labels_csv, state['data_root'])
         manifest = apply_csv_labels(manifest, labels_csv, state['data_root'])
     counts = validate_ground_truth(manifest)
+    stage_topic = stage_topic or state.get('stage_topic', '/recording_stage')
+    manifest = ensure_stage_windows(manifest, stage_topic)
     frames = pd.read_csv(source/'frame_results.csv')
     required = {'metric','bag_path','camera_topic','timestamp_sec','pooled_score','base_threshold',
                 'feature_sec','comparison_sec','metric_score_sec','processing_sec','read_decode_sec'}
@@ -58,7 +61,7 @@ def regenerate_reports(source, labels_csv=None, output_root=None):
     if (source/'runtime.csv').is_file():
         shutil.copy2(source/'runtime.csv', output/'runtime.csv')
     report = dict(state, mode='report_only', report_format_version=REPORT_FORMAT_VERSION,
-                  source_run=str(source), inference_rerun=False,
+                  source_run=str(source), inference_rerun=False, bag_rule=ALARM_POLICY, stage_topic=stage_topic,
                   ground_truth_counts=counts, labels_csv=str(Path(labels_csv).resolve()) if labels_csv else None,
                   roc=roc, report_generation_sec=perf_counter()-started)
     if labels_csv:

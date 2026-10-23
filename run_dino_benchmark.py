@@ -23,7 +23,8 @@ def main():
     labels_csv = arguments.labels_csv or selection.get('labels_csv')
     if arguments.report_only:
         from vision_dinov2.benchmark_recovery import regenerate_reports
-        regenerate_reports(arguments.report_only, labels_csv, arguments.output_dir)
+        regenerate_reports(arguments.report_only, labels_csv, arguments.output_dir,
+                           stage_topic=config.get('stage_topic'))
         return
     from vision_dinov2.benchmark import run
     run(config, folders, arguments.data_root, arguments.output_dir, labels_csv=labels_csv)

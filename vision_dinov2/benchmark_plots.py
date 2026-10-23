@@ -28,7 +28,12 @@ def _bag_plot(item, timeline, decisions, target, scale, metric, plt):
                   label=f'Threshold (scale {scale:g})', color='#c87925')
         alarms = rows.configured_alarm
         axis.scatter(rows.loc[alarms, 'timestamp_sec'], rows.loc[alarms, 'pooled_score'],
-                     color='#c43838', s=10, label='Above threshold', zorder=3)
+                     color='#c43838', s=10, label='Confirmed alarm (2 crossings)', zorder=3)
+        cutoff = float(item['stage3_start_sec']) if item.get('stage3_start_sec') is not None else None
+        if cutoff is not None:
+            axis.axvline(cutoff, color='gray', linestyle='--', label='Stage 3: alarms ignored from here')
+            if len(rows) and rows.timestamp_sec.max() > cutoff:
+                axis.axvspan(cutoff, rows.timestamp_sec.max(), color='gray', alpha=.12)
         if has_onset:
             axis.axvline(float(onset), color='black', linestyle=':', label='Recorded failure onset')
         if pd.notna(configured.first_alarm_time_sec):
@@ -74,7 +79,7 @@ def _scale_plot(frames, sweep_path, target, scale, plt):
         axis.legend()
     else:
         axis.text(.5, .5, 'No evaluated bags available.', ha='center', transform=axis.transAxes)
-    axis.set(xlabel='Threshold scale (log axis)', ylabel='Fraction of bags with any alarm', ylim=(-.02, 1.02),
+    axis.set(xlabel='Threshold scale (log axis)', ylabel='Fraction of bags with a confirmed alarm', ylim=(-.02, 1.02),
              title='Alarm rate versus threshold scale (not an ROC)')
     axis.grid(alpha=.2)
     figure.tight_layout()
@@ -82,11 +87,39 @@ def _scale_plot(frames, sweep_path, target, scale, plt):
     plt.close(figure)
 
 
+def _metrics_plot(metrics, output, plt):
+    selected = metrics[metrics.operating_point.eq('configured')]
+    folders = list(dict.fromkeys(selected.folder))
+    figure, axes = plt.subplots(2, 3, figsize=(max(12, len(folders)*1.7), 9))
+    for axis, (column, title) in zip(axes.ravel(), [('recall', 'Recall'), ('false_positive_rate', 'False-positive rate'),
+            ('precision', 'Precision'), ('accuracy', 'Accuracy'), ('f1', 'F1'), ('alarm_rate', 'Confirmed alarm rate')]):
+        for metric, color, offset in [('euclidean', '#2878b5', -.18), ('mahalanobis', '#c87925', .18)]:
+            rows = selected[selected.metric.eq(metric)].set_index('folder').reindex(folders)
+            values = rows[column].to_numpy(dtype=float)
+            positions = np.arange(len(folders))+offset
+            axis.bar(positions, values*100, width=.34, color=color, label=metric.title())
+            for position, value in zip(positions, values):
+                axis.annotate('N/A' if not np.isfinite(value) else f'{100*value:.0f}%',
+                              (position, 2 if not np.isfinite(value) else 100*value+2),
+                              ha='center', fontsize=8, rotation=90 if not np.isfinite(value) else 0, color=color)
+        axis.set(title=title, ylabel='Percent', ylim=(0, 115))
+        axis.set_xticks(range(len(folders)), folders, rotation=30, ha='right', fontsize=8)
+        axis.grid(axis='y', alpha=.2)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    figure.legend(handles, labels, loc='upper center', bbox_to_anchor=(.5, .965), ncol=2, fontsize=9)
+    figure.suptitle('Configured scale: both metrics, all folders | two consecutive crossings before stage 3')
+    figure.tight_layout(rect=(0, 0, 1, .94))
+    figure.savefig(output/'metrics.png', dpi=160)
+    plt.close(figure)
+
+
 def write_metric_reports(manifest, frames, results, metrics, roc, output, scale, plt):
+    _metrics_plot(metrics, output, plt)
     overview = ['# DINO benchmark results', '',
-                'Decision: any sampled pooled-score crossing in any selected camera is an alarm.',
+                'Decision: two consecutive crossings in the same camera, strictly before stage 3. Confirmation time is the second crossing.',
                 'Ground-truth task outcomes and visual anomalies can differ. Labels are preserved.', '',
-                'Open `euclidean/summary.md` or `mahalanobis/summary.md` for evaluation and plot links.', '']
+                'Open `euclidean/summary.md` or `mahalanobis/summary.md` for evaluation and plot links.', '',
+                '[All-folder metric graphs](metrics.png)', '[Signed detection-delay graph](failure_time_difference.png)', '']
     for metric in ('euclidean', 'mahalanobis'):
         target = output/metric
         target.mkdir(exist_ok=True)
@@ -100,8 +133,6 @@ def write_metric_reports(manifest, frames, results, metrics, roc, output, scale,
             table = pd.read_csv(output/name)
             if 'metric' in table:
                 table[table.metric.eq(metric)].to_csv(target/name, index=False)
-        for path in output.glob(f'{metric}_failure_timing_*.png'):
-            shutil.copy2(path, target/path.name.replace(f'{metric}_', '', 1))
         for suffix in ['scale_sweep.csv', 'roc.csv']:
             source = output/f'{metric}_{suffix}'
             if source.is_file():
@@ -168,7 +199,8 @@ def write_metric_reports(manifest, frames, results, metrics, roc, output, scale,
         lines += ['', '## Plots', '', '- [Alarm rate versus threshold scale](alarm_rate_vs_scale.png)',
                   '- [ROC / availability explanation](roc.png)',
                   '- [Per-bag plot index](bag_index.csv)', '']
-        lines += [f'- [Timing page {page.stem}]({page.name})' for page in sorted(target.glob('failure_timing_*.png'))]
+        lines += ['- [All-folder signed detection delay](../failure_time_difference.png)',
+                  '- [Both metrics: evaluation graphs](../metrics.png)']
         lines += ['', '## Per-bag score and threshold plots', '']
         lines += [f'- [{row["folder"]}/{row["bag_name"]}]({row["plot"]}) ({row["status"]})' for row in index]
         (target/'summary.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
