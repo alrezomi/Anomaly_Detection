@@ -248,6 +248,7 @@ def _write_score_roc_report(
     anomaly: bool = False,
 ) -> dict[str, Any]:
     """Sweep continuous classifier scores, independent of the VLM's decision."""
+    timeline = any(row.get('benchmark_decision_mode') == 'timeline' for row in master_rows)
     score_column = "classifier_anomaly_score" if anomaly else "classifier_failure_probability"
     score_name = "anomaly_score" if anomaly else "probability"
     dataframe = pd.DataFrame(master_rows).reindex(columns=[
@@ -302,7 +303,7 @@ def _write_score_roc_report(
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", mode).strip("_").lower()
         roc_path, auc_path = output_dir / f"roc_{slug}.png", output_dir / f"auroc_{slug}.png"
         if curves:
-            _plot_probability_curves(curves, mode, roc_path, auc_path, anomaly=anomaly)
+            _plot_probability_curves(curves, mode, roc_path, auc_path, anomaly=anomaly, timeline=timeline)
             plot_files.extend([str(roc_path), str(auc_path)])
         else:
             roc_path.unlink(missing_ok=True)
@@ -319,6 +320,7 @@ def _write_score_roc_report(
         "score_column": score_column, "positive_class": "fail",
         "threshold_rule": "Predict failure when score >= threshold; inf is the no-positive endpoint.",
         "score_units": "nominal kNN distance (not a probability)" if anomaly else "failure probability in [0, 1]",
+        "decision_mode": "timeline" if timeline else "whole_demo",
         "roc_interpretation": "ROC sweeps distinct classifier scores, grouping ties. AUROC measures failure-vs-normal ranking, not calibration or VLM decision accuracy.",
         "operating_point_policy": "Use the common saved classifier_threshold for scored bags in each comparison. Missing/invalid/mixed thresholds are reported, never replaced by 0.5 or optimized on test labels.",
         "exclusion_policy": "Missing/nonfinite/out-of-range scores and unknown ground truth are excluded and counted. VLM uncertain/unparsed decisions do not exclude valid classifier scores.",
@@ -326,6 +328,8 @@ def _write_score_roc_report(
         "rows_without_input_mode": int(dataframe["input_mode"].isna().sum()),
         "metrics": metrics, "plot_files": plot_files,
     }
+    if timeline:
+        report['score_units'] = 'maximum prefix score / its threshold' if anomaly else 'maximum prefix failure score in [0, 1]; not a calibrated bag probability'
     (output_dir / "roc_summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return report
 
@@ -338,11 +342,13 @@ def write_anomaly_roc_report(master_rows, benchmark_root, *, input_modes=None):
     return _write_score_roc_report(master_rows, benchmark_root, input_modes=input_modes, anomaly=True)
 
 
-def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path, *, anomaly: bool = False) -> None:
+def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path, *, anomaly: bool = False, timeline=False) -> None:
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
     score_title = "CoP nominal kNN" if anomaly else "CoP probability"
+    if timeline:
+        score_title = 'Peak prefix threshold ratio' if anomaly else 'Peak prefix failure score'
 
     colors = ["#171d26" if result["failure_category"] == "all_failures" else plt.get_cmap("tab10")(max(0, index - 1) % 10)
               for index, (result, *_) in enumerate(curves)]
@@ -355,7 +361,8 @@ def _plot_probability_curves(curves, mode: str, roc_path: Path, auc_path: Path, 
             overall = result["failure_category"] == "all_failures"
             threshold_detail = ""
             if result["threshold_status"] == "available":
-                threshold_label = f"distance {result['configured_threshold']:.4g}" if anomaly else f"{100 * result['configured_threshold']:g}%"
+                threshold_label = (f"{'ratio' if timeline else 'distance'} {result['configured_threshold']:.4g}"
+                                   if anomaly else f"{100 * result['configured_threshold']:g}%")
                 if overall:
                     threshold_detail = (f"\nAt {threshold_label}: recall {100 * result['recall_at_threshold']:.1f}%, "
                                         f"false alarms {100 * result['false_positive_rate_at_threshold']:.1f}%")

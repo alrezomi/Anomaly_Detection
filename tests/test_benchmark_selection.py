@@ -34,6 +34,7 @@ from run_benchmark import (
     _benchmark_folder,
     _align_benchmark_timing,
     parse_arguments,
+    _run_benchmark,
 )
 
 # Do not leak dependency stubs into the real inference tests during discovery.
@@ -45,6 +46,59 @@ for _name, _previous in _previous_modules.items():
 
 
 class BenchmarkSelectionTests(unittest.TestCase):
+    def test_timeline_benchmark_writes_alarm_metrics_and_preserves_final_score(self):
+        import json
+        import pandas as pd
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bag = root/'data'/'selected'/'normal_01'
+            bag.mkdir(parents=True)
+            (bag/'metadata.yaml').write_text('')
+            timeline = root/'prefix.csv'
+            pd.DataFrame(dict(timestamp_sec=[1.,2.,3.], anomaly_score=[.1,.7,.01],
+                              threshold=[.5]*3)).to_csv(timeline,index=False)
+            original = dict(input_mode='raw', decision='not_generated', confidence=None, response='',
+                            classifier_decision='success', classifier_failure_probability=.01,
+                            classifier_threshold=.5, inference_mode='feature_only',
+                            logistic_timeline_status='created', logistic_timeline_csv=str(timeline))
+            config = dict(rynnbrain=dict(source='rosbag', input_modes=['raw'], num_frames=3,
+                                         model={}, cop_vectors={'enabled':False},
+                                         cop_classifier=dict(enabled=True, train_on_benchmark=False,
+                                                             method='logistic', plot_timeline=False)),
+                          vlm_benchmark=dict(folders=['selected'],decision_mode='timeline'))
+            with patch.object(sys,'argv',['benchmark','--data-root',str(root/'data'),
+                                          '--benchmark-dir',str(root/'reports')]):
+                args = parse_arguments()
+            with patch('run_benchmark._load_reused_classifiers', return_value=({},None)), \
+                 patch('run_benchmark._excluded_bag_names', return_value=set()), \
+                 patch('run_benchmark.infer_bag_record', return_value=dict(bag_path=str(bag),bag_name=bag.name,label='normal')), \
+                 patch('run_benchmark.RynnBrainModel', return_value=object()), \
+                 patch('run_benchmark.evaluate_multiturn', return_value=([original],[],[],'task')) as evaluate, \
+                 patch('run_benchmark._align_benchmark_timing'), \
+                 patch('run_benchmark.write_multiturn_outputs'):
+                _run_benchmark(args, config, lambda **kwargs: None)
+            self.assertTrue(evaluate.call_args.args[2]['cop_classifier']['plot_timeline'])
+            output = root/'reports'/'timeline'
+            summary = pd.read_csv(output/'benchmark_summary.csv').iloc[0]
+            self.assertEqual(summary.classifier_decision,'failure')
+            self.assertEqual(summary.whole_demo_classifier_decision,'success')
+            self.assertEqual(summary.classifier_failure_probability,.7)
+            self.assertEqual(summary.timeline_first_alarm_time_sec,2.)
+            metrics = pd.read_csv(output/'benchmark_metrics.csv').iloc[0]
+            self.assertEqual(metrics.decision_source,'classifier_timeline')
+            self.assertEqual(metrics.false_positive_rate,1.)
+            self.assertEqual(metrics.accuracy,0.)
+            stats = json.loads((output/'benchmark_statistics.json').read_text())
+            self.assertEqual(stats['classifier']['accuracy'],0.)
+            self.assertEqual(stats['accuracy'],0.)
+            self.assertEqual(stats['decision_source'],'classifier_timeline')
+            clean = pd.read_csv(output/'benchmark_clean.csv').iloc[0]
+            self.assertEqual(clean.classifier_decision,'failure')
+            self.assertEqual(clean.whole_demo_classifier_decision,'success')
+            self.assertTrue((output/'benchmark_protocol.json').is_file())
+            self.assertFalse((root/'reports'/'benchmark_summary.csv').exists())
+            self.assertEqual(original['classifier_decision'],'success')
+
     def test_benchmark_timing_ignores_pre_stage_one_error_without_rescoring(self):
         import pandas as pd
         events = pd.DataFrame(dict(time=[.5,1.,2.5,3.,4.], stage=['Error','1','Fail','2','3']))

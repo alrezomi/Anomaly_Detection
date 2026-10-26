@@ -147,7 +147,7 @@ def _probability_point_offsets(values: list[float], separation: float = 2.3) -> 
     return offsets
 
 
-def _write_probability_plot(groups, points, styles, mode, plot_path, *, anomaly: bool = False):
+def _write_probability_plot(groups, points, styles, mode, plot_path, *, anomaly: bool = False, timeline=False):
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
@@ -165,6 +165,8 @@ def _write_probability_plot(groups, points, styles, mode, plot_path, *, anomaly:
         figure.subplots_adjust(left=0.09, right=0.65, bottom=0.19, top=0.84)
         figure.text(0.09, 0.94, "Nominal kNN distance by outcome" if anomaly else "Failure probability by outcome", fontsize=20, weight="bold", color="#172b40")
         figure.text(0.09, 0.89, f"CoP classifier  /  {mode} input  /  one marker per execution", fontsize=10, color="#607080")
+        if timeline:
+            figure.texts[0].set_text('Peak prefix threshold ratio by outcome' if anomaly else 'Peak prefix failure score by outcome')
         tick_labels = []
         for position, (label, color, title) in enumerate((("normal", "#2f78c4", "Successful"), ("fail", "#b75b61", "Failed")), start=1):
             values = groups[label]
@@ -191,6 +193,8 @@ def _write_probability_plot(groups, points, styles, mode, plot_path, *, anomaly:
         axis.set(xlim=(0.48, 2.57), ylim=(-0.04 * upper, 1.04 * upper),
                  ylabel="Anomaly distance (larger = farther from nominal)" if anomaly else "Predicted failure probability (%)")
         axis.yaxis.label.set_size(11)
+        if timeline:
+            axis.set_ylabel('Maximum prefix score / its threshold' if anomaly else 'Maximum prefix failure score (%)')
         axis.yaxis.label.set_color("#34495e")
         if not anomaly:
             axis.set_yticks(range(0, 101, 20))
@@ -221,6 +225,7 @@ def _write_score_report(
     anomaly: bool = False,
 ) -> dict[str, Any]:
     """Summarize held-out classifier scores by ground truth, per mode."""
+    timeline = any(row.get('benchmark_decision_mode') == 'timeline' for row in rows)
     output_directory.mkdir(parents=True, exist_ok=True)
     modes = sorted(set(input_modes or []) | {str(row["input_mode"]) for row in rows if row.get("input_mode")})
     summary_rows = []
@@ -271,7 +276,7 @@ def _write_score_report(
         plot_path = output_directory / f"{file_prefix}_{_slug(mode)}.png"
         valid_count = sum(len(values) for values in groups.values())
         if valid_count:
-            _write_probability_plot(groups, points, styles, mode, plot_path, anomaly=anomaly)
+            _write_probability_plot(groups, points, styles, mode, plot_path, anomaly=anomaly, timeline=timeline)
         else:
             # Do not leave a previous run's plot masquerading as this result.
             plot_path.unlink(missing_ok=True)
@@ -281,7 +286,8 @@ def _write_score_report(
                              "scored_rows": valid_count, "excluded_rows": excluded, "groups": summaries})
     csv_path = output_directory / f"{file_prefix}_summary.csv"
     pd.DataFrame(summary_rows, columns=columns).to_csv(csv_path, index=False)
-    return {"grouping": "ground_truth_label", "units": "distance" if anomaly else "percent",
+    return {"grouping": "ground_truth_label", "units": ("threshold_ratio" if timeline else "distance") if anomaly else "percent",
+            "decision_mode": "timeline" if timeline else "whole_demo",
             "note": "Classifier estimates; groups are actual outcomes, not predicted decisions. Input modes are kept separate.",
             "unassigned_mode_rows": sum(not bool(row.get("input_mode")) for row in rows),
             "summary_csv": str(csv_path), "modes": mode_reports}

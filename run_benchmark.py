@@ -38,6 +38,7 @@ from rynnbrain_vlm.run import evaluate_multiturn, write_multiturn_outputs
 from rynnbrain_vlm.failure_timing import TIMING_FIELDS, read_failure_annotation, evaluate_failure_timing, write_failure_timing_report
 from rynnbrain_vlm.temporal_lora import VLM_TIME_FIELDS
 from rynnbrain_vlm.runtime import RUNTIME_FIELDS, clock, record_run
+from rynnbrain_vlm.benchmark_protocol import configure_decision_mode, timeline_benchmark_row
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -321,6 +322,13 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
         if "classifier_decision" not in columns:
             columns += ["classifier_decision"]
         columns += ["classifier_correct"]
+    timeline = any(row.get('benchmark_decision_mode') == 'timeline' for row in master_rows)
+    if timeline:
+        columns += ['benchmark_decision_mode', 'timeline_first_alarm_time_sec',
+                    'whole_demo_classifier_decision', 'whole_demo_classifier_failure_probability',
+                    'timeline_error']
+        if 'classifier_decision' not in columns:
+            columns += ['classifier_decision', 'classifier_correct']
     return pd.DataFrame(
         [
             {
@@ -338,6 +346,13 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
                     **{key: row.get(key) for key in (*RUNTIME_FIELDS, "runtime_total_bag_sec")},
                     "classifier_decision": row.get("classifier_decision"),
                     "classifier_correct": row.get("classifier_decision_correct")} if runtime else {}),
+                **({'benchmark_decision_mode': row.get('benchmark_decision_mode'),
+                    'timeline_first_alarm_time_sec': row.get('timeline_first_alarm_time_sec'),
+                    'whole_demo_classifier_decision': row.get('whole_demo_classifier_decision'),
+                    'whole_demo_classifier_failure_probability': row.get('whole_demo_classifier_failure_probability'),
+                    'timeline_error': row.get('timeline_error'),
+                    'classifier_decision': row.get('classifier_decision'),
+                    'classifier_correct': row.get('classifier_decision_correct')} if timeline else {}),
             }
             for row in master_rows
         ],
@@ -474,6 +489,27 @@ def _run_benchmark(arguments, config, update) -> None:
     selection = config.get('vlm_benchmark') or {}
     if not isinstance(selection, dict):
         raise ValueError('vlm_benchmark must be an object containing a folders list.')
+    if arguments.prepare_classifier:
+        vlm['cop_classifier'] = {**vlm.get('cop_classifier', {}), 'enabled': True}
+    decision_mode = configure_decision_mode(selection, vlm, skip_vlm=arguments.skip_vlm)
+    config['rynnbrain'] = vlm
+    if decision_mode == 'timeline':
+        # Keep the original whole-demo benchmark files available for comparison.
+        benchmark_root = benchmark_root / 'timeline'
+        benchmark_root.mkdir(parents=True, exist_ok=True)
+    update(decision_mode=decision_mode, benchmark_output_dir=str(benchmark_root))
+    print(f'VLM benchmark decision mode: {decision_mode}')
+    if decision_mode == 'timeline':
+        print('Offline prefix evaluation: any score >= its threshold is failure; no real-time waiting. '
+              'Whole-demo classifier results are retained in whole_demo_classifier_* columns.')
+        (benchmark_root/'benchmark_protocol.json').write_text(json.dumps({
+            'decision_mode': decision_mode,
+            'alarm_rule': 'Any sampled prefix score >= its own classifier threshold, including the final prefix.',
+            'sampling': 'Existing offline timeline sampling; only current and preceding execution images at each step. Not elapsed-time replay sampling.',
+            'stage_cutoff': None, 'consecutive_alarms': 1,
+            'score': 'Maximum prefix probability (logistic) or maximum prefix score/threshold ratio (kNN). Not a calibrated bag-level probability.',
+            'original_result': 'whole_demo_classifier_* columns; per-bag rynnbrain_results_multiturn.csv remains the whole-demo result.',
+        }, indent=2)+'\n', encoding='utf-8')
     folders = getattr(arguments, 'folder', None)
     folders = folders if folders is not None else selection.get('folders', [])
     all_bags, folder_names = _discover_benchmark_bags(data_root, folders, not arguments.no_recursive)
@@ -632,6 +668,7 @@ def _run_benchmark(arguments, config, update) -> None:
                 "folder": record['folder'],
                 "ground_truth_label": ground_truth,
                 "input_mode": None,
+                'benchmark_decision_mode': decision_mode,
                 "decision": "not_run" if arguments.skip_vlm else "failed",
                 "confidence": None,
                 "decision_correct": None,
@@ -658,7 +695,7 @@ def _run_benchmark(arguments, config, update) -> None:
             continue
 
         for row in rows:
-            master_rows.append({
+            result = {
                 "bag_name": bag_name,
                 "bag_path": str(bag_path),
                 "folder": record['folder'],
@@ -703,7 +740,16 @@ def _run_benchmark(arguments, config, update) -> None:
                 **{key: row.get(key) for key in ("knn_neighbors_status", "knn_neighbors_csv", "knn_neighbors_plot", "knn_neighbors_error",
                                                 "knn_last_below_before_alert_sec", "knn_first_above_threshold_sec")},
                 **dino_summary,
-            })
+                'benchmark_decision_mode': decision_mode,
+            }
+            if decision_mode == 'timeline':
+                result = timeline_benchmark_row(result, classifier_method(vlm['cop_classifier']))
+                print(f"  Timeline ({result['input_mode']}): {result.get('classifier_decision') or 'unavailable'}; "
+                      f"first alarm={result.get('timeline_first_alarm_time_sec')} s; "
+                      f"whole-demo={result.get('whole_demo_classifier_decision')}")
+                if result.get('timeline_error'):
+                    print(f"  Timeline warning: {result['timeline_error']}")
+            master_rows.append(result)
         _write_tables(master_rows, benchmark_root)
         update(completed_bags=index)
 
@@ -714,6 +760,7 @@ def _run_benchmark(arguments, config, update) -> None:
     summary_path = benchmark_root / "benchmark_summary.csv"
     clean_report_path = benchmark_root / "benchmark_clean.csv"
     statistics = _report_statistics(master_rows)
+    statistics['decision_mode'] = decision_mode
     from rynnbrain_vlm.benchmark_metrics import write_metrics_report
     statistics['folder_metrics'] = write_metrics_report(master_rows, benchmark_root,
         folder_names or list(dict.fromkeys(record['folder'] for record in candidates)),
@@ -725,13 +772,17 @@ def _run_benchmark(arguments, config, update) -> None:
     statistics["failure_probability"] = write_failure_probability_report(
         master_rows, benchmark_root, input_modes=vlm.get("input_modes", ["raw"])
     )
-    if any(row.get("classifier_decision") is not None for row in master_rows):
+    if decision_mode == 'timeline' or any(row.get("classifier_decision") is not None for row in master_rows):
         statistics["classifier"] = _report_statistics([
             {**{key: row.get(key) for key in ("bag_name", "ground_truth_label", "input_mode")},
              "decision": row.get("classifier_decision"),
              "decision_correct": row.get("classifier_decision_correct")}
             for row in master_rows
         ])
+    if decision_mode == 'timeline':
+        statistics['generated_response'] = _report_statistics(master_rows)
+        statistics.update(statistics['classifier'])
+        statistics['decision_source'] = 'classifier_timeline'
     roc_report = write_roc_report(master_rows, benchmark_root)
     statistics["roc"] = roc_report
     statistics["probability_roc"] = write_probability_roc_report(
@@ -767,6 +818,8 @@ def _run_benchmark(arguments, config, update) -> None:
     print(f"Summary table: {summary_path}")
     print(f"Clean report: {clean_report_path}")
     print(f"Statistics: {statistics_path}")
+    if decision_mode == 'timeline':
+        print('Classifier metrics use any sampled timeline alarm; whole-demo results remain in whole_demo_classifier_* columns.')
     print(f"Recorded vs. predicted failure timing: {benchmark_root / 'benchmark_failure_timing'}")
     if "anomaly_score" in statistics:
         print(f"Nominal kNN distance boxplots: {benchmark_root}")
@@ -815,6 +868,8 @@ def main() -> None:
     config = load_pipeline_config(arguments.config)
     base = config.get("rynnbrain", {}).get("output_dir", str(Path(config.get("output_dir", "outputs")) / "rynnbrain"))
     directory = arguments.benchmark_dir or Path(f"{base}_benchmark")
+    if (config.get('vlm_benchmark') or {}).get('decision_mode') == 'timeline':
+        directory = directory / 'timeline'
     with record_run(directory, "benchmark") as update:
         update(arguments=vars(arguments) | {key: str(value) for key, value in vars(arguments).items() if isinstance(value, Path)})
         _run_benchmark(arguments, config, update)
