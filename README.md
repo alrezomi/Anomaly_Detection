@@ -2524,7 +2524,8 @@ to your ignored `pipeline_config.json` (independent of `dino_benchmark`):
 
 ```json
 "vlm_benchmark": {
-  "folders": ["Nominal/setting 1", "Failure_1_grasp_miss"]
+  "folders": ["Nominal/setting 1", "Failure_1_grasp_miss"],
+  "decision_mode": "whole_demo"
 }
 ```
 
@@ -2536,6 +2537,51 @@ exclusions still apply. Paths cannot escape the data root or overlap; CLI
 overrides, `--limit` and `--no-recursive` further restrict the selected folders.
 Folder validation occurs before classifier/model preparation. Classifier training
 and nominal reference settings remain independent of evaluation-folder selection.
+
+Set `vlm_benchmark.decision_mode` to `"timeline"` to benchmark **alarms during
+execution**, instead of the final whole-demo classifier outcome. Omission or
+`"whole_demo"` preserves the original behavior. Run the same command:
+
+```bash
+docker compose run --rm --build benchmark
+```
+
+Timeline results go into `<rynnbrain.output_dir>_benchmark/timeline/` (or
+`<--benchmark-dir>/timeline/`), keeping whole-demo benchmark files available.
+Each observation is scored using only the selected current and preceding execution
+images, without waiting for recording time to pass. This uses existing offline
+prefix sampling (normally 1, 2, ... 8 observations), not the online replay's
+elapsed-time sampling. It does not add model calls beyond the existing timeline
+diagnostics, but prefix inference is more expensive than a final score alone.
+
+A bag is predicted failure if **any prefix score is >= its own threshold**,
+including the final prefix; otherwise a complete timeline predicts success.
+This mode requires an enabled `rynnbrain.cop_classifier` and automatically enables
+its timeline scoring, even if `plot_timeline` is false. It keeps the configured
+classifier method and onset settings: logistic uses the separate onset classifier
+when `logistic_onset.enabled` is true, otherwise the whole-demo classifier on
+prefixes. The latter remains an offline diagnostic, not a validated onset model.
+kNN uses its existing matched nominal-prefix detector and thresholds.
+No two-alarm confirmation or stage-3 cutoff is applied to this VLM protocol.
+
+`benchmark_summary.csv`, folder metrics/graphs and classifier ROC/score reports
+use timeline decisions. `timeline_first_alarm_time_sec` records the first crossing;
+existing timing reports compare it with a recorded failure marker when available.
+`whole_demo_classifier_*` columns retain the original final score and decision.
+Per-bag `rynnbrain_results_multiturn.csv` still contains the original whole-demo
+result; the accompanying timeline CSV/PNG contains each prefix evaluation.
+Generated-language decisions, if enabled, remain separately labelled and unchanged.
+`benchmark_clean.csv` includes both classifier decisions for comparison.
+
+For logistic ROC, each bag's score is its **maximum prefix failure score**;
+this is not a calibrated probability of any failure in a bag. For kNN ROC, the
+score is the maximum `prefix_score / prefix_threshold`, with alarm threshold 1,
+because the threshold varies with prefix length. Incomplete no-alert timelines
+are unavailable, not successes. A crossing on a partial timeline still proves an
+alarm, but incomplete timelines are excluded from peak-score ROC and timing means.
+`benchmark_protocol.json` records the rules. Switching decision modes alone does
+not require retraining the VLM, LoRA or classifier; the existing
+`cop_classifier.train_on_benchmark` setting still controls classifier preparation.
 
 `benchmark_metrics.csv` and `benchmark_metrics.png` compare **overall and every
 evaluation folder**, separating generated VLM decisions, optional classifier

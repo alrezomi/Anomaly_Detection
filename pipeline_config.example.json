@@ -20,7 +20,8 @@
     "labels_csv": "/outputs/dataset_labels.csv"
   },
   "vlm_benchmark": {
-    "folders": []
+    "folders": [],
+    "decision_mode": "whole_demo"
   },
   "rebuild_nominal_cache": false,
   "stage_topic": "/recording_stage",
