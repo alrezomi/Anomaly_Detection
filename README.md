@@ -744,9 +744,11 @@ establish whether it correctly detected a visual change. For visual-anomaly reca
 and ROC, supply a separate labels CSV identifying visually changed cases as fail
 and visually normal cases as normal. Preserve the original task-outcome CSV.
 Never change task labels merely to obtain an ROC.
-Actual onset is the first explicit
-Error/Fail/Failure/Anomaly-family marker after `STAGE_STARTUP_IGNORE_SEC` (default
-0.1 seconds), read using the existing failure-timing helper. Optionally, the
+For DINO, actual onset is the first explicit Error/Fail/Failure/Anomaly-family
+marker at or after the corrected stage-1 start. Earlier unrelated markers are
+ignored, even if later than the startup-ignore interval. All stage messages,
+the corrected stage boundaries and the number of ignored early failure markers
+are retained for audit. Optionally, the
 labels CSV can supply an explicit bag-relative `failure_time_sec` (or
 `recorded_failure_time_sec`) for failure bags. Missing markers/timestamps remain
 missing; a failure label or folder name does not supply an onset time. Both clocks are
@@ -761,14 +763,20 @@ valid onset never get a fabricated zero timing error.
 
 Reports are written into a new timestamped directory under
 `<output_dir>/dino_benchmark/` (Docker `/outputs` maps to `ANOMALY_OUTPUT_DIR`).
-Open **`SUMMARY.md` first**. Report format v3 creates separate `euclidean/` and
+Open **`SUMMARY.md` first**. Report format v4 creates separate `euclidean/` and
 `mahalanobis/` folders. Each contains `summary.md`, evaluation CSVs,
 `roc.png`, `alarm_rate_vs_scale.png`, and `bag_index.csv`.
-At the root, **`failure_time_difference.png`** shows all demos/folders and both
-metrics together on one signed-delay axis, using the configured scale. Missing
-onsets/misses are annotated, never drawn as zero delay. **`metrics.png`** compares
-recall, FPR, precision, accuracy, F1 and confirmed-alarm rate for both metrics and
-all folders in one figure; undefined rates are labelled N/A.
+At the root, **`failure_time_difference.png`** shows annotated demos from all
+folders and both metrics together on one signed-delay axis, using the configured
+scale. A valid recorded onset is compared regardless of the task-success label;
+any label/marker conflict remains flagged without relabelling. If no onset is
+available, **`first_alarm_time.png`** replaces the difference graph and shows
+actual first-alarm times, never invented delays. **`metrics.png`** shows only
+accuracy and FPR for normal-only runs; irrelevant recall/precision/F1 panels and
+unavailable ROC images are omitted. Mixed-class runs retain the full metric graph.
+`timing_diagnostics.csv` records raw stage values/times, selected onset, ignored
+pre-stage-1 marker count, first alarm, comparison status and reader/refresh errors.
+The console prints onset availability before expensive inference starts.
 Every evaluated/error bag has `bags/<name>_<path-hash>/score_threshold.png`, its
 frame CSV and its decision CSV. Separate camera panels show the actual pooled
 score and configured threshold in bag-relative seconds, crossings, first alarm,
@@ -798,8 +806,9 @@ old margin-only caches are reused via saved scores, without fitting patch profil
 | `metrics.csv` | Overall and each selected folder: TP/FP/TN/FN, recall, FPR, precision, accuracy, F1, balanced accuracy, Wilson 95% intervals and failure-timing statistics |
 | `roc.png`, `<metric>_roc.csv` | Bag-level ROC/AUC, with configured and exploratory-best scale marked |
 | `<metric>_scale_sweep.csv`, `roc_summary.json` | Threshold-scale sweep and suggested scale for each metric |
-| `failure_time_difference.png` | All folders/both metrics in one plot: confirmed alarm minus actual onset, negative=early; missing timestamps/misses explicit |
-| `metrics.png` | All-folder comparison of both metrics: recall/FPR/precision/accuracy/F1/alarm rate; undefined rates marked N/A |
+| `failure_time_difference.png` or `first_alarm_time.png` | Signed delay when actual onsets exist; otherwise first-alarm times only |
+| `timing_diagnostics.csv` | Recorded stage messages and timing audit, including ignored pre-stage-1 errors and comparison status |
+| `metrics.png` | Accuracy/FPR for normal-only data; full metric comparison for mixed-class data |
 | `runtime.csv`, `runtime_summary.csv` | Model load, feature preparation/reuse, calibration, actual bag-inference wall times, and frame mean/median/p95 by metric/folder |
 | `run.json` | Effective model/memory signatures, selection/label policies, run status, ROC selection and total wall time |
 | `alarm_diagnostics.csv` | Alarm-frame counts/fractions, first-frame crossings and first-alarm camera, for distinguishing isolated crossings from systematic startup alarms |
@@ -846,9 +855,11 @@ docker compose run --rm --build dino-benchmark \
 
 This reads the saved selection, pooled frame scores and unscaled thresholds.
 It checks known labels, saved frame counts and complete camera coverage. It does
-not extract features, calibrate memory or load DINO. When stage-3 timestamps
-are missing in an older run, it reads only the stage metadata from those bags;
-the bags must still be available. Later runs reuse saved stage-3 timestamps.
+not extract features, calibrate memory or load DINO. It refreshes only recorded
+stage metadata so old startup-based onset annotations are corrected to stage 1;
+the original bags must be available for this refresh. If a bag is unavailable,
+valid saved annotation data is retained and the refresh error is explicit.
+Explicit CSV onset annotations are preserved.
 It preserves the original configured scale, selection and original outputs, writing a new
 `reports_<timestamp>/` subdirectory with corrected metrics, ROC, timings and alarm
 diagnostics. CSV labels change evaluation truth, never detector scores. If the

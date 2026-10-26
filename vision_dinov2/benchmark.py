@@ -46,18 +46,20 @@ def select_bags(data_root, folders, excluded):
 
 def annotate_bags(rows, stage_topic, startup_ignore):
     from build_dataset_manifest import infer_bag_record
-    from rynnbrain_vlm.failure_timing import read_failure_annotation
+    from .benchmark_alarm import read_execution_annotation
     result = []
     for row in rows:
         if row['status'] != 'ok':
             result.append(dict(row, ground_truth_label='unknown', recorded_failure_time_sec=None))
             continue
         label = infer_bag_record(Path(row['bag_path']), stage_topic, startup_ignore)
-        onset = read_failure_annotation(row['bag_path'], stage_topic, startup_ignore)
+        onset = read_execution_annotation(row['bag_path'], stage_topic)
         result.append(dict(row, ground_truth_label=label['label'], label_read_status=label['read_status'],
             used_stage_markers=label['used_stage_markers'], recorded_failure_time_sec=onset['time_sec'],
             annotation_status=onset['status'], annotation_error=onset.get('error'),
-            failure_marker=onset.get('marker'), label_onset_conflict=label['label']=='normal' and onset['time_sec'] is not None))
+            failure_marker=onset.get('marker'), label_onset_conflict=label['label']=='normal' and onset['time_sec'] is not None,
+            **{key: onset.get(key) for key in ['stage1_start_sec', 'stage3_start_sec', 'recorded_stage_messages',
+                'stage_message_count', 'ignored_pre_stage1_failure_count']}))
     return result
 
 
@@ -327,7 +329,7 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
         camera_topics=topics, configured_scale=scale, score_variant='pooled', bag_rule=ALARM_POLICY,
         stage_topic=config.get('stage_topic', '/recording_stage'),
         label_policy='existing final-three eligible stage messages',
-        onset_policy='first failure marker after startup-ignore, bag-relative time',
+        onset_policy='first failure marker at/after corrected stage 1; pre-stage-1 markers ignored; bag-relative time',
         camera_fusion='OR', retrospective_stages=bool(config.get('stage_constrained_matching')),
         roc_selection='exploratory Youden J on selected benchmark; do not treat tuned results as held-out validation',
         timing_note='Offline throughput, not live playback latency. Feature/matching times are shared by metrics. Phase durations can overlap (model load inside preparation/inference); actual_wall_sec is the total.')
@@ -356,6 +358,10 @@ def run(config, folders, data_root='/data', output_root=None, labels_csv=None):
         report['ground_truth_counts'] = counts
         manifest = ensure_stage_windows(manifest, report['stage_topic'])
         pd.DataFrame(manifest).to_csv(output/'selection.csv', index=False)
+        eligible = [item for item in manifest if item['status']=='ok']
+        onset_count = sum(item.get('recorded_failure_time_sec') is not None for item in eligible)
+        print(f'Timing preflight: {onset_count}/{len(eligible)} evaluated bags have a recorded failure onset at/after stage 1. '
+              'Without an onset, only first-alarm time is available, not detection delay.', flush=True)
         print(f'Ground-truth preflight: {counts["normal"]} normal, {counts["fail"]} failure, {counts["excluded"]} excluded.', flush=True)
         report['signatures'] = {}
         for topic in topics:

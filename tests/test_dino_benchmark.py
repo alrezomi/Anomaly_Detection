@@ -54,7 +54,7 @@ class BenchmarkSelectionTests(unittest.TestCase):
         with patch('build_dataset_manifest.infer_bag_record', side_effect=[
                 dict(label='normal', read_status='ok', used_stage_markers='1,2,3'),
                 dict(label='fail', read_status='ok', used_stage_markers='2,Error,3')]), \
-             patch('rynnbrain_vlm.failure_timing.read_failure_annotation', side_effect=[
+             patch('vision_dinov2.benchmark_alarm.read_execution_annotation', side_effect=[
                 dict(status='missing_marker', time_sec=None), dict(status='available', time_sec=1.5, marker='Error')]):
             annotated = annotate_bags(rows, '/stage', .1)
         self.assertEqual(annotated[0]['ground_truth_label'], 'normal')
@@ -151,7 +151,7 @@ class BenchmarkStatisticsTests(unittest.TestCase):
                     np.testing.assert_allclose(saved.configured_threshold, original.base_threshold)
                     np.testing.assert_allclose(saved.pooled_score, original.pooled_score)
             self.assertTrue((root/'SUMMARY.md').is_file())
-            self.assertEqual(json.loads((root/'report_manifest.json').read_text())['report_format_version'], 3)
+            self.assertEqual(json.loads((root/'report_manifest.json').read_text())['report_format_version'], 4)
 
 
 class BenchmarkEngineTests(unittest.TestCase):
@@ -271,6 +271,7 @@ class BenchmarkEngineTests(unittest.TestCase):
             self.assertEqual(set(results.bag_name), {'normal','fail'})
             self.assertTrue(results[results.bag_name.eq('fail')].predicted_decision.isna().all())
             self.assertEqual(json.loads((output/'run.json').read_text())['status'], 'completed_with_errors')
-            self.assertTrue((output/'roc.png').is_file())
+            self.assertFalse((output/'roc.png').is_file())  # Only normal cases were evaluated successfully.
+            self.assertTrue((output/'first_alarm_time.png').is_file())
             self.assertTrue((output/'runtime_summary.csv').is_file())
             self.assertFalse('dino_metric' in config)  # user's config wasn't mutated
