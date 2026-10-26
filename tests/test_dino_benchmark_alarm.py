@@ -6,10 +6,27 @@ import pandas as pd
 
 from tests.test_dino_benchmark import manifest, timeline
 from vision_dinov2.benchmark_report import decisions, scale_sweep
-from vision_dinov2.benchmark_alarm import ensure_stage_windows
+from vision_dinov2.benchmark_alarm import ensure_stage_windows, read_execution_annotation
 
 
 class AlarmPolicyTests(unittest.TestCase):
+    def test_execution_annotation_ignores_noise_before_corrected_stage_one(self):
+        events=pd.DataFrame(dict(time=[.2,.4,1.,2.,2.5,3.], stage=['Error','2','1','2','FAIL','3']))
+        with patch('rosbag_io.read_stage_events', return_value=events):
+            annotation=read_execution_annotation('bag','/recording_stage')
+        self.assertEqual(annotation['time_sec'],2.5)
+        self.assertEqual(annotation['stage1_start_sec'],1.)
+        self.assertEqual(annotation['ignored_pre_stage1_failure_count'],1)
+        self.assertIn('Error',annotation['recorded_stage_messages'])
+
+    def test_actual_marker_is_comparable_even_with_normal_task_label_or_before_first_image(self):
+        item=dict(manifest('bag','normal',.5),stage1_start_sec=.1)
+        frames=pd.DataFrame(timeline('bag','euclidean',[2.,2.]))
+        row=decisions([item],frames,1.,'configured').iloc[0]
+        self.assertEqual(row.failure_time_error_sec,1.5)
+        self.assertEqual(row.ground_truth_label,'normal')
+        self.assertEqual(row.timing_status,'compared')
+
     def decision(self, values, cutoff=100., other=None):
         item = dict(manifest('bag', 'fail', 1.), stage3_start_sec=cutoff)
         rows = timeline('bag', 'euclidean', values)

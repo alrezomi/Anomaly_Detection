@@ -1,7 +1,29 @@
 """One benchmark alarm policy shared by decisions, plots and scale sweeps."""
 import numpy as np
+import json
 
 ALARM_POLICY = 'two_consecutive_same_camera_before_stage3_v1'
+
+
+def read_execution_annotation(bag, stage_topic='/recording_stage'):
+    """Use first failure at/after corrected stage 1; retain raw messages for audit."""
+    from rosbag_io import read_stage_events
+    from rynnbrain_vlm.visual_matching import final_recorded_stages
+    from build_dataset_manifest import FAIL_PATTERN
+    result = dict(status='unavailable', time_sec=None, marker=None, marker_count=0,
+                  error=None, recorded_stage_messages='', stage1_start_sec=None, stage3_start_sec=None)
+    try:
+        events = read_stage_events(bag, stage_topic)
+        result.update(recorded_stage_messages=json.dumps([
+            dict(time_sec=float(row.time), value=str(row.stage)) for row in events.itertuples(index=False)]),
+            stage_message_count=len(events))
+        timeline = final_recorded_stages(events)
+        result.update(stage1_start_sec=timeline.starts[0], stage3_start_sec=timeline.starts[2],
+                      ignored_pre_stage1_failure_count=sum(float(row.time)<timeline.starts[0] and
+                          FAIL_PATTERN.search(str(row.stage)) is not None for row in events.itertuples(index=False)))
+        return {**result, **timeline.failure_annotation()}
+    except Exception as error:
+        return {**result, 'error': f'{type(error).__name__}: {error}'}
 
 
 def ensure_stage_windows(manifest, stage_topic='/recording_stage'):

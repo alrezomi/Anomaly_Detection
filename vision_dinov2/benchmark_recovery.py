@@ -1,4 +1,4 @@
-"""Regenerate DINO reports from saved frames, without ROS reads or model inference."""
+"""Regenerate reports from saved scores, refreshing stage metadata without inference."""
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -10,7 +10,7 @@ import pandas as pd
 
 from .benchmark_labels import apply_csv_labels, validate_ground_truth, update_labels_csv
 from .benchmark_report import write_reports, REPORT_FORMAT_VERSION
-from .benchmark_alarm import ensure_stage_windows, ALARM_POLICY
+from .benchmark_alarm import ensure_stage_windows, ALARM_POLICY, read_execution_annotation
 
 
 def regenerate_reports(source, labels_csv=None, output_root=None, stage_topic=None):
@@ -29,6 +29,25 @@ def regenerate_reports(source, labels_csv=None, output_root=None, stage_topic=No
         manifest = apply_csv_labels(manifest, labels_csv, state['data_root'])
     counts = validate_ground_truth(manifest)
     stage_topic = stage_topic or state.get('stage_topic', '/recording_stage')
+    for row in manifest:
+        if row['status'] != 'ok':
+            continue
+        # Old onset extraction used a startup cutoff, not the corrected stage-1 start.
+        # Refresh metadata only; never recompute image features or detector scores.
+        annotation = read_execution_annotation(row['bag_path'], stage_topic)
+        row['stage_annotation_refresh_error'] = annotation.get('error')
+        if annotation.get('recorded_stage_messages'):
+            row['recorded_stage_messages'] = annotation['recorded_stage_messages']
+            row['stage_message_count'] = annotation.get('stage_message_count')
+        if annotation.get('stage3_start_sec') is not None:
+            for key in ['stage1_start_sec', 'stage3_start_sec', 'recorded_stage_messages',
+                        'stage_message_count', 'ignored_pre_stage1_failure_count']:
+                row[key] = annotation.get(key)
+            if row.get('onset_source') in (None, '', 'recorded_stage_topic'):
+                row.update(recorded_failure_time_sec=annotation['time_sec'],
+                           annotation_status=annotation['status'], annotation_error=annotation.get('error'),
+                           failure_marker=annotation.get('marker'), onset_source='recorded_stage_topic')
+        row['label_onset_conflict'] = row['ground_truth_label']=='normal' and row.get('recorded_failure_time_sec') is not None
     manifest = ensure_stage_windows(manifest, stage_topic)
     frames = pd.read_csv(source/'frame_results.csv')
     required = {'metric','bag_path','camera_topic','timestamp_sec','pooled_score','base_threshold',
@@ -62,6 +81,7 @@ def regenerate_reports(source, labels_csv=None, output_root=None, stage_topic=No
         shutil.copy2(source/'runtime.csv', output/'runtime.csv')
     report = dict(state, mode='report_only', report_format_version=REPORT_FORMAT_VERSION,
                   source_run=str(source), inference_rerun=False, bag_rule=ALARM_POLICY, stage_topic=stage_topic,
+                  onset_policy='first failure marker at/after corrected stage 1; pre-stage-1 markers ignored',
                   ground_truth_counts=counts, labels_csv=str(Path(labels_csv).resolve()) if labels_csv else None,
                   roc=roc, report_generation_sec=perf_counter()-started)
     if labels_csv:

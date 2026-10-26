@@ -1,6 +1,7 @@
 """Bag-level DINO decisions, scale sweeps, statistics and timing figures.
 
-Failure is positive. All decisions use strict score > base_threshold * scale,
+Failure is positive. Alarms require two consecutive crossings before stage 3.
+All decisions use strict score > base_threshold * scale,
 including ties and zero thresholds. Scale selection is exploratory on the
 selected benchmark, never an automatic config update or independent validation.
 """
@@ -14,7 +15,7 @@ import pandas as pd
 from rynnbrain_vlm.benchmark_roc import roc_curve
 from .benchmark_alarm import eligible_frames, confirmed_alarms, confirmation_pairs, ALARM_POLICY
 
-REPORT_FORMAT_VERSION = 3
+REPORT_FORMAT_VERSION = 4
 
 def bag_score(frames):
     scores = frames.pooled_score.to_numpy(float)
@@ -57,13 +58,13 @@ def decisions(manifest, frames, scale, operating_point):
             if label in {'normal', 'fail'}:
                 row['correct'] = (predicted == 'failure') == (label == 'fail')
             onset = item.get('recorded_failure_time_sec')
-            if label != 'fail':
-                row['timing_status'] = 'false_alarm' if label == 'normal' and first is not None else 'not_failure'
-            elif onset is None or not np.isfinite(onset):
-                row['timing_status'] = 'missing_failure_marker'
+            row['label_onset_conflict'] = label=='normal' and onset is not None and np.isfinite(onset)
+            if onset is None or not np.isfinite(onset):
+                row['timing_status'] = ('missing_failure_marker' if label=='fail' else
+                    'false_alarm' if first is not None else 'not_failure')
             elif onset >= float(item['stage3_start_sec']):
                 row['timing_status'] = 'annotation_after_alarm_window'
-            elif not timeline.timestamp_sec.min() <= onset <= timeline.timestamp_sec.max():
+            elif not float(item.get('stage1_start_sec') or 0.) <= onset <= timeline.timestamp_sec.max():
                 row['timing_status'] = 'annotation_outside_scored_window'
             elif first is None:
                 row['timing_status'] = 'missed_failure'
@@ -236,10 +237,17 @@ def write_reports(manifest, frames, output, scale, folders):
         axis.grid(alpha=.2)
     figure.suptitle('Bag-level ROC: two consecutive crossings in one camera, before stage 3')
     figure.tight_layout()
-    figure.savefig(output / 'roc.png', dpi=160)
+    if any(report['status']=='created' for report in roc_reports.values()):
+        figure.savefig(output / 'roc.png', dpi=160)
     plt.close(figure)
     all_results = pd.concat(results, ignore_index=True)
     all_results.to_csv(output / 'bag_results.csv', index=False)
+    audit_columns = ['metric', 'bag_path', 'bag_name', 'folder', 'ground_truth_label', 'onset_source',
+        'stage1_start_sec', 'stage3_start_sec', 'failure_marker', 'recorded_failure_time_sec',
+        'first_alarm_time_sec', 'failure_time_error_sec', 'timing_status', 'label_onset_conflict',
+        'annotation_status', 'annotation_error', 'stage_annotation_refresh_error',
+        'stage_message_count', 'ignored_pre_stage1_failure_count', 'recorded_stage_messages']
+    configured.reindex(columns=audit_columns).to_csv(output/'timing_diagnostics.csv', index=False)
     metrics = metrics_table(all_results, folders)
     metrics.to_csv(output / 'metrics.csv', index=False)
     (output / 'roc_summary.json').write_text(json.dumps(roc_reports, indent=2, allow_nan=False), encoding='utf-8')
@@ -309,6 +317,9 @@ def write_reports(manifest, frames, output, scale, folders):
 
 def _timing_plots(results, output, plt):
     selected = results[results.operating_point.eq('configured') & ~results.status.eq('excluded_training')]
+    has_onsets = selected.loc[selected.status.eq('ok'), 'recorded_failure_time_sec'].notna().any()
+    if has_onsets:
+        selected = selected[selected.recorded_failure_time_sec.notna() | selected.ground_truth_label.eq('fail')]
     bags = sorted(selected.bag_path.unique())
     figure, axis = plt.subplots(figsize=(12, max(4, len(bags)*.36)))
     labels = []
@@ -317,12 +328,15 @@ def _timing_plots(results, output, plt):
         labels.append(f'{group.iloc[0].folder}/{group.iloc[0].bag_name}')
         for metric, color, offset in [('euclidean', '#2878b5', -.13), ('mahalanobis', '#c87925', .13)]:
             row = group[group.metric.eq(metric)].iloc[0]
-            if pd.notna(row.failure_time_error_sec):
-                axis.scatter(row.failure_time_error_sec, index+offset, color=color, s=25)
+            value = row.failure_time_error_sec if has_onsets else row.first_alarm_time_sec
+            if pd.notna(value):
+                axis.scatter(value, index+offset, color=color, s=25)
             else:
                 reason = row.timing_status.replace('_', ' ')
                 if row.status != 'ok':
                     reason = 'not evaluated: '+row.status
+                elif not has_onsets:
+                    reason = 'no confirmed alarm'
                 elif pd.isna(row.recorded_failure_time_sec):
                     reason = 'no recorded onset'
                 axis.annotate(reason, (0, index+offset), xytext=(5, 0), textcoords='offset points', fontsize=7, color=color)
@@ -333,10 +347,11 @@ def _timing_plots(results, output, plt):
     axis.axvline(0, color='black', linewidth=1)
     axis.set_yticks(range(len(bags)), labels, fontsize=8)
     axis.set_ylim(len(bags)-.6, -.6)
-    axis.set(xlabel='Confirmed alarm time - recorded failure onset (s)',
-             title='All folders: signed detection delay (negative = early, positive = late)')
+    axis.set(xlabel='Confirmed alarm time - recorded failure onset (s)' if has_onsets else 'First confirmed alarm time from bag start (s)',
+             title='All folders: signed detection delay (negative = early, positive = late)' if has_onsets
+                   else 'All folders: first confirmed alarm (no recorded onset available for a delay comparison)')
     axis.legend(loc='best')
     axis.grid(alpha=.2)
     figure.tight_layout()
-    figure.savefig(output/'failure_time_difference.png', dpi=160)
+    figure.savefig(output/('failure_time_difference.png' if has_onsets else 'first_alarm_time.png'), dpi=160)
     plt.close(figure)

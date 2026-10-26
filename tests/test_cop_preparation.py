@@ -131,7 +131,7 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.model.extract_multiturn_cop_vector = Mock(side_effect=lambda turns, *a, **kw:
             self.torch.tensor([-1. if turns[1]["images"][0][0].startswith("failure") else 1., .2, .3, .4]))
         bags = [self.root / "data" / name for name in self.names + ["reference", "normal_test", "failure_test"]]
-        with patch.object(sys, "argv", ["benchmark", "--config", str(self.config_path), "--skip-dino"]), \
+        with patch.object(sys, "argv", ["benchmark", "--config", str(self.config_path), "--data-root", str(self.root/'data'), "--skip-dino"]), \
              patch.object(benchmark, "RynnBrainModel", return_value=self.model), \
              patch.object(benchmark, "evaluate_multiturn", self.run.evaluate_multiturn), \
              patch.object(benchmark, "write_multiturn_outputs", self.run.write_multiturn_outputs), \
@@ -548,7 +548,7 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.config_path.write_text(json.dumps(self.config))
         output = self.root / "failed_benchmark"
         bag = self.root / "data/normal_test"
-        argv = ["benchmark", "--config", str(self.config_path), "--benchmark-dir", str(output), "--skip-dino"]
+        argv = ["benchmark", "--config", str(self.config_path), "--data-root", str(self.root/'data'), "--benchmark-dir", str(output), "--skip-dino"]
         with patch("sys.argv", argv), patch.object(benchmark, "RynnBrainModel", return_value=self.model), \
              patch.object(benchmark, "discover_bags", return_value=[bag]), \
              patch.object(benchmark, "infer_bag_record", return_value={"bag_name": bag.name, "bag_path": str(bag), "label": "normal"}), \

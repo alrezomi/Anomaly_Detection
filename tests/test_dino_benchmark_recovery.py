@@ -123,6 +123,7 @@ class RecoveryTests(unittest.TestCase):
             source,labels=self.source_run(Path(directory))
             original=(source/'frame_results.csv').read_bytes(),(source/'bag_results.csv').read_bytes()
             with patch('rosbag_io.read_stage_events',side_effect=AssertionError('no bag reads')), \
+                 patch('vision_dinov2.benchmark_recovery.read_execution_annotation', return_value={'error':'stage metadata unavailable'}), \
                  patch('vision_dinov2.benchmark.prepare_camera',side_effect=AssertionError('no calibration')), \
                  patch('vision_dinov2.benchmark.score_bag',side_effect=AssertionError('no inference')):
                 output=regenerate_reports(source,labels)
@@ -158,7 +159,10 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(state['ground_truth_counts'], dict(normal=2,fail=0,excluded=0))
             for metric in ['euclidean','mahalanobis']:
                 self.assertEqual(state['roc'][metric]['status'],'unavailable')
-                self.assertTrue((output/'failure_time_difference.png').is_file())
+                self.assertTrue((output/'first_alarm_time.png').is_file())
+                self.assertFalse((output/'failure_time_difference.png').exists())
+                self.assertFalse((output/'roc.png').exists())
+                self.assertFalse((output/metric/'roc.png').exists())
                 self.assertTrue((output/'metrics.png').is_file())
                 target = output/metric
                 index = pd.read_csv(target/'bag_index.csv')
@@ -173,3 +177,21 @@ class RecoveryTests(unittest.TestCase):
             configured=decisions[decisions.operating_point.eq('configured')]
             self.assertTrue(configured.ground_truth_label.eq('normal').all())
             self.assertEqual(configured.predicted_decision.eq('failure').sum(),2)
+
+    def test_report_refreshes_stage_onset_independently_of_normal_task_label(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source,_=self.source_run(Path(directory))
+            def annotations(bag, topic):
+                return dict(status='available' if bag.endswith('/f') else 'missing_marker',
+                    time_sec=2.5 if bag.endswith('/f') else None, marker='Fail' if bag.endswith('/f') else None,
+                    stage1_start_sec=1., stage3_start_sec=4., recorded_stage_messages='[]', stage_message_count=4,
+                    ignored_pre_stage1_failure_count=1, error=None)
+            with patch('vision_dinov2.benchmark_recovery.read_execution_annotation', side_effect=annotations):
+                output=regenerate_reports(source)
+            rows=pd.read_csv(output/'bag_results.csv')
+            actual=rows[rows.bag_path.str.endswith('/f')]
+            self.assertTrue(actual.ground_truth_label.eq('normal').all())
+            self.assertTrue(actual.failure_time_error_sec.eq(.5).all())
+            self.assertTrue((output/'failure_time_difference.png').is_file())
+            audit=pd.read_csv(output/'timing_diagnostics.csv')
+            self.assertTrue(audit[audit.bag_path.str.endswith('/f')].ignored_pre_stage1_failure_count.eq(1).all())

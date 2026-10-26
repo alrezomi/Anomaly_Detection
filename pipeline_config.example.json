@@ -19,6 +19,9 @@
     "folders": [],
     "labels_csv": "/outputs/dataset_labels.csv"
   },
+  "vlm_benchmark": {
+    "folders": []
+  },
   "rebuild_nominal_cache": false,
   "stage_topic": "/recording_stage",
   "stage_count": 3,
