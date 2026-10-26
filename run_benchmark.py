@@ -283,6 +283,20 @@ def _decision_correct(ground_truth: str, decision: str) -> bool | None:
     return decision == expected
 
 
+def _align_benchmark_timing(rows, bag_path, stage_topic, vlm, ground_truth):
+    """Correct only evaluation annotations; reuse existing classifier timelines."""
+    from rynnbrain_vlm.visual_matching import read_corrected_failure_annotation
+    from rynnbrain_vlm.failure_timing import attach_failure_timing
+    annotation = read_corrected_failure_annotation(bag_path, stage_topic)
+    method = classifier_method(vlm.get('cop_classifier', {}))
+    for row in rows:
+        timeline = {key: row.get(f'{method}_timeline_{key}') for key in ['status', 'csv', 'plot', 'error']}
+        row.update(attach_failure_timing(annotation, timeline,
+            source=vlm.get('source', 'generated_videos'), mode=row['input_mode'],
+            ground_truth=ground_truth, method=method, bag_name=Path(bag_path).name))
+    return annotation
+
+
 def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
     """Keep only the fields needed to inspect each model decision."""
     columns = [
@@ -602,6 +616,7 @@ def _run_benchmark(arguments, config, update) -> None:
                     reference_response=reference_response,
                     stage_startup_ignore_sec=startup_ignore_sec,
                 )
+                _align_benchmark_timing(rows, bag_path, stage_topic, vlm_bag, ground_truth)
                 write_multiturn_outputs(
                     Path(vlm_bag["output_dir"]), rows, frame_metadata, raw_records, task_description
                 )

@@ -2548,7 +2548,12 @@ Accuracy includes all known labels, with unavailable decisions counted incorrect
 `accuracy_decided` and `failure_recall_all` make the denominators explicit.
 Undefined rates are N/A. `benchmark_metrics_notes.txt` records these definitions.
 The existing ROC/score reports and signed classifier-timing graphs remain unchanged;
-this adds no inference or new calibration. DINO's two-frame/stage-3 rule is specific
+benchmark timing annotations ignore failure markers before the corrected stage-1
+start, using the already computed classifier timeline without rescoring images.
+Feature-only runs omit the generated-response metric series, since no response
+was generated. Normal-only graphs show accuracy, FPR and decision coverage;
+irrelevant recall/precision/F1 panels are omitted. This adds no inference or new
+calibration. DINO's two-frame/stage-3 rule is specific
 to the DINO benchmark and is not silently applied to generated VLM decisions.
 
 For each remaining bag it writes a self-contained folder (videos, DINO CSVs,

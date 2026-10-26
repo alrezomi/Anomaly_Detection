@@ -32,6 +32,7 @@ from run_benchmark import (
     _select_named_records,
     _discover_benchmark_bags,
     _benchmark_folder,
+    _align_benchmark_timing,
     parse_arguments,
 )
 
@@ -44,6 +45,23 @@ for _name, _previous in _previous_modules.items():
 
 
 class BenchmarkSelectionTests(unittest.TestCase):
+    def test_benchmark_timing_ignores_pre_stage_one_error_without_rescoring(self):
+        import pandas as pd
+        events = pd.DataFrame(dict(time=[.5,1.,2.5,3.,4.], stage=['Error','1','Fail','2','3']))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'timeline.csv'
+            pd.DataFrame(dict(timestamp_sec=[1.,2.,3.], anomaly_score=[.1,.8,.9], threshold=[.5]*3)).to_csv(path,index=False)
+            rows = [dict(input_mode='raw', decision='success', classifier_decision='failure',
+                         logistic_timeline_status='created', logistic_timeline_csv=str(path))]
+            with patch('rosbag_io.read_stage_events', return_value=events):
+                _align_benchmark_timing(rows, Path('bag'), '/stage',
+                    {'source':'rosbag','cop_classifier':{'method':'logistic'}}, 'fail')
+            self.assertEqual(rows[0]['recorded_failure_time_sec'],2.5)
+            self.assertEqual(rows[0]['predicted_failure_time_sec'],2.)
+            self.assertEqual(rows[0]['failure_time_error_sec'],-.5)
+            self.assertEqual(rows[0]['decision'],'success')
+            self.assertEqual(rows[0]['classifier_decision'],'failure')
+
     def test_optional_folders_scan_only_selection_and_omission_scans_all(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

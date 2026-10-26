@@ -62,3 +62,15 @@ class VlmFolderMetricsTests(unittest.TestCase):
         self.assertTrue(overall.evaluated_bags.eq(0).all())
         self.assertTrue(overall.decision_coverage.eq(0.).all())
         self.assertTrue(overall.recall.isna().all())
+
+    def test_feature_only_uses_classifier_metrics_without_fake_generation_series(self):
+        rows = [dict(ground_truth_label='normal', decision='not_generated', classifier_decision=decision,
+                     input_mode='raw', folder='chosen') for decision in ['success','failure']]
+        table = folder_metrics(rows,['chosen'])
+        self.assertEqual(set(table.decision_source),{'classifier'})
+        overall = table[table.folder.eq('ALL')].iloc[0]
+        self.assertEqual(overall.accuracy,.5)
+        self.assertEqual(overall.false_positive_rate,.5)
+        with tempfile.TemporaryDirectory() as directory:
+            report = write_metrics_report(rows,Path(directory),['chosen'])
+            self.assertTrue(Path(report['plot']).is_file())
