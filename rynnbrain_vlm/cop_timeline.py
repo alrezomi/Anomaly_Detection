@@ -336,7 +336,7 @@ def write_logistic_timeline(
     frame_metadata: list[dict], final_vector, comparison_signature: dict,
     output_directory: Path, mode: str, bag_name: str, provenance: dict,
     classifier_model_path: str,
-    use_onset_classifier: bool = False, source: str | None = None,
+    use_onset_classifier: bool = False, source: str | None = None, threshold_override=None,
 ) -> dict:
     """Score original prefixes with an explicitly selected diagnostic or onset model."""
     csv_path, plot_path = timeline_paths(output_directory, mode, "logistic")
@@ -353,6 +353,8 @@ def write_logistic_timeline(
         classifier_model_path = str(onset_path)
         score_source = "timestamp_supervised_prefix_classifier"
         print(f"Logistic timeline uses timestamp-supervised classifier: {onset_path}")
+    from .cop_classifier import with_decision_threshold
+    classifier = with_decision_threshold(classifier, {'training': {'threshold': threshold_override}})
     final_score = classifier.predict_failure_probability(
         _as_numpy(final_vector), input_mode=mode, comparison_signature=comparison_signature,
     )

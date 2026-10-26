@@ -153,7 +153,7 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
     if not nominal_images:
         raise ValueError("No nominal reference images were loaded.")
     task = vlm.get("task_description", "Robot manipulation task")
-    nominal_turn = {"role": "user", "images": nominal_images, "text": task_context_prompt(task, temporal=temporal)}
+    nominal_turn = {"role": "user", "images": nominal_images, "text": task_context_prompt(task, temporal=temporal, variant=vlm.get('prompt_variant', 'A'))}
     nominal_response = wrapper.generate_nominal(nominal_turn, generation)
     nominal_message = wrapper.conversation_message(nominal_turn)
 
@@ -190,7 +190,7 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
         for label, path in sample["images"]:
             with Image.open(path) as image:
                 images.append((label, image.convert("RGB")))
-        turn = {"role": "user", "images": images, "text": evaluation_prompt_multiturn(task, settings["input_mode"], temporal=temporal)}
+        turn = {"role": "user", "images": images, "text": evaluation_prompt_multiturn(task, settings["input_mode"], temporal=temporal, variant=vlm.get('prompt_variant', 'A'))}
         conversation = [nominal_message, {"role": "assistant", "content": [{"type": "text", "text": nominal_response}]}, wrapper.conversation_message(turn)]
         prefix = wrapper.tokenize_conversation(conversation, generation)
         data = supervised_example(prefix, wrapper.processor.tokenizer, sample["label"], settings["max_tokens"],

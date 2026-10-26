@@ -8,11 +8,34 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pandas as pd
 
-from rynnbrain_vlm.cop_classifier import CoPLogisticClassifier
+from rynnbrain_vlm.cop_classifier import CoPLogisticClassifier, with_decision_threshold
 from rynnbrain_vlm.cop_timeline import write_logistic_timeline, _plot_timeline
 
 
 class LogisticTimelineTests(unittest.TestCase):
+    def test_threshold_override_changes_labels_without_changing_weights_or_probabilities(self):
+        updated = with_decision_threshold(self.classifier, {'training': {'threshold': .6}})
+        self.assertEqual(updated.threshold, .6)
+        self.assertEqual(self.classifier.threshold, .7)
+        self.assertIs(updated.weights, self.classifier.weights)
+        self.assertEqual(updated.predict_failure_probability(self.vectors[0]),
+                         self.classifier.predict_failure_probability(self.vectors[0]))
+        self.assertEqual(updated.predict_label(.65), 'failure')
+        self.assertEqual(self.classifier.predict_label(.65), 'success')
+        for invalid in (0, 1, True, float('nan'), '0.6'):
+            with self.assertRaises(ValueError):
+                with_decision_threshold(self.classifier, {'training': {'threshold': invalid}})
+
+    def test_timeline_uses_override_after_loading_separate_onset_model(self):
+        with patch('rynnbrain_vlm.cop_onset.load_onset_classifier', return_value=(self.classifier, Path('onset.npz'))):
+            report = write_logistic_timeline(model=self.model, classifier=self.classifier, turns=self.turns,
+                generation={}, nominal_response='reference', frame_metadata=self.frames,
+                final_vector=self.vectors[-1], comparison_signature=self.signature, output_directory=self.directory,
+                mode='raw', bag_name='held_out', provenance={'evaluation_id': 'test'}, classifier_model_path='full.npz',
+                use_onset_classifier=True, source='rosbag', threshold_override=.6)
+        self.assertTrue(pd.read_csv(report['csv']).threshold.eq(.6).all())
+        self.assertEqual(self.classifier.threshold, .7)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

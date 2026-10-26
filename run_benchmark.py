@@ -493,10 +493,8 @@ def _run_benchmark(arguments, config, update) -> None:
         vlm['cop_classifier'] = {**vlm.get('cop_classifier', {}), 'enabled': True}
     decision_mode = configure_decision_mode(selection, vlm, skip_vlm=arguments.skip_vlm)
     config['rynnbrain'] = vlm
-    if decision_mode == 'timeline':
-        # Keep the original whole-demo benchmark files available for comparison.
-        benchmark_root = benchmark_root / 'timeline'
-        benchmark_root.mkdir(parents=True, exist_ok=True)
+    benchmark_root = benchmark_root / decision_mode
+    benchmark_root.mkdir(parents=True, exist_ok=True)
     update(decision_mode=decision_mode, benchmark_output_dir=str(benchmark_root))
     print(f'VLM benchmark decision mode: {decision_mode}')
     if decision_mode == 'timeline':
@@ -868,8 +866,7 @@ def main() -> None:
     config = load_pipeline_config(arguments.config)
     base = config.get("rynnbrain", {}).get("output_dir", str(Path(config.get("output_dir", "outputs")) / "rynnbrain"))
     directory = arguments.benchmark_dir or Path(f"{base}_benchmark")
-    if (config.get('vlm_benchmark') or {}).get('decision_mode') == 'timeline':
-        directory = directory / 'timeline'
+    directory = directory / (config.get('vlm_benchmark') or {}).get('decision_mode', 'whole_demo')
     with record_run(directory, "benchmark") as update:
         update(arguments=vars(arguments) | {key: str(value) for key, value in vars(arguments).items() if isinstance(value, Path)})
         _run_benchmark(arguments, config, update)
