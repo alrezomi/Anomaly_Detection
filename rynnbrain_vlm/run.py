@@ -278,8 +278,8 @@ def cop_comparison_signature(model, config, vlm, mode, nominal_response, frame_c
         "sampling_end_sec": float(vlm["sampling_end_sec"]) if vlm.get("sampling_end_sec") is not None else None,
         "enable_thinking": bool(generation.get("enable_thinking", False)),
         "hidden_size": getattr(getattr(model.model.config, "text_config", None), "hidden_size", None),
-        "turn1_prompt": task_context_prompt(task, temporal=bool(temporal_profile)),
-        "turn2_prompt": evaluation_prompt_multiturn(task, mode, temporal=bool(temporal_profile)),
+        "turn1_prompt": task_context_prompt(task, temporal=bool(temporal_profile), variant=vlm.get('prompt_variant', 'A')),
+        "turn2_prompt": evaluation_prompt_multiturn(task, mode, temporal=bool(temporal_profile), variant=vlm.get('prompt_variant', 'A')),
     }
     if temporal_profile:
         signature["temporal_profile"] = temporal_profile
@@ -397,7 +397,7 @@ def evaluate_multiturn(
     if feature_only and reference_response is None:
         started = clock()
         reference_response = model.generate_nominal({"role": "user", "images": nominal_images,
-            "text": task_context_prompt(task_description, temporal=bool(temporal_profile))}, generation)
+            "text": task_context_prompt(task_description, temporal=bool(temporal_profile), variant=vlm.get('prompt_variant', 'A'))}, generation)
         runtime["runtime_reference_sec"] = clock() - started
 
     failure_annotation = None
@@ -413,10 +413,10 @@ def evaluate_multiturn(
         _save_inputs(output_directory, mode, inputs)
 
         # Turn 1: Model sees nominal demonstration and learns the task
-        turn1_text = task_context_prompt(task_description, temporal=bool(temporal_profile))
+        turn1_text = task_context_prompt(task_description, temporal=bool(temporal_profile), variant=vlm.get('prompt_variant', 'A'))
         
         # Turn 2: Model evaluates test case against observed nominal
-        turn2_text = evaluation_prompt_multiturn(task_description, mode, temporal=bool(temporal_profile))
+        turn2_text = evaluation_prompt_multiturn(task_description, mode, temporal=bool(temporal_profile), variant=vlm.get('prompt_variant', 'A'))
         
         # Create multi-turn conversation
         turns = [
@@ -485,7 +485,8 @@ def evaluate_multiturn(
             )
             if classifier_enabled:
                 classifier_started = clock()
-                classifier = classifiers[mode]
+                from .cop_classifier import with_decision_threshold
+                classifier = with_decision_threshold(classifiers[mode], classifier_config)
                 classifier_threshold = classifier.threshold
                 classifier_model_path = str(
                     Path(str(model_paths[mode])).resolve()
@@ -610,7 +611,8 @@ def evaluate_multiturn(
                         else:
                             from .cop_onset import onset_enabled
                             options = ({"config": config, "vlm": vlm} if method == "knn" else
-                                       {"use_onset_classifier": onset_enabled(classifier_config), "source": vlm.get("source")})
+                                       {"use_onset_classifier": onset_enabled(classifier_config), "source": vlm.get("source"),
+                                        "threshold_override": classifier_config.get('training', {}).get('threshold')})
                             timeline.update(writer(
                                 model=model, classifier=classifiers[mode], turns=turns, generation=generation,
                                 nominal_response=nominal_response, frame_metadata=mode_frame_metadata,

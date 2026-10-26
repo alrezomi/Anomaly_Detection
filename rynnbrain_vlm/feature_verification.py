@@ -137,7 +137,7 @@ def run_verification(config, vlm, frame_count, generation, *, baseline_dir=None)
             raise ValueError("No nominal reference images were loaded.")
         task = vlm.get("task_description", "Robot manipulation task")
         nominal_turn = {"role": "user", "images": nominal_images,
-                        "text": task_context_prompt(task, temporal=bool(profile))}
+                        "text": task_context_prompt(task, temporal=bool(profile), variant=vlm.get('prompt_variant', 'A'))}
         reference = model.generate_nominal(nominal_turn, generation)
         report = {"test_bag": config["test_bag"], "results": [],
                   "versions": {name: version(name) for name in ("torch", "transformers", "peft", "accelerate")},
@@ -148,7 +148,7 @@ def run_verification(config, vlm, frame_count, generation, *, baseline_dir=None)
             update(phase="comparing", input_mode=mode)
             images, frames = selected[mode]
             turns = [nominal_turn, {"role": "user", "images": images,
-                     "text": evaluation_prompt_multiturn(task, mode, temporal=bool(profile))}]
+                     "text": evaluation_prompt_multiturn(task, mode, temporal=bool(profile), variant=vlm.get('prompt_variant', 'A'))}]
             signature = cop_comparison_signature(model, config, vlm, mode, reference, frame_count, generation)
             vectors, timings = {}, {}
             # Check both before and after generate(): mutable model state must not

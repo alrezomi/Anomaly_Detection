@@ -47,6 +47,12 @@ for _name, _previous in _previous_modules.items():
 
 class BenchmarkSelectionTests(unittest.TestCase):
     def test_timeline_benchmark_writes_alarm_metrics_and_preserves_final_score(self):
+        self._check_protocol_output('timeline')
+
+    def test_whole_demo_benchmark_writes_its_own_folder_and_keeps_final_decision(self):
+        self._check_protocol_output('whole_demo')
+
+    def _check_protocol_output(self, mode):
         import json
         import pandas as pd
         with tempfile.TemporaryDirectory() as directory:
@@ -65,7 +71,7 @@ class BenchmarkSelectionTests(unittest.TestCase):
                                          model={}, cop_vectors={'enabled':False},
                                          cop_classifier=dict(enabled=True, train_on_benchmark=False,
                                                              method='logistic', plot_timeline=False)),
-                          vlm_benchmark=dict(folders=['selected'],decision_mode='timeline'))
+                          vlm_benchmark=dict(folders=['selected'],decision_mode=mode))
             with patch.object(sys,'argv',['benchmark','--data-root',str(root/'data'),
                                           '--benchmark-dir',str(root/'reports')]):
                 args = parse_arguments()
@@ -77,9 +83,14 @@ class BenchmarkSelectionTests(unittest.TestCase):
                  patch('run_benchmark._align_benchmark_timing'), \
                  patch('run_benchmark.write_multiturn_outputs'):
                 _run_benchmark(args, config, lambda **kwargs: None)
-            self.assertTrue(evaluate.call_args.args[2]['cop_classifier']['plot_timeline'])
-            output = root/'reports'/'timeline'
+            self.assertEqual(evaluate.call_args.args[2]['cop_classifier']['plot_timeline'], mode == 'timeline')
+            output = root/'reports'/mode
             summary = pd.read_csv(output/'benchmark_summary.csv').iloc[0]
+            if mode == 'whole_demo':
+                self.assertEqual(summary.classifier_decision,'success')
+                self.assertEqual(summary.classifier_failure_probability,.01)
+                self.assertFalse((root/'reports'/'benchmark_summary.csv').exists())
+                return
             self.assertEqual(summary.classifier_decision,'failure')
             self.assertEqual(summary.whole_demo_classifier_decision,'success')
             self.assertEqual(summary.classifier_failure_probability,.7)

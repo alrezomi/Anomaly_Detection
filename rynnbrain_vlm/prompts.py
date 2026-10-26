@@ -11,7 +11,7 @@ Mention concrete matches or mismatches and say when the frames are insufficient 
 Do not infer unseen events or give a success/failure decision.
 Return: Visual evidence: [one or two sentences describing what is visible]"""
 
-def task_context_prompt(task_description: str, *, temporal: bool = False) -> str:
+def task_context_prompt_a(task_description: str, *, temporal: bool = False) -> str:
     """First turn: Keep the nominal reference clear and faithful to the user's intent."""
     if temporal:
         return f"""You are a Failure Detector for Robotic Manipulation Tasks.
@@ -32,7 +32,7 @@ have slightly different capture times; do not treat frame indices as seconds. De
         Observe the nominal demonstration closely. It is one example of the expected behavior:"""
 
 
-def evaluation_prompt_multiturn(task_description: str, input_mode: str, *, temporal: bool = False) -> str:
+def evaluation_prompt_multiturn_a(task_description: str, input_mode: str, *, temporal: bool = False) -> str:
     """Second turn: Compare the current observation against the nominal demonstration."""
     if temporal:
         return f"""Compare the current execution with the nominal reference for: {task_description}
@@ -70,3 +70,33 @@ Failure onset (s): numeric seconds for failure, none for success, or unknown if 
         Return exactly this format:
         Decision: success / failure / uncertain
         Visual evidence: [describe the observed match or mismatch in {visual_focus}]"""
+
+
+def task_context_prompt_b(task_description: str, *, temporal: bool = False) -> str:
+    """Edit this function to write prompt B's nominal-reference instruction."""
+    return task_context_prompt_a(task_description, temporal=temporal)
+
+
+def evaluation_prompt_multiturn_b(task_description: str, input_mode: str, *, temporal: bool = False) -> str:
+    """Edit this function to write prompt B's evaluation instruction.
+
+    B initially matches A. Replace the return below with your own prompt text;
+    keep the Decision output format if generated answers are being evaluated.
+    """
+    return evaluation_prompt_multiturn_a(task_description, input_mode, temporal=temporal)
+
+
+def _prompt_pair(variant):
+    if variant == 'A':
+        return task_context_prompt_a, evaluation_prompt_multiturn_a
+    if variant == 'B':
+        return task_context_prompt_b, evaluation_prompt_multiturn_b
+    raise ValueError('rynnbrain.prompt_variant must be A or B.')
+
+
+def task_context_prompt(task_description: str, *, temporal: bool = False, variant='A') -> str:
+    return _prompt_pair(variant)[0](task_description, temporal=temporal)
+
+
+def evaluation_prompt_multiturn(task_description: str, input_mode: str, *, temporal: bool = False, variant='A') -> str:
+    return _prompt_pair(variant)[1](task_description, input_mode, temporal=temporal)

@@ -268,6 +268,8 @@ class OnlineDetector:
         self.classifier = self.complete
         if self.onset:
             self.classifier, _ = load_onset_classifier(self.path, self.complete, bag_name="")
+        from .cop_classifier import with_decision_threshold
+        self.classifier = with_decision_threshold(self.classifier, settings)
         self.score_source = ("nominal_prefix_index_diagnostic" if self.knn else
                              "onset_prefix_classifier" if self.onset else "whole_execution_classifier_on_prefixes")
         self.excluded = set(self.model.adapter_training_bags)
@@ -291,8 +293,8 @@ class OnlineDetector:
         task = vlm.get("task_description", "Robot manipulation task")
         progress("Preparing reusable reference cache (first model inference)")
         self.cache = CachedExecution(self.model,
-            dict(role="user", images=nominal, text=task_context_prompt(task, temporal=temporal)),
-            self.response, evaluation_prompt_multiturn(task, "raw", temporal=temporal), generation,
+            dict(role="user", images=nominal, text=task_context_prompt(task, temporal=temporal, variant=vlm.get('prompt_variant', 'A'))),
+            self.response, evaluation_prompt_multiturn(task, "raw", temporal=temporal, variant=vlm.get('prompt_variant', 'A')), generation,
             self.frame_count)
 
     def reset(self, bag):

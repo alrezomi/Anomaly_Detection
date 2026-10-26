@@ -2540,14 +2540,17 @@ and nominal reference settings remain independent of evaluation-folder selection
 
 Set `vlm_benchmark.decision_mode` to `"timeline"` to benchmark **alarms during
 execution**, instead of the final whole-demo classifier outcome. Omission or
-`"whole_demo"` preserves the original behavior. Run the same command:
+`"whole_demo"` preserves the original final-score decision rule. Run the same command:
 
 ```bash
 docker compose run --rm --build benchmark
 ```
 
 Timeline results go into `<rynnbrain.output_dir>_benchmark/timeline/` (or
-`<--benchmark-dir>/timeline/`), keeping whole-demo benchmark files available.
+`<--benchmark-dir>/timeline/`). Whole-demo runs now use the parallel
+`<rynnbrain.output_dir>_benchmark/whole_demo/` folder (or
+`<--benchmark-dir>/whole_demo/`). Existing reports in the parent directory are
+left in place; new runs do not move or rewrite them.
 Each observation is scored using only the selected current and preceding execution
 images, without waiting for recording time to pass. This uses existing offline
 prefix sampling (normally 1, 2, ... 8 observations), not the online replay's
@@ -2583,6 +2586,31 @@ alarm, but incomplete timelines are excluded from peak-score ROC and timing mean
 not require retraining the VLM, LoRA or classifier; the existing
 `cop_classifier.train_on_benchmark` setting still controls classifier preparation.
 
+The logistic decision cutoff uses the existing
+`rynnbrain.cop_classifier.training.threshold` setting, for example `0.6`.
+It applies consistently to whole-demo, offline-prefix/onset, and online-replay
+decisions even when `train_on_benchmark` is false. Changing only this cutoff does
+not change feature vectors, weights or probabilities, and needs no retraining.
+If omitted, the loaded classifier's saved threshold is used. Restart replay after
+changing the config. kNN continues to use its learned nominal thresholds.
+
+To keep two editable prompts, set `rynnbrain.prompt_variant` to `"A"` (default)
+or `"B"`. Prompt A retains the existing instructions exactly, including temporal
+and heatmap forms. Edit `task_context_prompt_b` and
+`evaluation_prompt_multiturn_b` in `rynnbrain_vlm/prompts.py` to write B's nominal
+and evaluation turns; B initially returns A's text. Keep the generated-answer
+format if language decisions/timing are enabled. The selector is used consistently
+by training, feature extraction, scoring, replay and feature verification.
+
+For B, the configuration loader automatically isolates result directories and
+classifier files with `_prompt_b` names, including explicit configured paths;
+training-vector and newly trained LoRA output paths are isolated too. The loaded
+`model.lora_adapter_path` is unchanged, so B can first be tested with the same
+adapter. Switch back to A in the original config to recover A's paths. The actual
+rendered prompts are already part of classifier/vector compatibility signatures:
+editing B requires extracting compatible B vectors and fitting its classifier
+(`train_on_benchmark: true` prepares these). It does not automatically retrain LoRA.
+
 `benchmark_metrics.csv` and `benchmark_metrics.png` compare **overall and every
 evaluation folder**, separating generated VLM decisions, optional classifier
 decisions, and input modes. They include TP/FP/TN/FN, recall, FPR, precision,
@@ -2604,7 +2632,7 @@ to the DINO benchmark and is not silently applied to generated VLM decisions.
 
 For each remaining bag it writes a self-contained folder (videos, DINO CSVs,
 selected VLM frames, prompts/responses) under
-`<rynnbrain.output_dir>_benchmark/<bag_name>/`, and appends one row per
+`<rynnbrain.output_dir>_benchmark/<decision_mode>/<bag_name>/`, and appends one row per
 `(bag, input_mode)` to a single `benchmark_summary.csv` in that same directory.
 It also writes `benchmark_clean.csv`, containing only `bag_name`, `label`,
 `model_decision`, `correct`, and the logistic classifier's
@@ -2743,5 +2771,5 @@ existing benchmark output):
 ```bash
 docker compose run --rm --entrypoint python benchmark \
   -m rynnbrain_vlm.benchmark_roc \
-  --summary /outputs/experiments/example/rynnbrain_benchmark/benchmark_summary.csv
+  --summary /outputs/experiments/example/rynnbrain_benchmark/whole_demo/benchmark_summary.csv
 ```

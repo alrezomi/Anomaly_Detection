@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 import json
 from pathlib import Path
@@ -18,6 +18,16 @@ from .cop_analysis import SavedCoPVector, discover_saved_vectors
 
 CLASSIFIER_SCHEMA_VERSION = 1
 LABEL_TO_TARGET = {"normal": 0, "nominal": 0, "fail": 1, "failure": 1}
+
+
+def with_decision_threshold(classifier, config):
+    """Reuse logistic weights with the configured cutoff, without changing saved artifacts."""
+    value = config.get('training', {}).get('threshold')
+    if not isinstance(classifier, CoPLogisticClassifier) or value is None:
+        return classifier
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value) or not 0 < value < 1:
+        raise ValueError('cop_classifier.training.threshold must be a finite number strictly between 0 and 1.')
+    return replace(classifier, threshold=float(value))
 
 
 def classifier_method(config: dict[str, Any]) -> str:
@@ -800,7 +810,7 @@ def prepare_training_vectors(
         raise ValueError("No nominal reference images were loaded.")
     reference_response = model.generate_nominal({
         "role": "user", "images": nominal_images,
-        "text": task_context_prompt(vlm.get("task_description", "Robot manipulation task"), temporal=bool(temporal_profile)),
+        "text": task_context_prompt(vlm.get("task_description", "Robot manipulation task"), temporal=bool(temporal_profile), variant=vlm.get('prompt_variant', 'A')),
     }, generation)
     expected = cop_comparison_signature(model, config, vlm, mode, reference_response, count, generation)
     paths = []
