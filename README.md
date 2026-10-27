@@ -2555,6 +2555,74 @@ overrides, `--limit` and `--no-recursive` further restrict the selected folders.
 Folder validation occurs before classifier/model preparation. Classifier training
 and nominal reference settings remain independent of evaluation-folder selection.
 
+### Unattended LoRA, classifier, and benchmark run
+
+To train a fresh LoRA adapter and then automatically train the classifier(s)
+and evaluate the selected folders, add `train_lora: true` to the existing
+top-level `vlm_benchmark` object:
+
+```json
+"vlm_benchmark": {
+  "train_lora": true,
+  "decision_mode": "timeline",
+  "folders": ["Nominal/setting 1", "Nominal/setting 2", "Failure_1_grasp_miss"]
+}
+```
+
+Keep your own folder selection, prompt variant, task description, LoRA/classifier
+training lists and hyperparameters. In particular, keep
+`rynnbrain.lora.training.temporal_supervision: true` if you want recorded onset
+times and prefix supervision. This workflow uses the existing trainer and targets;
+it does not alter prompts, numeric-onset supervision, or graph generation.
+The flag is off when omitted/false, preserving the ordinary benchmark behavior.
+
+Run the usual `docker compose run --rm --build benchmark` command, or launch
+detached for an overnight run (stop the browser's model first to release GPU memory):
+
+```bash
+docker compose stop online-replay
+docker compose run -d --build --name vlm-overnight benchmark
+docker logs -f vlm-overnight
+```
+
+Disconnecting or pressing Ctrl+C in `docker logs -f` stops following the log,
+not the detached benchmark. Its terminal output is also saved to
+`benchmark_run.log`. The stopped container is retained so its logs remain
+available the next day; use a different container name for another detached run.
+
+Each automatic run creates a unique directory under
+`<rynnbrain.output_dir>_benchmark/pipeline_runs/<UTC timestamp>_prompt_<a|b>/`
+(or `<--benchmark-dir>/pipeline_runs/...`). Inside it are:
+
+- `requested_config.json`: the original resolved configuration for provenance.
+- `lora_training_config.json`: the training snapshot, starting from the base model.
+- `lora_temporal_adapter/` or `lora_adapter/`: the newly trained adapter.
+- `cop_classifier/` and `classifier_training/`: fresh classifier models and features.
+- `timeline/` or `whole_demo/`: the usual per-bag outputs, graphs and reports.
+- `pipeline_config.json`: the effective configuration pointing to the new models.
+
+An existing `model.lora_adapter_path`, LoRA output directory, or classifier path
+in the user's config is replaced **only in the isolated run's snapshots**. Existing
+artifacts and the user's config file are not overwritten. The workflow enables
+classifier preparation for this run even if `train_on_benchmark` was false.
+The LoRA process must exit successfully and produce a trained checkpoint before
+the classifier or benchmark starts; failure never falls back to an older adapter.
+Training runs in a child process to release GPU memory before inference loads.
+`benchmark_runtime.json` records `lora_training_status`, `lora_training_sec`,
+the trained adapter path and the effective configuration path, alongside the
+existing classifier-preparation and inference timings.
+
+After successful completion, the saved `pipeline_config.json` disables both
+`vlm_benchmark.train_lora` and `cop_classifier.train_on_benchmark`, allowing you
+to load that configuration to reuse the new adapter/classifiers without training
+again. Your original config retains its flag; running it again with
+`train_lora: true` creates another fresh training run. The configured reference,
+LoRA-training and classifier-training bags remain excluded from test evaluation.
+Video/heatmap LoRA inputs still require the existing prepared training videos;
+this option does not create those videos or rebuild DINO memory.
+
+### Offline timeline decision mode
+
 Set `vlm_benchmark.decision_mode` to `"timeline"` to benchmark **alarms during
 execution**, instead of the final whole-demo classifier outcome. Omission or
 `"whole_demo"` preserves the original final-score decision rule. Run the same command:

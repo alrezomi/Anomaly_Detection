@@ -548,6 +548,11 @@ def _run_benchmark(arguments, config, update) -> None:
             configured_path = classifier_model_paths(vlm["cop_classifier"]).get(settings["input_mode"])
             if not configured_path or Path(configured_path).resolve() != settings["output_file"].resolve():
                 raise ValueError("Classifier training output_file must match model_paths for benchmark scoring.")
+        if getattr(arguments, "lora_training_config", None):
+            from rynnbrain_vlm.benchmark_training import run_lora_training
+            run_lora_training(arguments.lora_training_config, data_root,
+                              vlm["model"]["lora_adapter_path"], update, startup_ignore_sec)
+            update(phase="classifier_preparation")
         print("Loading RynnBrain once for classifier preparation and benchmark evaluation...")
         started = clock()
         model = RynnBrainModel(vlm["model"])
@@ -869,12 +874,23 @@ def _run_benchmark(arguments, config, update) -> None:
 def main() -> None:
     arguments = parse_arguments()
     config = load_pipeline_config(arguments.config)
+    from rynnbrain_vlm.benchmark_training import train_lora_enabled, prepare_pipeline_run, save_reusable_config
+    automatic_training = train_lora_enabled(config)
     base = config.get("rynnbrain", {}).get("output_dir", str(Path(config.get("output_dir", "outputs")) / "rynnbrain"))
     directory = arguments.benchmark_dir or Path(f"{base}_benchmark")
     directory = directory / (config.get('vlm_benchmark') or {}).get('decision_mode', 'whole_demo')
+    if automatic_training:
+        arguments, config, directory = prepare_pipeline_run(arguments, config)
     with record_run(directory, "benchmark") as update:
         update(arguments=vars(arguments) | {key: str(value) for key, value in vars(arguments).items() if isinstance(value, Path)})
+        if automatic_training:
+            update(automatic_lora_training=True, effective_config=str(arguments.config))
+            print(f"Automatic LoRA -> classifier -> benchmark run: {arguments.benchmark_dir}", flush=True)
+            print(f"Effective configuration: {arguments.config}", flush=True)
         _run_benchmark(arguments, config, update)
+        if automatic_training:
+            save_reusable_config(arguments.config, config)
+            print(f"Reusable trained configuration (no retraining): {arguments.config}", flush=True)
 
 
 if __name__ == "__main__":
