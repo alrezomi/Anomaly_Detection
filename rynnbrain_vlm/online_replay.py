@@ -239,6 +239,8 @@ class OnlineDetector:
 
         self.config = config
         self.vlm = vlm = config["rynnbrain"]
+        from .runtime import feature_only_enabled
+        self.feature_only = feature_only_enabled(vlm)
         if vlm.get("source") != "rosbag" or vlm.get("input_modes", ["raw"]) != ["raw"]:
             raise ValueError("Online replay currently requires raw rosbag inputs.")
         if len(vlm["camera_topics"]) != 1:
@@ -296,12 +298,34 @@ class OnlineDetector:
             dict(role="user", images=nominal, text=task_context_prompt(task, temporal=temporal, variant=vlm.get('prompt_variant', 'A'))),
             self.response, evaluation_prompt_multiturn(task, "raw", temporal=temporal, variant=vlm.get('prompt_variant', 'A')), generation,
             self.frame_count)
+        if not self.feature_only:
+            progress("VLM text output enabled: each observation also generates a separate answer; this adds latency")
 
     def reset(self, bag):
         if Path(bag).name in self.excluded:
             raise ValueError("This bag was used for LoRA/classifier training or as the reference; select a held-out bag.")
         self.cache.reset()
+        self.bag = str(bag)
         self.last_timestamp = None
+
+    def text_output(self, index, timestamp):
+        """Optional generated answer; never replaces the cached classifier score."""
+        result = dict(vlm_response=None, vlm_response_error=None, vlm_generation_sec=0.,
+                      vlm_response_source="not_generated")
+        if self.feature_only:
+            return result
+        title = f"VLM response | {Path(self.bag).name} | observation {index + 1}/{self.frame_count} | t={timestamp:.3f}s"
+        started = synchronized_time()
+        try:
+            result["vlm_response"] = self.cache.generate_response()
+            result["vlm_response_source"] = "lora_adapted_model" if self.model.adapter_identity else "base_model"
+            print(f"\n{title}\n{result['vlm_response']}\n", flush=True)
+        except (RuntimeError, ValueError) as error:
+            result["vlm_response_error"] = str(error)
+            print(f"\n{title}\nText generation failed; keeping the classifier score: {error}\n", flush=True)
+        finally:
+            result["vlm_generation_sec"] = synchronized_time() - started
+        return result
 
     def prepare_matching(self, bag, progress, stop):
         from .visual_matching import read_recorded_stages, build_visual_memory
@@ -365,6 +389,7 @@ class OnlineDetector:
             baseline_score, _ = self.score(baseline, index)
             check["uncached_feature_sec"] = uncached_sec
             finish_verification(check, score, baseline_score, threshold)
+        text = self.text_output(index, timestamp)
         self.last_timestamp = timestamp
         return dict(sample_index=index, timestamp_sec=timestamp, anomaly_score=score,
                     threshold=threshold, above_threshold=score >= threshold,
@@ -372,7 +397,7 @@ class OnlineDetector:
                     peak_gpu_allocated_bytes=memory,
                     score_kind="knn_distance" if self.knn else "failure_probability",
                     visual_matching=matching, visual_matching_sec=matching_sec,
-                    verification=check), vector, baseline
+                    verification=check, **text), vector, baseline
 
 
 def save_plot(rows, path, probability):

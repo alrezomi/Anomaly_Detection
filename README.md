@@ -1397,7 +1397,8 @@ the resulting defaults are:
 | Setting | Relative to the experiment root |
 | --- | --- |
 | Single-test outputs | `rynnbrain/` |
-| Benchmark and classifier-training vectors | `rynnbrain_benchmark/` |
+| Benchmark evaluation outputs | `rynnbrain_benchmark/timeline/` or `rynnbrain_benchmark/whole_demo/` |
+| Shared classifier-training vectors and responses | `rynnbrain_benchmark/classifier_training/` |
 | Temporal LoRA training output | `rynnbrain/lora_temporal_adapter/` |
 | Ordinary LoRA training output | `rynnbrain/lora_adapter/` |
 | Logistic classifier, raw mode | `cop_classifier/raw_logistic.npz` |
@@ -1607,6 +1608,22 @@ test graph.
 processes its selected bag set and exports combined tables/plots. The GUI
 processes only the bag you start, saving each execution under `online_replay/`.
 It does not launch or monitor a benchmark, nor automatically combine its results.
+
+When `rynnbrain.inference.feature_only` is `false` (also the default when omitted),
+browser VLM replay additionally generates an answer for **each sampled observation
+history**, starting with the first frame. The server prints the bag name,
+observation number, timestamp, and unmodified model answer to its terminal/Docker
+logs. It also saves `vlm_response`, `vlm_response_source`, `vlm_response_error`, and
+`vlm_generation_sec` in `online_results.json` and `online_scores.csv`.
+This is a separate generation pass over the same reference and frames observed
+so far; it adds latency and can change which elapsed-time observations are sampled.
+The classifier score still comes from the cached prompt vector. Generated answers
+are not fed back into the scoring history or used to replace its decisions.
+An optional text-generation failure is logged without discarding the score.
+`feature_only: true` skips these extra calls. The learned adapter determines the
+answer format; enabling text does not itself add visual explanations to an adapter
+trained only on decisions and onset times. This does not enable per-prefix text
+generation in the offline benchmark, whose existing final-answer behavior is unchanged.
 
 The GUI's **Find similar nominal frame** switch displays the exact scored observation beside
 its closest nominal image in the recorded stage. This is an experimental
@@ -2551,6 +2568,14 @@ Timeline results go into `<rynnbrain.output_dir>_benchmark/timeline/` (or
 `<rynnbrain.output_dir>_benchmark/whole_demo/` folder (or
 `<--benchmark-dir>/whole_demo/`). Existing reports in the parent directory are
 left in place; new runs do not move or rewrite them.
+Classifier preparation has a separate, shared default directory:
+`<rynnbrain.output_dir>_benchmark/classifier_training/<training_bag>/rynnbrain_multiturn/`.
+Those bags are training inputs, not duplicate evaluated demonstrations. Keeping
+them shared avoids extracting them again just because the decision mode changes.
+Explicit `cop_classifier.training.input_dir` overrides are still honored. Compatible
+training artifacts from the older loose-bag layout beside `timeline/` are read in
+place when needed; refreshed/new training artifacts use the grouped directory.
+Existing folders, graphs, and outputs are never deleted by this layout change.
 Each observation is scored using only the selected current and preceding execution
 images, without waiting for recording time to pass. This uses existing offline
 prefix sampling (normally 1, 2, ... 8 observations), not the online replay's

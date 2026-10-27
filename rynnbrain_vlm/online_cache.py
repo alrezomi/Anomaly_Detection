@@ -150,3 +150,17 @@ class CachedExecution:
             self.reference_turn,
             {"role": "user", "images": self.images, "text": self.evaluation_text}],
             self.generation, reference_response=self.reference_response)
+
+    def generate_response(self):
+        """Generate optional text for this prefix without extending the scoring cache.
+
+        This independent pass uses the same reference and observed frames. Answers
+        are diagnostics, never part of the next observation's classifier context.
+        """
+        if self.failed or not self.images:
+            raise RuntimeError("A valid scored observation is required before generating text.")
+        _, response = self.wrapper.generate_multiturn([
+            self.reference_turn,
+            {"role": "user", "images": list(self.images), "text": self.evaluation_text}],
+            self.generation, reference_response=self.reference_response)
+        return response

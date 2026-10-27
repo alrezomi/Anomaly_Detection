@@ -553,6 +553,7 @@ def _run_benchmark(arguments, config, update) -> None:
         model = RynnBrainModel(vlm["model"])
         update(model_load_sec=clock() - started)
         for settings in settings_by_mode:
+            print(f"Classifier-training artifacts (separate from evaluated bags): {settings['input_directory']}")
             paths, reference_response = prepare_training_vectors(config, settings, model=model, data_root=data_root)
             classifier_metadata = train_from_saved_vectors(**settings, metadata_paths=paths)
             print(f"Prepared {settings['method']} classifier: {classifier_metadata['model_file']}")

@@ -19,6 +19,41 @@ from rynnbrain_vlm.online_replay import (ReplayFeed, SequentialReplayFeed, gmr_s
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_optional_answers_are_logged_for_each_prefix_without_replacing_scores(self):
+        import torch
+        detector = OnlineDetector.__new__(OnlineDetector)
+        detector.vlm = {"camera_topics": ["top"]}
+        detector.model = SimpleNamespace(temporal_profile={}, adapter_identity="adapter")
+        detector.bag, detector.frame_count = "heldout_bag", 8
+        detector.last_timestamp = None
+        detector.capture_visual = detector.knn = False
+        detector.feature_only = False
+        images = []
+        def append(label, image, **kwargs):
+            images.append((label, image))
+            return torch.tensor([1., .2])
+        detector.cache = SimpleNamespace(images=images, append=append,
+            generate_response=Mock(side_effect=["Decision: success\nFailure onset (s): none", RuntimeError("out of memory")]))
+        detector.score = Mock(return_value=(.73, .6))
+        with patch("builtins.print") as terminal:
+            first, vector, _ = detector.append(Image.new("RGB", (2, 2)), 1.)
+            second, _, _ = detector.append(Image.new("RGB", (2, 2)), 11.)
+            detector.feature_only = True
+            third, _, _ = detector.append(Image.new("RGB", (2, 2)), 21.)
+        self.assertEqual(detector.cache.generate_response.call_count, 2)
+        for row in (first, second, third):
+            self.assertEqual(row["anomaly_score"], .73)
+            self.assertTrue(row["above_threshold"])
+        self.assertEqual(first["vlm_response"], "Decision: success\nFailure onset (s): none")
+        self.assertEqual(first["vlm_response_source"], "lora_adapted_model")
+        self.assertEqual(second["vlm_response_error"], "out of memory")
+        self.assertIsNone(third["vlm_response"])
+        self.assertEqual(third["vlm_generation_sec"], 0.)
+        log = "\n".join(str(call.args[0]) for call in terminal.call_args_list)
+        self.assertIn("heldout_bag | observation 1/8 | t=1.000s", log)
+        self.assertIn(first["vlm_response"], log)
+        self.assertIn("keeping the classifier score", log)
+
     def test_gui_ts_selection_is_separate_from_pipeline_config(self):
         config = {'rynnbrain': {'num_frames': 8}}
         app = ReplayApplication(config, [Path('heldout')], 10., False)

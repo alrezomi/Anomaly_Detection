@@ -30,7 +30,7 @@ class PipelineSettingsTests(unittest.TestCase):
             root = Path(config["output_dir"])
             self.assertEqual(Path(vlm["output_dir"]), root / "rynnbrain")
             self.assertEqual(Path(vlm["lora"]["training"]["output_dir"]), root / "rynnbrain/lora_temporal_adapter")
-            self.assertEqual(Path(vlm["cop_classifier"]["training"]["input_dir"]), root / "rynnbrain_benchmark")
+            self.assertEqual(Path(vlm["cop_classifier"]["training"]["input_dir"]), root / "rynnbrain_benchmark/classifier_training")
             self.assertEqual(Path(vlm["cop_classifier"]["model_paths"]["raw"]), root / "cop_classifier/raw_logistic.npz")
             self.assertEqual(vlm["camera_topics"], ["top"])
             self.assertEqual(vlm["memory_camera_topics"], ["top"])
