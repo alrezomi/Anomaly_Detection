@@ -84,6 +84,7 @@ def write_roc_report(master_rows: list[dict[str, Any]], benchmark_root: Path) ->
     metrics: list[dict[str, Any]] = []
     points: list[dict[str, Any]] = []
     plot_files: list[str] = []
+    unavailable_plot_files = []
     for mode, group in dataframe.dropna(subset=["input_mode"]).groupby("input_mode", sort=True):
         categories = sorted(group.loc[group["ground_truth_label"] == "fail", "failure_category"].unique())
         curves = []
@@ -159,7 +160,11 @@ def write_roc_report(master_rows: list[dict[str, Any]], benchmark_root: Path) ->
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", str(mode)).strip("_").lower()
         plot_path = output_dir / f"roc_{slug}.png"
         if not curves:
-            plot_path.unlink(missing_ok=True)
+            from .report_artifacts import unavailable_plot
+            reason = next(item['reason'] for item in metrics
+                          if item['input_mode'] == str(mode) and item['failure_category'] == 'all_failures')
+            unavailable_plot(plot_path, f'Generated VLM decision ROC / {mode}', reason)
+            unavailable_plot_files.append(str(plot_path))
             continue
         import matplotlib
 
@@ -204,6 +209,7 @@ def write_roc_report(master_rows: list[dict[str, Any]], benchmark_root: Path) ->
         "rows_without_input_mode": int(dataframe["input_mode"].isna().sum()),
         "metrics": metrics,
         "plot_files": plot_files,
+        "unavailable_plot_files": unavailable_plot_files,
     }
     (output_dir / "roc_summary.json").write_text(
         json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
@@ -262,6 +268,7 @@ def _write_score_roc_report(
     output_dir = Path(benchmark_root) / ("benchmark_anomaly_roc" if anomaly else "benchmark_probability_roc")
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics, points, plot_files = [], [], []
+    unavailable_plot_files = []
     modes = sorted(set(input_modes or []) | set(dataframe["input_mode"].dropna().astype(str)))
     for mode in modes:
         group = dataframe[dataframe["input_mode"] == mode]
@@ -306,8 +313,12 @@ def _write_score_roc_report(
             _plot_probability_curves(curves, mode, roc_path, auc_path, anomaly=anomaly, timeline=timeline)
             plot_files.extend([str(roc_path), str(auc_path)])
         else:
-            roc_path.unlink(missing_ok=True)
-            auc_path.unlink(missing_ok=True)
+            from .report_artifacts import unavailable_plot
+            reason = next(item['reason'] for item in metrics
+                          if item['input_mode'] == mode and item['failure_category'] == 'all_failures')
+            for path, title in ((roc_path, 'ROC'), (auc_path, 'AUROC')):
+                unavailable_plot(path, f'Classifier {title} / {mode}', reason)
+                unavailable_plot_files.append(str(path))
     pd.DataFrame(metrics, columns=[
         "input_mode", "failure_category", "normal_count", "failure_count", f"missing_{score_name}_count",
         f"invalid_{score_name}_count", f"excluded_{score_name}_count", "unknown_label_count", f"{score_name}_coverage",
@@ -327,6 +338,7 @@ def _write_score_roc_report(
         "comparison": "Each failure category versus normal; other failures excluded. Input modes are separate.",
         "rows_without_input_mode": int(dataframe["input_mode"].isna().sum()),
         "metrics": metrics, "plot_files": plot_files,
+        "unavailable_plot_files": unavailable_plot_files,
     }
     if timeline:
         report['score_units'] = 'maximum prefix score / its threshold' if anomaly else 'maximum prefix failure score in [0, 1]; not a calibrated bag probability'

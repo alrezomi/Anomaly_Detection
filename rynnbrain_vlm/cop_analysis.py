@@ -278,11 +278,13 @@ def _write_score_report(
         if valid_count:
             _write_probability_plot(groups, points, styles, mode, plot_path, anomaly=anomaly, timeline=timeline)
         else:
-            # Do not leave a previous run's plot masquerading as this result.
-            plot_path.unlink(missing_ok=True)
+            from .report_artifacts import unavailable_plot
+            unavailable_plot(plot_path, f'Classifier score by outcome / {mode}',
+                             'No valid scores with known ground truth.')
         mode_reports.append({"input_mode": mode, "status": "created" if valid_count else "skipped",
                              "reason": None if valid_count else "No valid scores with known ground truth.",
                              "plot_file": str(plot_path) if valid_count else None,
+                             "unavailable_plot_file": str(plot_path) if not valid_count else None,
                              "scored_rows": valid_count, "excluded_rows": excluded, "groups": summaries})
     csv_path = output_directory / f"{file_prefix}_summary.csv"
     pd.DataFrame(summary_rows, columns=columns).to_csv(csv_path, index=False)
@@ -467,27 +469,25 @@ def analyze_saved_vectors(
             "usable_count": len(usable),
             "excluded_unknown_count": len(mode_records) - len(usable),
         }
+        def unavailable(reason):
+            from .report_artifacts import unavailable_plot
+            path = output / f'cop_pca_{_slug(input_mode)}.png'
+            unavailable_plot(path, f'Feature PCA / {input_mode}', reason)
+            mode_summary.update(status='skipped', reason=reason, unavailable_plot_file=str(path))
+            summary['modes'].append(mode_summary)
+
         if not usable:
-            mode_summary.update(status="skipped", reason="no normal/fail vectors")
-            summary["modes"].append(mode_summary)
+            unavailable('no normal/fail vectors')
             continue
 
         dimensions = {record.vector.size for record in usable}
         if len(dimensions) != 1:
-            mode_summary.update(
-                status="skipped",
-                reason=f"inconsistent vector dimensions: {sorted(dimensions)}",
-            )
-            summary["modes"].append(mode_summary)
+            unavailable(f"inconsistent vector dimensions: {sorted(dimensions)}")
             continue
 
         signatures = {_comparison_signature(record) for record in usable}
         if len(signatures) != 1:
-            mode_summary.update(
-                status="skipped",
-                reason="vectors were produced with different comparison settings",
-            )
-            summary["modes"].append(mode_summary)
+            unavailable('vectors were produced with different comparison settings')
             continue
 
         rows = [
@@ -504,20 +504,13 @@ def analyze_saved_vectors(
         ]
         labels = {row["label"] for row in rows}
         if labels != set(PCA_LABELS):
-            missing = sorted(set(PCA_LABELS) - labels)
-            mode_summary.update(
-                status="skipped",
-                reason=f"missing ground-truth class(es): {', '.join(missing)}",
-            )
-            summary["modes"].append(mode_summary)
-            continue
+            mode_summary['note'] = 'Single-class PCA: shows variation within the available class, not normal/failure separation.'
 
         matrix = np.stack([record.vector for record in usable])
         try:
             coordinates, components, explained_ratio, feature_mean = pca_2d(matrix)
         except ValueError as error:
-            mode_summary.update(status="skipped", reason=str(error))
-            summary["modes"].append(mode_summary)
+            unavailable(str(error))
             continue
 
         stem = _slug(input_mode)

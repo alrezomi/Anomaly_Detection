@@ -12,6 +12,19 @@ from rynnbrain_vlm.benchmark_roc import failure_category, roc_curve, write_roc_r
 
 
 class BenchmarkRocTests(unittest.TestCase):
+    def test_unavailable_panel_states_reason_without_plotting_a_curve(self):
+        from unittest.mock import patch
+        import matplotlib.pyplot as plt
+        from rynnbrain_vlm.report_artifacts import unavailable_plot
+        with tempfile.TemporaryDirectory() as directory:
+            def inspect(*args, **kwargs):
+                axis = plt.gcf().axes[0]
+                self.assertEqual(len(axis.lines), 0)
+                self.assertTrue(any('Unavailable for this run' in item.get_text() for item in axis.texts))
+                self.assertTrue(any('failure labels' in item.get_text() for item in axis.texts))
+            with patch('matplotlib.figure.Figure.savefig', side_effect=inspect):
+                unavailable_plot(Path(directory)/'roc.png', 'ROC', 'No failure labels are available.')
+
     def _row(self, name, label, decision, category="Failure_1_grasp_miss", mode="raw"):
         folder = "Nominal/setting 1" if label == "normal" else category
         return {
@@ -218,16 +231,18 @@ class BenchmarkRocTests(unittest.TestCase):
             self.assertEqual(metric["invalid_probability_count"], 4)
             self.assertEqual(metric["unknown_label_count"], 1)
             self.assertEqual(report["rows_without_input_mode"], 1)
-            # A subsequent run with no scores must not retain the earlier plots.
+            # A subsequent run replaces curves with explicitly unavailable plots.
             empty = write_probability_roc_report([], root, input_modes=["raw"])
             self.assertEqual(empty["plot_files"], [])
             self.assertEqual(empty["metrics"][0]["status"], "skipped")
             self.assertIsNone(empty["metrics"][0]["auroc"])
             for path in report["plot_files"]:
-                self.assertFalse(Path(path).exists())
+                self.assertTrue(Path(path).exists())
+                self.assertIn(path, empty['unavailable_plot_files'])
             missing_class = write_probability_roc_report(rows[:1], root)
             self.assertEqual(missing_class["plot_files"], [])
             self.assertIsNone(missing_class["metrics"][0]["auroc"])
+            self.assertEqual(len(missing_class['unavailable_plot_files']), 2)
 
     def test_perfect_ranking_can_miss_failures_at_the_saved_threshold(self):
         rows = [{**self._row(str(i), label, "uncertain"),

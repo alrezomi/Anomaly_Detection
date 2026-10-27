@@ -85,6 +85,10 @@ class BenchmarkSelectionTests(unittest.TestCase):
                 _run_benchmark(args, config, lambda **kwargs: None)
             self.assertEqual(evaluate.call_args.args[2]['cop_classifier']['plot_timeline'], mode == 'timeline')
             output = root/'reports'/mode
+            index = (output/'REPORTS.md').read_text(encoding='utf-8')
+            self.assertIn('benchmark_probability_roc/roc_raw.png', index)
+            self.assertIn('benchmark_probability_roc/auroc_raw.png', index)
+            self.assertIn('ROC requires both normal and failure', index)
             summary = pd.read_csv(output/'benchmark_summary.csv').iloc[0]
             if mode == 'whole_demo':
                 self.assertEqual(summary.classifier_decision,'success')
