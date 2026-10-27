@@ -16,9 +16,6 @@ def training_profile(config, settings):
     enabled = settings.get("temporal_supervision", False)
     if not isinstance(enabled, bool):
         raise ValueError("lora.training.temporal_supervision must be true or false.")
-    predict_time = settings.get('predict_failure_time', True)
-    if not isinstance(predict_time, bool):
-        raise ValueError('lora.training.predict_failure_time must be true or false.')
     if not enabled:
         return {}
     vlm = config["rynnbrain"]
@@ -32,12 +29,9 @@ def training_profile(config, settings):
             raise ValueError(f"Temporal LoRA requires nonempty, unique {name}.")
     if memory != topics:
         raise ValueError("Temporal LoRA requires the same ordered camera_topics and memory_camera_topics.")
-    profile = {"protocol": PROTOCOL, "camera_topics": list(topics), "memory_camera_topics": list(memory),
+    return {"protocol": PROTOCOL, "camera_topics": list(topics), "memory_camera_topics": list(memory),
             "num_frames": int(vlm.get("num_frames", 4)), "input_mode": "raw", "source": "rosbag",
             "timestamp_decimals": 3}
-    if not predict_time:
-        profile['predict_failure_time'] = False
-    return profile
 
 
 def adapter_profile(adapter_path):
@@ -102,15 +96,11 @@ def prefix_samples(row, images, metadata, profile, annotation):
     samples = []
     for snapshot in snapshots:
         failed = onset is not None and snapshot["timestamp_sec"] >= onset
-        # The input carries observation timestamps. The recorded onset assigns
-        # prefix labels; including its numeric value in the answer is optional.
-        target = (temporal_answer('fail' if failed else 'normal', onset if failed else None)
-                  if profile.get('predict_failure_time', True) else
-                  f"Decision: {'failure' if failed else 'success'}")
+        # The input carries frame times only; the annotation occurs exclusively in the answer.
         samples.append({**row, "bag_label": row["label"], "label": "fail" if failed else "normal",
                         "prefix_index": snapshot["sample_index"], "cutoff_sec": snapshot["timestamp_sec"],
                         "images": [images[index] for index in snapshot["image_indices"]],
-                        "target_text": target})
+                        "target_text": temporal_answer("fail" if failed else "normal", onset if failed else None)})
     return samples
 
 

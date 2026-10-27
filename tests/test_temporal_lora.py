@@ -14,33 +14,6 @@ from rynnbrain_vlm.prompts import evaluation_prompt_multiturn
 
 
 class TemporalLoraTests(unittest.TestCase):
-    def test_decision_only_targets_keep_timestamps_prefixes_and_onset_based_labels(self):
-        self.config['rynnbrain']['lora']['training']['predict_failure_time'] = False
-        profile = training_settings(self.config)['temporal_profile']
-        self.assertFalse(profile['predict_failure_time'])
-        images = timestamped_images(self.images, self.frames, ['top', 'side'], 3)
-        old = prefix_samples(self.row, images, self.frames, self.profile, self.annotation)
-        samples = prefix_samples(self.row, images, self.frames, profile, self.annotation)
-        self.assertEqual([item['label'] for item in samples], ['normal', 'fail', 'fail'])
-        self.assertEqual([item['target_text'] for item in samples],
-                         ['Decision: success', 'Decision: failure', 'Decision: failure'])
-        self.assertEqual([item['images'] for item in samples], [item['images'] for item in old])
-        self.assertEqual([item['cutoff_sec'] for item in samples], [item['cutoff_sec'] for item in old])
-        self.assertIn('time 1.000 s', samples[0]['images'][0][0])
-        exact = prefix_samples(self.row, images, self.frames, profile, {**self.annotation, 'time_sec': 5.2})
-        self.assertEqual(exact[1]['target_text'], 'Decision: failure')
-        normal = prefix_samples({**self.row, 'label': 'normal'}, images, self.frames, profile,
-                                {'status': 'missing_marker', 'time_sec': None})
-        self.assertTrue(all(item['target_text'] == 'Decision: success' for item in normal))
-        with self.assertRaisesRegex(ValueError, 'outside'):
-            prefix_samples(self.row, images, self.frames, profile, {**self.annotation, 'time_sec': 10.})
-
-    def test_predict_failure_time_requires_a_boolean(self):
-        for value in ('false', 0, None):
-            self.config['rynnbrain']['lora']['training']['predict_failure_time'] = value
-            with self.assertRaisesRegex(ValueError, 'predict_failure_time'):
-                training_settings(self.config)
-
     def setUp(self):
         self.config = {"camera_topics": ["top", "side"], "output_dir": "outputs", "rynnbrain": {
             "source": "rosbag", "input_modes": ["raw"], "num_frames": 3,
