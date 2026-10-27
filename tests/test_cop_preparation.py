@@ -139,7 +139,7 @@ class ClassifierPreparationTests(unittest.TestCase):
              patch.object(benchmark, "infer_bag_record", side_effect=lambda path, *a: {
                  "bag_name": path.name, "bag_path": str(path), "label": "fail" if path.name.startswith("failure") else "normal"}):
             benchmark.main()
-        root = self.root / "benchmark_vlm_benchmark"
+        root = self.root / "benchmark_vlm_benchmark/whole_demo"
         clean = pd.read_csv(root / "benchmark_clean.csv")
         self.assertEqual(set(clean.bag_name), {"normal_test", "failure_test"})
         self.assertTrue(clean.correct.isna().all())
@@ -176,6 +176,28 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.assertEqual(self.extractions["failure_1"], 2)
         prepare_training_vectors(self.config, self.settings, model=self.model, refresh=True)
         self.assertEqual(self.extractions["failure_1"], 3)
+
+    def test_grouped_training_folder_reuses_legacy_files_and_writes_new_artifacts_separately(self):
+        legacy = {**self.settings, "input_directory": self.root / "legacy_benchmark"}
+        paths, _ = prepare_training_vectors(self.config, legacy, model=self.model)
+        original_bytes = {path: path.read_bytes() for path in paths}
+        grouped = {**legacy, "input_directory": legacy["input_directory"] / "classifier_training"}
+        # --saved-vectors-only must still work before the new directory exists.
+        trained = train_from_saved_vectors(**grouped)
+        self.assertEqual(set(trained["training_bags"]), set(self.names))
+        reused, _ = prepare_training_vectors(self.config, grouped, model=self.model)
+        self.assertEqual(reused, paths)
+        self.assertEqual(self.extractions, Counter(self.names))
+        self.assertFalse(any(grouped["input_directory"].iterdir()))
+
+        self.model.adapter_identity = "new_adapter"
+        refreshed, _ = prepare_training_vectors(self.config, grouped, model=self.model)
+        self.assertTrue(all(path.is_relative_to(grouped["input_directory"]) for path in refreshed))
+        self.assertEqual(self.extractions, Counter({name: 2 for name in self.names}))
+        # Prefer the new files on the next call; the original outputs stay intact.
+        prepare_training_vectors(self.config, grouped, model=self.model)
+        self.assertEqual(self.extractions, Counter({name: 2 for name in self.names}))
+        self.assertEqual({path: path.read_bytes() for path in paths}, original_bytes)
 
     def test_reference_overlap_and_stochastic_generation_are_rejected(self):
         self.config["rynnbrain"]["reference_bags"] = [self.settings["bag_names"][0]]
@@ -326,7 +348,7 @@ class ClassifierPreparationTests(unittest.TestCase):
         self.settings = configured_training_settings(self.config_path)
         self._check_benchmark_workflow()
         self.assertTrue((self.root / "outputs/cop_classifier/raw_logistic.npz").is_file())
-        self.assertTrue((self.root / "outputs/rynnbrain_benchmark/normal_1/rynnbrain_multiturn/cop_vectors/raw.npy").is_file())
+        self.assertTrue((self.root / "outputs/rynnbrain_benchmark/classifier_training/normal_1/rynnbrain_multiturn/cop_vectors/raw.npy").is_file())
 
     def test_reuse_logistic_keeps_artifacts_and_skips_all_preparation(self):
         self._check_classifier_reuse(knn=False)
@@ -355,7 +377,7 @@ class ClassifierPreparationTests(unittest.TestCase):
             self._check_benchmark_workflow(knn=knn, output=output)
         self.model.generate_nominal.assert_not_called()
         self.assertEqual(artifacts, {path: path.read_bytes() for path in artifact_dir.rglob("*") if path.is_file()})
-        runtime = json.loads((output / "benchmark_runtime.json").read_text())
+        runtime = json.loads((output / "whole_demo/benchmark_runtime.json").read_text())
         self.assertEqual(runtime["classifier_mode"], "reuse")
         self.assertEqual(runtime["classifier_preparation_sec"], 0.)
         self.assertFalse((self.root / "new_run/cop_classifier").exists())
@@ -383,6 +405,7 @@ class ClassifierPreparationTests(unittest.TestCase):
              patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
             benchmark.main()
         factory.assert_called_once_with(self.config["rynnbrain"]["model"])
+        output = output / "whole_demo"
         test_names = ["normal_test", "failure_test"] + (self.names[2:] if knn else [])
         self.assertEqual(dino.call_count, len(test_names) if dino_requested else 0)
         self.assertEqual(self.extractions, Counter(self.names + ["normal_test", "failure_test"]))
@@ -446,7 +469,7 @@ class ClassifierPreparationTests(unittest.TestCase):
             return [(path.name, Image.new("RGB", (2, 2))) for _ in frames], frames
         with patch("rynnbrain_vlm.run._raw_inputs", side_effect=inputs):
             self._check_benchmark_workflow(knn=True)
-            summary = pd.read_csv(self.root / "benchmark/benchmark_summary.csv")
+            summary = pd.read_csv(self.root / "benchmark/whole_demo/benchmark_summary.csv")
             self.assertTrue((summary.knn_timeline_status == "created").all())
             self.assertEqual(self.model.extract_multiturn_cop_vector.call_count, 12)
             for _, row in summary.iterrows():
@@ -491,7 +514,7 @@ class ClassifierPreparationTests(unittest.TestCase):
             benchmark.main()
         factory.assert_not_called()
         self.assertFalse(self.model_path.exists())
-        statistics = json.loads((output / "benchmark_statistics.json").read_text())
+        statistics = json.loads((output / "whole_demo/benchmark_statistics.json").read_text())
         self.assertEqual(statistics["failure_probability"]["modes"][0]["status"], "skipped")
 
     def test_onset_benchmark_prepares_training_prefixes_and_preserves_main_outputs(self):
@@ -520,7 +543,7 @@ class ClassifierPreparationTests(unittest.TestCase):
             self.assertTrue(all(Path(call.args[0]).name in self.names for call in labels.call_args_list))
             onset = load_classifier(onset_model_path(self.model_path))
             self.assertEqual(onset.metadata["training_prefix_count"], 12)
-            summary = pd.read_csv(self.root / "benchmark/benchmark_summary.csv")
+            summary = pd.read_csv(self.root / "benchmark/whole_demo/benchmark_summary.csv")
             self.assertTrue((summary.logistic_timeline_status == "created").all())
             for _, row in summary.iterrows():
                 timeline = pd.read_csv(row.logistic_timeline_csv)
@@ -556,7 +579,7 @@ class ClassifierPreparationTests(unittest.TestCase):
              patch.object(benchmark, "analyze_saved_vectors", return_value=None), \
              patch.object(benchmark, "write_roc_report", return_value={"metrics": []}):
             benchmark.main()
-        row = pd.read_csv(output / "benchmark_summary.csv").iloc[0]
+        row = pd.read_csv(output / "whole_demo/benchmark_summary.csv").iloc[0]
         self.assertEqual(row.decision, "failed")
         self.assertEqual(row.evaluation_error, "test generation failed")
         self.assertTrue(pd.isna(row.response))

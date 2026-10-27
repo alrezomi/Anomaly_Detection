@@ -301,9 +301,13 @@ class RynnBrainModel:
         self,
         turns: list[dict[str, Any]],
         generation: dict[str, Any],
+        *,
+        reference_response: str | None = None,
     ) -> tuple[str, str]:
         """Generate the two responses without exporting an internal vector."""
-        result = self._generate_multiturn(turns, generation, capture_cop_vector=False)
+        result = self._generate_multiturn(
+            turns, generation, capture_cop_vector=False, reference_response=reference_response
+        )
         return result.nominal_response, result.evaluation_response
 
     def generate_multiturn_with_cop_vector(

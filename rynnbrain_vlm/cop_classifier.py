@@ -430,6 +430,21 @@ def _select_training_records(
     return usable
 
 
+def _training_vector_candidates(root: Path, mode: str) -> list[SavedCoPVector]:
+    """Find grouped training artifacts, falling back to the old loose-bag layout."""
+    current, legacy = [], []
+    paths = [(path, current) for path in sorted(root.glob("**/cop_vectors/*.json"))]
+    if root.name == "classifier_training":
+        paths += [(path, legacy) for path in sorted(root.parent.glob("*/rynnbrain_multiturn/cop_vectors/*.json"))]
+    for path, destination in paths:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        if metadata.get("input_mode") == mode:
+            destination.append(SavedCoPVector(path.parent / Path(metadata.get("vector_file", "")).name,
+                                              path, np.empty(0), metadata))
+    current_keys = set().union(*(_training_record_keys(record) for record in current))
+    return current + [record for record in legacy if not current_keys.intersection(_training_record_keys(record))]
+
+
 def train_from_saved_vectors(
     input_directory: Path,
     output_file: Path,
@@ -452,8 +467,16 @@ def train_from_saved_vectors(
         raise ValueError("Onset training requires logistic/raw and an explicit training bag selection.")
     if method == "knn" and not bag_names:
         raise ValueError("Nominal kNN requires an explicit normal_bags selection; never train on all benchmark vectors.")
+    input_directory = Path(input_directory)
+    read_root = input_directory
+    if metadata_paths is None and input_directory.name == "classifier_training":
+        selected = _select_training_records(_training_vector_candidates(input_directory, input_mode),
+                                            input_mode, bag_names or [])
+        metadata_paths = [record.metadata_path for record in selected]
+        if not read_root.is_dir():
+            read_root = read_root.parent
     records = _select_training_records(
-        discover_saved_vectors(input_directory, metadata_paths), input_mode, bag_names or []
+        discover_saved_vectors(read_root, metadata_paths), input_mode, bag_names or []
     )
     if not records:
         raise ValueError(f"No labeled {input_mode!r} vectors were found.")
@@ -760,12 +783,9 @@ def prepare_training_vectors(
         raise ValueError("Select reference_bags separately from classifier training bags.")
     root, mode = Path(settings["input_directory"]), settings["input_mode"]
     overrides = {_normalize_bag_selector(key): value for key, value in settings["label_overrides"].items()}
-    candidates = []
-    for path in sorted(root.glob("**/cop_vectors/*.json")):
-        metadata = json.loads(path.read_text(encoding="utf-8"))
-        if metadata.get("input_mode") == mode:
-            candidates.append(SavedCoPVector(path.parent / Path(metadata.get("vector_file", "")).name,
-                                             path, np.empty(0), metadata))
+    # Older versions placed training bags directly beside timeline/whole_demo.
+    # Read those artifacts in place, but write new bags only under the training folder.
+    candidates = _training_vector_candidates(root, mode)
     selected = []
     labels = []
     for selector, name in zip(selectors, names):
@@ -813,6 +833,7 @@ def prepare_training_vectors(
         "text": task_context_prompt(vlm.get("task_description", "Robot manipulation task"), temporal=bool(temporal_profile), variant=vlm.get('prompt_variant', 'A')),
     }, generation)
     expected = cop_comparison_signature(model, config, vlm, mode, reference_response, count, generation)
+    root.mkdir(parents=True, exist_ok=True)
     paths = []
     for selector, name, record, label in selected:
         if not refresh and record is not None and record.metadata.get("comparison_signature") == expected:
@@ -840,7 +861,9 @@ def prepare_training_vectors(
             bag_path = matches[0]
         if not (bag_path / "metadata.yaml").is_file():
             raise FileNotFoundError(f"Training bag not found: {bag_path}")
-        destination = record.metadata_path.parent.parent if record else root / name / "rynnbrain_multiturn"
+        destination = (record.metadata_path.parent.parent
+                       if record and record.metadata_path.is_relative_to(root)
+                       else root / name / "rynnbrain_multiturn")
         bag_config = {**config, "test_bag": str(bag_path), "output_dir": str(root / name)}
         bag_vlm = {**vlm, "input_modes": [mode], "ground_truth_label": label}
         print(f"Extracting classifier training vector: {name} ({mode})")

@@ -55,6 +55,8 @@ class OnlineCacheTests(unittest.TestCase):
                 return BatchFeature(dict(input_ids=torch.tensor([ids]),
                     attention_mask=torch.ones(1, len(ids), dtype=torch.long),
                     pixel_values=torch.cat(pixels), image_grid_thw=torch.tensor(grids)))
+            def decode(self, tokens, **kwargs):
+                return " ".join(str(int(token)) for token in tokens)
         wrapper.processor = Processor()
         reference = dict(role="user", images=[("ref", Image.new("RGB", (4, 4), (1, 0, 0)))], text="Reference")
         before = {name: value.clone() for name, value in wrapper.model.named_parameters()}
@@ -99,6 +101,21 @@ class OnlineCacheTests(unittest.TestCase):
             engine.evaluation_text = "A changed suffix is recomputed"
             vector = engine.append("Frame 1", Image.new("RGB", (4, 4), (3, 0, 0)))
             torch.testing.assert_close(vector, engine.uncached_vector(), rtol=2e-4, atol=2e-5)
+        self.assertTrue(all(torch.equal(before[name], value) for name, value in wrapper.model.named_parameters()))
+        # Optional text must neither contaminate the persistent KV cache nor
+        # replace the reference text with a freshly generated first turn.
+        engine.generation = {"max_new_tokens": 2, "do_sample": False}
+        saved_ids = engine.cached_ids.clone()
+        saved_cache = [(layer.keys.clone(), layer.values.clone()) for layer in engine.cache.layers]
+        with patch.object(wrapper.model, "generate", wraps=wrapper.model.generate) as generate:
+            self.assertTrue(engine.generate_response())
+        self.assertEqual(generate.call_count, 1)
+        torch.testing.assert_close(engine.cached_ids, saved_ids)
+        for layer, (keys, values) in zip(engine.cache.layers, saved_cache):
+            torch.testing.assert_close(layer.keys, keys)
+            torch.testing.assert_close(layer.values, values)
+        following = engine.append("Frame 2", Image.new("RGB", (4, 4), (4, 0, 0)))
+        torch.testing.assert_close(following, engine.uncached_vector(), rtol=2e-4, atol=2e-5)
         self.assertTrue(all(torch.equal(before[name], value) for name, value in wrapper.model.named_parameters()))
 
 

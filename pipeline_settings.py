@@ -46,7 +46,9 @@ def resolve_pipeline_config(config):
 
     classifier = vlm.setdefault("cop_classifier", {})
     classifier_training = classifier.setdefault("training", {})
-    classifier_training["input_dir"] = str(classifier_training.get("input_dir") or f"{vlm['output_dir']}_benchmark")
+    classifier_training["input_dir"] = str(
+        classifier_training.get("input_dir") or Path(f"{vlm['output_dir']}_benchmark") / "classifier_training"
+    )
     if variant == 'B' and config['rynnbrain'].get('cop_classifier', {}).get('training', {}).get('input_dir'):
         classifier_training['input_dir'] = _prompt_b_path(classifier_training['input_dir'])
     if variant == 'B' and classifier_training.get('output_file'):
