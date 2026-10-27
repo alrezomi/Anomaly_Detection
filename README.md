@@ -1321,6 +1321,19 @@ sampled timesteps.
 
 Each training bag supplies eight examples: its first camera pair, then its first
 two pairs, and so on. An example contains only images available by its cutoff.
+To train temporal decision features without numeric time generation, set
+`rynnbrain.lora.training.predict_failure_time: false` together with
+`temporal_supervision: true`. Frame timestamps remain model inputs, and recorded
+failure times still determine whether each prefix is success or failure. The
+answer target is then only `Decision: success` or `Decision: failure` plus EOS.
+There is no numeric onset target or supervised visual explanation. Keep your
+prompt wording; this option changes the training target, not the prompt. The
+training manifest records the selected mode. Existing adapters and the default
+numeric-onset training behavior remain supported. `--validate-only` prints the
+target mode and `failure_marker_sec` for each bag; this timestamp is an annotation,
+not a validation error. With the default `predict_failure_time: true`, the targets
+are as follows.
+
 Before the recorded failure, its answer is:
 
 ```text

@@ -102,6 +102,9 @@ def validate_temporal_rows(config, settings, rows):
     from .run import _raw_inputs
     from .temporal_lora import timestamped_images
     profile = settings["temporal_profile"]
+    print('Temporal LoRA answer target: ' + ('decision and numeric onset time'
+          if profile.get('predict_failure_time', True) else
+          'decision only; recorded onset still determines before/after-failure labels'))
     for bag in config["rynnbrain"]["reference_bags"]:
         images, frames = _raw_inputs(Path(bag), profile["memory_camera_topics"], profile["num_frames"])
         timestamped_images(images, frames, profile["memory_camera_topics"], profile["num_frames"])
@@ -110,7 +113,7 @@ def validate_temporal_rows(config, settings, rows):
         images, frames = _temporal_inputs(row, config, settings)
         samples = prefix_samples(row, images, frames, profile, annotation)
         print(f"Validated {row['bag_name']}: {len(images)} images, {len(samples)} prefixes, "
-              f"error time={annotation.get('time_sec')}", flush=True)
+              f"failure_marker_sec={annotation.get('time_sec')}", flush=True)
 
 
 def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str, str]]) -> None:
@@ -214,6 +217,8 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
         "temporal_training_data": temporal_records,
         "supervision": ("Prefix Decision plus annotated Failure onset (s) and EOS; context/images masked. "
                         "No failure before marker, failure at/after marker including recovery. Numeric time is a token target, not a regression loss."
+                        if temporal and wrapper.temporal_profile.get('predict_failure_time', True) else
+                        "Prefix Decision: success/failure plus EOS only. Frame timestamps remain inputs; recorded onset assigns prefix labels, with no numeric onset answer target."
                         if temporal else "Final Decision: success/failure plus EOS only; context and images masked from loss."),
         "nominal_turn": "Frozen base model; adapter applies only to the execution decision turn.",
     }
