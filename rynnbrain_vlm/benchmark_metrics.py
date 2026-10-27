@@ -90,15 +90,10 @@ def write_metrics_report(rows, output, folders, input_modes=None):
         table = table.reindex(columns=['input_mode', 'decision_source', 'folder', 'recall', 'false_positive_rate'])
     table.to_csv(csv_path, index=False)
     categories = list(dict.fromkeys(table.folder))
-    normal_only = len(table) and table.failure_count.sum()==0 and table.normal_count.sum()>0
-    panels = ([('accuracy', 'Accuracy (all known labels)'),
-               ('false_positive_rate', 'False-positive rate (parsed decisions)'),
-               ('decision_coverage', 'Decision coverage')] if normal_only else
-              [('recall', 'Recall (parsed decisions)'), ('false_positive_rate', 'False-positive rate (parsed decisions)'),
+    panels = [('recall', 'Recall (parsed decisions)'), ('false_positive_rate', 'False-positive rate (parsed decisions)'),
                ('precision', 'Precision'), ('accuracy', 'Accuracy (all known labels)'),
-               ('f1', 'F1 (parsed decisions)'), ('decision_coverage', 'Decision coverage')])
-    figure, axes = plt.subplots(1 if normal_only else 2, 3,
-                               figsize=(max(12, len(categories)*1.8), 6 if normal_only else 9))
+               ('f1', 'F1 (parsed decisions)'), ('decision_coverage', 'Decision coverage')]
+    figure, axes = plt.subplots(2, 3, figsize=(max(12, len(categories)*1.8), 9))
     series = list(table.groupby(['decision_source', 'input_mode'], sort=True)) if len(table) else []
     colors = plt.get_cmap('tab10')
     width = .8/max(1, len(series))

@@ -2625,10 +2625,25 @@ The existing ROC/score reports and signed classifier-timing graphs remain unchan
 benchmark timing annotations ignore failure markers before the corrected stage-1
 start, using the already computed classifier timeline without rescoring images.
 Feature-only runs omit the generated-response metric series, since no response
-was generated. Normal-only graphs show accuracy, FPR and decision coverage;
-irrelevant recall/precision/F1 panels are omitted. This adds no inference or new
+was generated. The metric graph retains all six panels; unavailable rates are
+marked N/A. This adds no inference or new
 calibration. DINO's two-frame/stage-3 rule is specific
 to the DINO benchmark and is not silently applied to generated VLM decisions.
+
+Each VLM benchmark writes `REPORTS.md` in its decision-mode output folder. It
+links all PNGs, lists each demo's timeline status/path, and explains unavailable
+ROC and PCA reports. Timelines remain inside each demo's `rynnbrain_multiturn/`
+folder. Prompt B results are under the separate `rynnbrain_prompt_b_benchmark/`
+root; they are not written into A's results directory.
+
+ROC/AUROC PNGs are retained even for single-class runs, as clearly labelled
+unavailable panels with the reason. No ROC curve or AUROC value is invented.
+Generated-response ROC is unavailable when `feature_only` skips text generation;
+classifier ROC is a separate report. With normal and failure test labels, the
+existing valid ROC/AUROC plots are generated normally. PCA now also plots a
+single ground-truth class when there are at least two compatible, nonzero vectors
+with at least two features. This shows within-class variation, not class separation.
+If PCA or score plots cannot be calculated, a labelled unavailable PNG explains why.
 
 For each remaining bag it writes a self-contained folder (videos, DINO CSVs,
 selected VLM frames, prompts/responses) under

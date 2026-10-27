@@ -52,16 +52,17 @@ class CoPAnalysisTests(unittest.TestCase):
             self.assertEqual(len(saved), 4)
             json.dumps(report, allow_nan=False)
 
-    def test_empty_probability_report_removes_stale_plot_without_inventing_zero_scores(self):
+    def test_empty_probability_report_replaces_stale_plot_without_inventing_zero_scores(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stale = root / "benchmark_failure_probability_raw.png"
             stale.write_bytes(b"old plot")
             report = write_failure_probability_report([], root, input_modes=["raw"])
-            self.assertFalse(stale.exists())
+            self.assertTrue(stale.exists())
             mode = report["modes"][0]
             self.assertEqual(mode["status"], "skipped")
             self.assertIsNone(mode["plot_file"])
+            self.assertEqual(mode['unavailable_plot_file'], str(stale))
             self.assertTrue(all(group["count"] == 0 and group["median_percent"] is None for group in mode["groups"]))
 
     def _save(
@@ -132,10 +133,11 @@ class CoPAnalysisTests(unittest.TestCase):
             ]
             skipped = analyze_saved_vectors(root, metadata_paths=normal_metadata)
             self.assertEqual(skipped["selection"], "explicit_vectors")
-            self.assertEqual(skipped["modes"][0]["status"], "skipped")
-            self.assertFalse(plot_path.exists())
+            self.assertEqual(skipped["modes"][0]["status"], "created")
+            self.assertEqual(skipped['modes'][0]['failure_count'], 0)
+            self.assertTrue(plot_path.exists())
 
-    def test_analysis_skips_mode_without_both_classes(self) -> None:
+    def test_analysis_plots_single_class_without_claiming_class_separation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             self._save(root, "normal_01", "normal", [1.0, 0.0, 0.0])
@@ -143,8 +145,10 @@ class CoPAnalysisTests(unittest.TestCase):
 
             summary = analyze_saved_vectors(root)
             mode_summary = summary["modes"][0]
-            self.assertEqual(mode_summary["status"], "skipped")
-            self.assertIn("missing ground-truth", mode_summary["reason"])
+            self.assertEqual(mode_summary["status"], "created")
+            self.assertIn('Single-class', mode_summary['note'])
+            self.assertEqual(mode_summary['failure_count'], 0)
+            self.assertTrue(Path(mode_summary['plot_file']).is_file())
             self.assertTrue(Path(summary["summary_file"]).is_file())
 
     def test_analysis_refuses_to_mix_different_settings(self) -> None:

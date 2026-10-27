@@ -810,6 +810,10 @@ def _run_benchmark(arguments, config, update) -> None:
         )
 
     print("\n" + "=" * 90)
+    from rynnbrain_vlm.report_artifacts import write_report_index
+    report_index = write_report_index(master_rows, statistics, pca_summary, benchmark_root,
+                                     classifier_method(vlm.get('cop_classifier', {})))
+    print(f'Report index (all graphs and availability): {report_index}')
     print("BENCHMARK FINISHED")
     print("=" * 90)
     print(f"Per-demonstration folders and combined table under: {benchmark_root}")
