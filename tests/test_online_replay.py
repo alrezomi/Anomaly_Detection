@@ -16,17 +16,39 @@ from PIL import Image
 
 from rynnbrain_vlm.online_replay import (ReplayFeed, SequentialReplayFeed, gmr_sample_frames, ReplayApplication, OnlineDetector, make_handler,
                                        finish_verification, verification_failure_message,
-                                       signature_differences, validate_online_classifier, replay_bags)
+                                       signature_differences, validate_online_classifier, replay_bags,
+                                       replay_comparison_signature)
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_replay_signature_marks_base_timestamp_inputs_and_preserves_temporal_adapter(self):
+        for profile in ({}, {"protocol": "trained_temporal_protocol"}):
+            with self.subTest(profile=profile):
+                original = {"turn1_prompt": "old reference", "turn2_prompt": "old evaluation"}
+                with patch("rynnbrain_vlm.run.cop_comparison_signature", return_value=original), \
+                     patch("rynnbrain_vlm.prompts.task_context_prompt", return_value="timed reference") as reference, \
+                     patch("rynnbrain_vlm.prompts.evaluation_prompt_multiturn", return_value="timed evaluation") as evaluation:
+                    result = replay_comparison_signature(SimpleNamespace(temporal_profile=profile), {},
+                        {"task_description": "Pick scissors", "prompt_variant": "B"}, "reference", 8, {})
+                if profile:
+                    self.assertEqual(result, original)
+                    reference.assert_not_called()
+                    evaluation.assert_not_called()
+                else:
+                    reference.assert_called_once_with("Pick scissors", temporal=True, variant="B")
+                    evaluation.assert_called_once_with("Pick scissors", "raw", temporal=True, variant="B")
+                    self.assertEqual(result["replay_timestamp_protocol"], "bag_relative_seconds_v1")
+                    self.assertEqual(result["turn1_prompt"], "timed reference")
+                    self.assertEqual(result["turn2_prompt"], "timed evaluation")
+                    self.assertNotIn("replay_timestamp_protocol", original)
+
     def test_text_enabled_replay_continues_without_matching_classifier(self):
         import torch
         for missing in (True, False):
             with self.subTest(missing=missing), ExitStack() as stack:
                 config = {"vlm_benchmark": {"train_lora": False}, "rynnbrain": {
                     "source": "rosbag", "input_modes": ["raw"], "camera_topics": ["top"],
-                    "memory_camera_topics": ["top"], "reference_bags": ["reference"],
+                    "memory_camera_topics": ["top"], "reference_bags": ["reference"], "num_frames": 1,
                     "inference": {"feature_only": False}, "model": {"lora_adapter_path": None},
                     "cop_classifier": {"enabled": True, "method": "logistic",
                                        "model_paths": {"raw": "missing.npz"}}}}
@@ -38,7 +60,8 @@ class OnlineReplayTests(unittest.TestCase):
                 stack.enter_context(patch("rynnbrain_vlm.cop_classifier.load_classifier",
                     side_effect=FileNotFoundError("missing weights") if missing else None, return_value=saved))
                 stack.enter_context(patch("rynnbrain_vlm.run._raw_inputs",
-                    return_value=([Image.new("RGB", (2, 2))], [])))
+                    return_value=([("Time 1", Image.new("RGB", (2, 2)))],
+                                  [{"topic": "top", "sample_index": 0, "timestamp_sec": 2.375}])))
                 stack.enter_context(patch("rynnbrain_vlm.run.cop_comparison_signature", return_value={"model": "base"}))
                 stack.enter_context(patch("rynnbrain_vlm.visual_matching.nominal_matching_bags", return_value=[]))
                 images = []
@@ -56,6 +79,11 @@ class OnlineReplayTests(unittest.TestCase):
                 self.assertIsNone(config["rynnbrain"]["model"]["lora_adapter_path"])
                 model.generate_nominal.assert_called_once()
                 self.assertEqual(cache_factory.call_args.args[2], "Current model reference")
+                reference_turn = cache_factory.call_args.args[1]
+                self.assertEqual(reference_turn["images"][0][0],
+                                 "Frame 1, camera top, time 2.375 s from this bag start:")
+                self.assertIn("actual frame times", reference_turn["text"])
+                self.assertIn("Only a prefix", cache_factory.call_args.args[3])
                 detector.reset("heldout")
                 with patch("builtins.print") as terminal:
                     row, _, _ = detector.append(Image.new("RGB", (2, 2)), 1.)
@@ -110,6 +138,10 @@ class OnlineReplayTests(unittest.TestCase):
             detector.feature_only = True
             third, _, _ = detector.append(Image.new("RGB", (2, 2)), 21.)
         self.assertEqual(detector.cache.generate_response.call_count, 2)
+        self.assertEqual([label for label, _ in images], [
+            "Frame 1, camera top, time 1.000 s from this bag start:",
+            "Frame 2, camera top, time 11.000 s from this bag start:",
+            "Frame 3, camera top, time 21.000 s from this bag start:"])
         for row in (first, second, third):
             self.assertEqual(row["anomaly_score"], .73)
             self.assertTrue(row["above_threshold"])

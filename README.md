@@ -1609,6 +1609,14 @@ processes its selected bag set and exports combined tables/plots. The GUI
 processes only the bag you start, saving each execution under `online_replay/`.
 It does not launch or monitor a benchmark, nor automatically combine its results.
 
+VLM browser replay labels every nominal-reference and execution image with its
+actual recorded time in seconds from that image's own bag start, including when
+running the base model without LoRA. Both prompt functions receive `temporal=True`;
+reference and execution clocks remain separate. The image-history cache and
+sampling interval are unchanged. Existing temporal-adapter classifier signatures
+remain compatible; older classifiers using frame-order-only inputs do not silently
+score these timestamped inputs (text-only replay can still continue as below).
+
 When `rynnbrain.inference.feature_only` is `false` (also the default when omitted),
 browser VLM replay additionally generates an answer for **each sampled observation
 history**, starting with the first frame. The server prints the bag name,

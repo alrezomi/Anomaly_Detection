@@ -78,6 +78,22 @@ def validate_online_classifier(classifier, signature, representation_id, path):
               "Replay does not train models; train_on_benchmark applies only to benchmarks.")
 
 
+def replay_comparison_signature(model, config, vlm, response, frame_count, generation):
+    """Replay always supplies real times, independently of adapter supervision."""
+    from .run import cop_comparison_signature
+    from .prompts import task_context_prompt, evaluation_prompt_multiturn
+
+    signature = dict(cop_comparison_signature(model, config, vlm, "raw", response, frame_count, generation))
+    if not model.temporal_profile:
+        task = vlm.get("task_description", "Robot manipulation task")
+        variant = vlm.get("prompt_variant", "A")
+        signature.update(
+            turn1_prompt=task_context_prompt(task, temporal=True, variant=variant),
+            turn2_prompt=evaluation_prompt_multiturn(task, "raw", temporal=True, variant=variant),
+            replay_timestamp_protocol="bag_relative_seconds_v1")
+    return signature
+
+
 def finish_verification(check, cached_score, uncached_score, threshold):
     """Keep independent feature, score and decision checks visible."""
     difference = abs(uncached_score - cached_score)
@@ -233,7 +249,7 @@ class OnlineDetector:
         from .cop_knn import CoPKNNDetector
         from .cop_timeline import load_prefix_detector
         from .cop_onset import onset_enabled, load_onset_classifier
-        from .run import _raw_inputs, cop_comparison_signature
+        from .run import _raw_inputs
         from .temporal_lora import timestamped_images
         from .prompts import task_context_prompt, evaluation_prompt_multiturn
         from .online_cache import CachedExecution
@@ -280,8 +296,8 @@ class OnlineDetector:
         generation = vlm.get("generation", {})
         if self.complete is not None:
             try:
-                self.signature = cop_comparison_signature(self.model, config, vlm, "raw", self.response,
-                                                         self.frame_count, generation)
+                self.signature = replay_comparison_signature(self.model, config, vlm, self.response,
+                                                            self.frame_count, generation)
                 validate_online_classifier(self.complete, self.signature, COP_REPRESENTATION_ID, self.path)
                 self.prefix = load_prefix_detector(self.path, self.complete) if self.knn else None
                 self.onset = onset_enabled(settings)
@@ -311,26 +327,24 @@ class OnlineDetector:
         self.matching_stages = None
         progress("Reading nominal reference images")
         nominal = []
-        temporal = bool(self.model.temporal_profile)
         for bag in vlm.get("reference_bags", []):
             images, metadata = _raw_inputs(Path(bag), vlm["memory_camera_topics"], self.frame_count)
-            if temporal:
-                images = timestamped_images(images, metadata, vlm["memory_camera_topics"], self.frame_count)
+            images = timestamped_images(images, metadata, vlm["memory_camera_topics"], self.frame_count)
             nominal.extend(images)
         if not nominal:
             raise ValueError("No nominal reference images were loaded.")
         task = vlm.get("task_description", "Robot manipulation task")
         reference_turn = dict(role="user", images=nominal,
-                              text=task_context_prompt(task, temporal=temporal, variant=vlm.get('prompt_variant', 'A')))
+                              text=task_context_prompt(task, temporal=True, variant=vlm.get('prompt_variant', 'A')))
         if self.response is None:
             progress("Generating nominal-reference response with the selected model")
             self.response = self.model.generate_nominal(reference_turn, generation)
-            self.signature = cop_comparison_signature(self.model, config, vlm, "raw", self.response,
-                                                     self.frame_count, generation)
+            self.signature = replay_comparison_signature(self.model, config, vlm, self.response,
+                                                        self.frame_count, generation)
         progress("Preparing reusable reference cache (first model inference)")
         self.cache = CachedExecution(self.model,
             reference_turn,
-            self.response, evaluation_prompt_multiturn(task, "raw", temporal=temporal, variant=vlm.get('prompt_variant', 'A')), generation,
+            self.response, evaluation_prompt_multiturn(task, "raw", temporal=True, variant=vlm.get('prompt_variant', 'A')), generation,
             self.frame_count)
         if not self.feature_only:
             progress("VLM text output enabled: each observation also generates a separate answer; this adds latency")
@@ -385,14 +399,12 @@ class OnlineDetector:
     def append(self, image, timestamp, verify=False):
         import torch
         from .feature_verification import vector_difference
-        from .run import _slug
         if not math.isfinite(timestamp) or timestamp < 0 or (
                 self.last_timestamp is not None and timestamp <= self.last_timestamp):
             raise ValueError("Observation timestamps must increase.")
         index = len(self.cache.images)
         topic = self.vlm["camera_topics"][0]
-        label = (f"Frame {index + 1}, camera {topic}, time {timestamp:.3f} s from this bag start:"
-                 if self.model.temporal_profile else f"Time {index + 1}, camera {_slug(topic)}:")
+        label = f"Frame {index + 1}, camera {topic}, time {timestamp:.3f} s from this bag start:"
         started = synchronized_time()
         if torch.cuda.is_available():
             for device in range(torch.cuda.device_count()):
