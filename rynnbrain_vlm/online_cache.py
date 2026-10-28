@@ -12,8 +12,8 @@ import torch
 class CachedExecution:
     def __init__(self, wrapper, reference_turn, reference_response, evaluation_text,
                  generation, max_frames=8):
-        if not 1 <= max_frames <= 8:
-            raise ValueError("Online execution supports one to eight frames.")
+        if max_frames is not None and (type(max_frames) is not int or max_frames < 1):
+            raise ValueError("Online execution limit must be a positive integer or None.")
         self.wrapper = wrapper
         self.max_frames = max_frames
         self.reference_turn = reference_turn
@@ -86,8 +86,8 @@ class CachedExecution:
     def append(self, label, image, *, capture_visual=False):
         if self.failed:
             raise RuntimeError("The online cache failed; reset before starting another execution.")
-        if len(self.images) >= self.max_frames:
-            raise ValueError("Eight-frame execution limit reached; start a new execution.")
+        if self.max_frames is not None and len(self.images) >= self.max_frames:
+            raise ValueError("Execution observation limit reached; start a new execution.")
         images = self.images + [(label, image)]
         turn = {"role": "user", "images": images, "text": self.evaluation_text}
         inputs = self.wrapper.tokenize_conversation(

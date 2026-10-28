@@ -1,7 +1,7 @@
 """Persistent detector replay with cached VLM features and a web UI.
 
 Run with python -m rynnbrain_vlm.online_replay --config ... --interval-sec 10.
-VLM samples the latest available image up to eight times. DINO processes every
+VLM samples the latest available image using its configured observation policy. DINO processes every
 image at its native sampling rate; GMR replays every prepared signal sample.
 """
 
@@ -24,6 +24,7 @@ from uuid import uuid4
 import numpy as np
 
 from pipeline_settings import load_pipeline_config
+from .replay_policy import replay_settings, observation_interval
 
 
 SAMPLING_NOTE = ("Live elapsed-time sampling differs from whole-bag training sampling. "
@@ -265,7 +266,10 @@ class OnlineDetector:
             raise ValueError("The first online version supports one execution camera.")
         self.frame_count = int(vlm.get("num_frames", 8))
         if not 1 <= self.frame_count <= 8:
-            raise ValueError("Online replay supports at most eight selected frames per execution.")
+            raise ValueError("Keep num_frames between one and eight for the trained reference. "
+                             "Use online_replay.max_observations to extend live execution history.")
+        self.replay_policy = replay_settings(config)
+        self.observation_limit = self.replay_policy["max_observations"]
         settings = vlm.get("cop_classifier", {})
         self.path = None
         self.complete = self.classifier = self.prefix = None
@@ -316,6 +320,15 @@ class OnlineDetector:
                              "nominal_prefix_index_diagnostic" if self.knn else
                              "onset_prefix_classifier" if self.onset else "whole_execution_classifier_on_prefixes")
         self.score_kind = "unavailable" if self.classifier is None else "knn_distance" if self.knn else "failure_probability"
+        if self.replay_policy["interval_mode"] == "adaptive" and (self.classifier is None or self.knn):
+            raise ValueError("Adaptive replay requires a compatible logistic classifier producing failure scores.")
+        if self.replay_policy["stop_on_alarm"] and self.classifier is None:
+            raise ValueError("stop_on_alarm requires an available compatible classifier.")
+        if self.knn and (self.observation_limit is None or self.observation_limit > self.frame_count):
+            raise ValueError("Extended replay currently requires a logistic classifier; kNN prefix limits are indexed by training step.")
+        if self.observation_limit is None or self.observation_limit > self.frame_count:
+            progress(f"Extended replay enabled: reference remains {self.frame_count} frames; "
+                     "execution history may exceed training length and grows in memory.")
         self.excluded = set(self.model.adapter_training_bags)
         if self.complete is not None:
             self.excluded.update(self.complete.metadata.get("training_bags", []))
@@ -345,7 +358,7 @@ class OnlineDetector:
         self.cache = CachedExecution(self.model,
             reference_turn,
             self.response, evaluation_prompt_multiturn(task, "raw", temporal=True, variant=vlm.get('prompt_variant', 'A')), generation,
-            self.frame_count)
+            self.observation_limit)
         if not self.feature_only:
             progress("VLM text output enabled: each observation also generates a separate answer; this adds latency")
 
@@ -362,7 +375,8 @@ class OnlineDetector:
                       vlm_response_source="not_generated")
         if self.feature_only:
             return result
-        title = f"VLM response | {Path(self.bag).name} | observation {index + 1}/{self.frame_count} | t={timestamp:.3f}s"
+        limit = getattr(self, "observation_limit", self.frame_count)
+        title = f"VLM response | {Path(self.bag).name} | observation {index + 1}/{limit or 'end of recording'} | t={timestamp:.3f}s"
         started = synchronized_time()
         try:
             result["vlm_response"] = self.cache.generate_response()
@@ -494,6 +508,7 @@ def save_plot(rows, path, probability):
 class ReplayApplication:
     def __init__(self, config, bags, interval, verify, diagnose=False):
         self.config, self.bags, self.interval = config, bags, interval
+        self.replay_policy = replay_settings(config)
         self.verify, self.diagnose = bool(verify or diagnose), diagnose
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -502,7 +517,9 @@ class ReplayApplication:
         self.state = dict(status="loading", rows=[], bags=[str(bag) for bag in bags],
                           note=SAMPLING_NOTE, verification_mode=self.verify, diagnostic_mode=diagnose,
                           warning=None, cache_verification_status="not_requested", video_time_sec=None,
-                          interval_sec=interval, output_directory=None)
+                          interval_sec=interval, output_directory=None,
+                          interval_mode=self.replay_policy["interval_mode"],
+                          stop_on_alarm=self.replay_policy["stop_on_alarm"], termination_reason=None)
         self.state["replay_mode"] = "diagnostic" if diagnose else "strict" if verify else "cached"
         self.state["initialization_phase"] = "Starting model worker"
         self.state["excluded_bag_indices"] = []
@@ -561,7 +578,7 @@ class ReplayApplication:
             self.camera_jpegs = {}
             self.state.update(status="starting", rows=[], error=None, video_time_sec=None,
                               output_directory=None, warning=None, cache_verification_status="pending" if self.verify else "not_requested",
-                              bag=str(self.bags[index]), interval_sec=self.interval,
+                              bag=str(self.bags[index]), interval_sec=self.interval, termination_reason=None,
                               match_preview=match_preview, matching_status="Not prepared",
                               requested_detector=detector_type,
                               gmr_signal=gmr_signal,
@@ -599,7 +616,7 @@ class ReplayApplication:
                         score_source=self.detector.score_source,
                         score_kind=getattr(self.detector, "score_kind", "knn_distance" if self.detector.knn else "failure_probability"),
                         excluded_bag_indices=excluded_indices,
-                        max_frames=self.detector.frame_count)
+                        max_frames=getattr(self.detector, "observation_limit", self.detector.frame_count))
             print(f"Replay selector: {len(self.bags) - len(excluded_indices)} available bags; "
                   f"{len(excluded_indices)} training/reference bags disabled.", flush=True)
             print("Model ready. Waiting for Start execution in the browser; no bag runs automatically.", flush=True)
@@ -644,7 +661,7 @@ class ReplayApplication:
         self.update(note=getattr(detector, 'note', SAMPLING_NOTE), score_source=detector.score_source,
                     dino_cameras=detector.catalogue() if kind == 'dino' else [],
                     score_kind=getattr(detector, 'score_kind', 'knn_distance' if detector.knn else 'failure_probability'),
-                    max_frames=detector.frame_count,
+                    max_frames=getattr(detector, "observation_limit", detector.frame_count),
                     excluded_bag_indices=[i for i, bag in enumerate(self.bags) if Path(bag).name in detector.excluded])
 
     def run_bag(self, bag):
@@ -727,7 +744,7 @@ class ReplayApplication:
             feed = feed_class(frames, self.publish, self.stop)
         producer = threading.Thread(target=feed.run, daemon=True)
         rows, status, error = [], "running", None
-        max_frames = self.detector.frame_count if kind == 'vlm' else None
+        max_frames = getattr(self.detector, "observation_limit", self.detector.frame_count) if kind == 'vlm' else None
         total_samples = len(self.detector.results) if kind == 'gmr' and not causal_gmr else max_frames
         self.update(status=status, output_directory=str(output), max_frames=max_frames,
                     total_samples=total_samples, sample_fps=sample_fps if kind == 'dino' else None)
@@ -742,6 +759,9 @@ class ReplayApplication:
         metadata.update(visual_matching=matching_metadata, recorded_failure_annotation=failure_annotation,
                         detector_type=kind, detector_preparation=preparation_metadata,
                         matching_preparation_sec=time.monotonic() - preparation_started)
+        if kind == 'vlm':
+            metadata.update(observation_policy=self.replay_policy, termination_reason=None,
+                            adaptive_intervals_sec=[10., 7., 5., 3.] if self.replay_policy["interval_mode"] == "adaptive" else None)
 
         def verification_status():
             checks = [row["verification"] for row in rows if row.get("verification")]
@@ -805,6 +825,10 @@ class ReplayApplication:
                         row["cached_vector_file"] = None
                     row.update(frame_id=frame_id, result_time_sec=time.monotonic() - feed.origin,
                                observation_to_result_sec=time.monotonic() - feed.origin - timestamp)
+                    if kind == 'vlm':
+                        alarm_stop = self.replay_policy["stop_on_alarm"] and row.get("above_threshold") is True
+                        row["next_interval_sec"] = (None if alarm_stop else
+                            observation_interval(self.replay_policy, row["anomaly_score"], self.interval))
                     row["vector_file"] = f"frame_{len(rows) + 1:02d}.npy" if kind != 'gmr' else None
                     if kind != 'gmr':
                         np.save(output / row["vector_file"], vector)
@@ -886,12 +910,21 @@ class ReplayApplication:
                         self.update(warning=warning)
                         print(warning, flush=True)
                     self.update(cache_verification_status=verification_status())
-                    earliest = timestamp + self.interval
-            status = "stopped" if self.stop.is_set() else "completed"
+                    if kind == 'vlm' and alarm_stop:
+                        metadata.update(termination_reason="alarm_threshold", alarm_timestamp_sec=timestamp)
+                        print(f"Alarm threshold reached at {timestamp:.3f}s; stopping replay and saving results.", flush=True)
+                        break
+                    earliest = timestamp + (row["next_interval_sec"] if kind == 'vlm' else self.interval)
+            if kind == 'vlm' and not metadata["termination_reason"]:
+                metadata["termination_reason"] = ("user_stop" if self.stop.is_set() else
+                    "observation_limit" if max_frames is not None and len(rows) >= max_frames else "end_of_recording")
+            status = "stopped" if self.stop.is_set() or metadata.get("termination_reason") == "alarm_threshold" else "completed"
             if not rows and not self.stop.is_set():
                 raise ValueError("No eligible image frames were available in the replay window.")
         except Exception as failure:
             status, error = "error", str(failure)
+            if kind == 'vlm':
+                metadata["termination_reason"] = "error"
         finally:
             self.stop.set()
             producer.join(timeout=5)
@@ -911,7 +944,7 @@ class ReplayApplication:
                 status = "error"
                 persist()
             self.update(status=status, error=error, rows=rows, scoring_time_sec=None,
-                        cache_verification_status=verification_status())
+                        cache_verification_status=verification_status(), termination_reason=metadata.get("termination_reason"))
 
 
 def make_handler(app):

@@ -1524,10 +1524,44 @@ at `sampling_start_sec`. Selection uses only frames that have already arrived;
 it does not look at the bag end or error-button annotation. If inference takes
 longer, the worker uses the latest available eligible frame. The producer uses
 up to 15 camera frames/s for preview, with a one-frame mailbox, so inference
-never accumulates a queue of old frames. The eight selected observations may
+never accumulates a queue of old frames. By default, the eight selected observations may
 cover only part of a long bag. Change the interval deliberately for your task;
 it is not automatically chosen from the bag duration. There is no rolling
 window or cache eviction in this version.
+
+To experiment with adaptive VLM sampling beyond eight observations, add this
+object inside `rynnbrain` (keep `num_frames: 8` and your existing model/classifier paths):
+
+```json
+"online_replay": {
+  "interval_mode": "adaptive",
+  "max_observations": null,
+  "stop_on_alarm": true
+}
+```
+
+`adaptive` selects the next interval from the latest logistic failure score:
+below 30%: 10 seconds; 30% to below 50%: 7 seconds; 50% to below 60%: 5 seconds;
+60% and above: 3 seconds. The browser interval field is disabled in this case.
+`constant` uses the browser interval instead. `stop_on_alarm` stops replay at the
+first score greater than or equal to the classifier's configured threshold,
+independently of the interval bands. All observations up to and including that
+alarm, vectors, CSV/JSON and plots are saved. This stops replay, not a physical robot.
+
+`max_observations: null` removes the observation-count limit; replay ends at the
+bag/window end, manual stop, or alarm. A positive integer sets a limit. Omitting
+the object preserves constant intervals, the `num_frames` observation limit and
+no automatic alarm stop. These options affect browser VLM replay only; DINO,
+GMR, training and offline benchmarks are unchanged. Use `inference.feature_only: true`
+for the intended fast feature-only experiment. Adaptive replay requires a compatible
+logistic classifier; kNN prefix-index detectors do not support extended histories.
+
+The nominal reference retains its trained image count, while the execution
+cache keeps every observed frame, including observations beyond eight. There
+is no rolling window or reset at observation eight. Context length and memory
+usage therefore grow; scores beyond the training history length are experimental.
+No retraining is launched by replay. Saved rows include `next_interval_sec`, and
+the JSON records `termination_reason` and `alarm_timestamp_sec` when applicable.
 
 With strict verification (also available as `--verify-cache`), every selected prefix is also evaluated by the original
 uncached feature extractor. The application saves both vectors, relative L2
