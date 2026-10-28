@@ -251,34 +251,59 @@ class OnlineDetector:
         if not 1 <= self.frame_count <= 8:
             raise ValueError("Online replay supports at most eight selected frames per execution.")
         settings = vlm.get("cop_classifier", {})
-        if not settings.get("enabled", False):
-            raise ValueError("Enable a trained cop_classifier for online replay.")
-        self.path = Path(classifier_model_paths(settings)["raw"])
-        self.complete = load_classifier(self.path)
-        self.knn = isinstance(self.complete, CoPKNNDetector)
-        if self.knn != (classifier_method(settings) == "knn") or self.complete.input_mode != "raw":
-            raise ValueError("Saved classifier method/input mode does not match the config.")
-        self.response = self.complete.comparison_signature.get("nominal_response")
-        if not isinstance(self.response, str):
-            raise ValueError("The classifier must contain its saved nominal-reference response.")
+        self.path = None
+        self.complete = self.classifier = self.prefix = None
+        self.response = None
+        self.knn = self.onset = False
+        try:
+            if not settings.get("enabled", False):
+                raise ValueError("Enable a trained cop_classifier for online replay.")
+            configured_path = classifier_model_paths(settings).get("raw")
+            if not configured_path:
+                raise FileNotFoundError("No raw classifier path is configured.")
+            self.path = Path(configured_path)
+            self.complete = load_classifier(self.path)
+            self.knn = isinstance(self.complete, CoPKNNDetector)
+            if self.knn != (classifier_method(settings) == "knn") or self.complete.input_mode != "raw":
+                raise ValueError("Saved classifier method/input mode does not match the config.")
+            self.response = self.complete.comparison_signature.get("nominal_response")
+            if not isinstance(self.response, str):
+                raise ValueError("The classifier must contain its saved nominal-reference response.")
+        except (FileNotFoundError, ValueError) as error:
+            if self.feature_only:
+                raise
+            progress(f"Classifier unavailable; continuing with model text only (no anomaly score): {error}")
+            self.complete = None
+            self.response = None
         progress("Loading VLM and LoRA adapter")
         self.model = RynnBrainModel(vlm["model"])
         generation = vlm.get("generation", {})
-        self.signature = cop_comparison_signature(self.model, config, vlm, "raw", self.response,
-                                                 self.frame_count, generation)
-        validate_online_classifier(self.complete, self.signature, COP_REPRESENTATION_ID, self.path)
-        self.prefix = load_prefix_detector(self.path, self.complete) if self.knn else None
-        self.onset = onset_enabled(settings)
-        self.classifier = self.complete
-        if self.onset:
-            self.classifier, _ = load_onset_classifier(self.path, self.complete, bag_name="")
-        from .cop_classifier import with_decision_threshold
-        self.classifier = with_decision_threshold(self.classifier, settings)
-        self.score_source = ("nominal_prefix_index_diagnostic" if self.knn else
+        if self.complete is not None:
+            try:
+                self.signature = cop_comparison_signature(self.model, config, vlm, "raw", self.response,
+                                                         self.frame_count, generation)
+                validate_online_classifier(self.complete, self.signature, COP_REPRESENTATION_ID, self.path)
+                self.prefix = load_prefix_detector(self.path, self.complete) if self.knn else None
+                self.onset = onset_enabled(settings)
+                self.classifier = self.complete
+                if self.onset:
+                    self.classifier, _ = load_onset_classifier(self.path, self.complete, bag_name="")
+                from .cop_classifier import with_decision_threshold
+                self.classifier = with_decision_threshold(self.classifier, settings)
+            except (FileNotFoundError, ValueError) as error:
+                if self.feature_only:
+                    raise
+                progress(f"Classifier incompatible or incomplete; continuing with model text only (no anomaly score): {error}")
+                self.complete = self.classifier = self.prefix = None
+                self.response = None
+        self.score_source = ("model_text_only" if self.classifier is None else
+                             "nominal_prefix_index_diagnostic" if self.knn else
                              "onset_prefix_classifier" if self.onset else "whole_execution_classifier_on_prefixes")
+        self.score_kind = "unavailable" if self.classifier is None else "knn_distance" if self.knn else "failure_probability"
         self.excluded = set(self.model.adapter_training_bags)
-        self.excluded.update(self.complete.metadata.get("training_bags", []))
-        self.excluded.update(self.classifier.metadata.get("training_bags", []))
+        if self.complete is not None:
+            self.excluded.update(self.complete.metadata.get("training_bags", []))
+            self.excluded.update(self.classifier.metadata.get("training_bags", []))
         self.excluded.update(Path(value).name for value in vlm.get("reference_bags", []))
         self.excluded.update(Path(value).name for value in nominal_matching_bags(config))
         self.visual_memory = None
@@ -295,9 +320,16 @@ class OnlineDetector:
         if not nominal:
             raise ValueError("No nominal reference images were loaded.")
         task = vlm.get("task_description", "Robot manipulation task")
+        reference_turn = dict(role="user", images=nominal,
+                              text=task_context_prompt(task, temporal=temporal, variant=vlm.get('prompt_variant', 'A')))
+        if self.response is None:
+            progress("Generating nominal-reference response with the selected model")
+            self.response = self.model.generate_nominal(reference_turn, generation)
+            self.signature = cop_comparison_signature(self.model, config, vlm, "raw", self.response,
+                                                     self.frame_count, generation)
         progress("Preparing reusable reference cache (first model inference)")
         self.cache = CachedExecution(self.model,
-            dict(role="user", images=nominal, text=task_context_prompt(task, temporal=temporal, variant=vlm.get('prompt_variant', 'A'))),
+            reference_turn,
             self.response, evaluation_prompt_multiturn(task, "raw", temporal=temporal, variant=vlm.get('prompt_variant', 'A')), generation,
             self.frame_count)
         if not self.feature_only:
@@ -343,6 +375,8 @@ class OnlineDetector:
         return {"status": "ready", "stage_annotation": stages.metadata(), "memory": self.visual_memory.report}
 
     def score(self, vector, step):
+        if getattr(self, "classifier", self.complete) is None:
+            return None, None
         classifier = self.prefix.at_step(step, self.complete) if self.knn else self.classifier
         predict = classifier.predict_anomaly_score if self.knn else classifier.predict_failure_probability
         score = float(predict(vector, input_mode="raw", comparison_signature=self.signature))
@@ -390,14 +424,17 @@ class OnlineDetector:
             check = vector_difference(baseline, vector)
             baseline_score, _ = self.score(baseline, index)
             check["uncached_feature_sec"] = uncached_sec
-            finish_verification(check, score, baseline_score, threshold)
+            if score is not None:
+                finish_verification(check, score, baseline_score, threshold)
+            else:
+                check["failed_checks"] = [] if check["within_tolerance"] else ["feature_vector"]
         text = self.text_output(index, timestamp)
         self.last_timestamp = timestamp
         return dict(sample_index=index, timestamp_sec=timestamp, anomaly_score=score,
-                    threshold=threshold, above_threshold=score >= threshold,
+                    threshold=threshold, above_threshold=score >= threshold if score is not None else None,
                     cached_feature_sec=feature_sec, classifier_sec=classifier_sec,
                     peak_gpu_allocated_bytes=memory,
-                    score_kind="knn_distance" if self.knn else "failure_probability",
+                    score_kind=getattr(self, "score_kind", "knn_distance" if self.knn else "failure_probability"),
                     visual_matching=matching, visual_matching_sec=matching_sec,
                     verification=check, **text), vector, baseline
 
@@ -416,9 +453,12 @@ def save_plot(rows, path, probability):
     scale = 100 if probability else 1
     figure, axis = plt.subplots(figsize=(10, 5))
     times = [row["timestamp_sec"] for row in rows]
-    axis.plot(times, [row["anomaly_score"] * scale for row in rows], "o-", markersize=2 if len(rows) > 50 else 4,
+    axis.plot(times, [row["anomaly_score"] * scale if row["anomaly_score"] is not None else float("nan") for row in rows], "o-", markersize=2 if len(rows) > 50 else 4,
               label="Score", color="#2f78c4")
-    axis.plot(times, [row["threshold"] * scale for row in rows], "--", label="Threshold", color="#c27524")
+    axis.plot(times, [row["threshold"] * scale if row["threshold"] is not None else float("nan") for row in rows], "--", label="Threshold", color="#c27524")
+    if not any(row["anomaly_score"] is not None for row in rows):
+        axis.text(.5, .5, "Model text only: anomaly score unavailable", transform=axis.transAxes,
+                  ha="center", va="center")
     fallback = any(row.get("score_computation") == "uncached_verification_fallback" for row in rows)
     kind = rows[0].get('score_kind', '')
     title = (('GMR causal anomaly scores' if rows[0].get('score_computation') == 'causal_ts' else 'GMR offline score playback') if kind in {'gmr_epsilon', 'gmr_distance'} else
@@ -545,7 +585,7 @@ class ReplayApplication:
             self.update(status="ready", initialization_sec=synchronized_time() - started,
                         initialization_phase="Ready — choose a bag and click Start execution",
                         score_source=self.detector.score_source,
-                        score_kind="knn_distance" if self.detector.knn else "failure_probability",
+                        score_kind=getattr(self.detector, "score_kind", "knn_distance" if self.detector.knn else "failure_probability"),
                         excluded_bag_indices=excluded_indices,
                         max_frames=self.detector.frame_count)
             print(f"Replay selector: {len(self.bags) - len(excluded_indices)} available bags; "
@@ -740,13 +780,14 @@ class ReplayApplication:
                     # never used as the displayed/recorded detector result.
                     if failed and self.diagnose:
                         fallback_score = check.get("uncached_score")
-                        if baseline is None or fallback_score is None or not math.isfinite(fallback_score):
+                        text_only = row.get("score_kind") == "unavailable"
+                        if baseline is None or (not text_only and (fallback_score is None or not math.isfinite(fallback_score))):
                             raise RuntimeError("Cannot continue diagnostics without a finite uncached baseline.")
                         row["cached_vector_file"] = f"frame_{len(rows) + 1:02d}_cached.npy"
                         np.save(output / row["cached_vector_file"], vector)
                         vector = baseline
                         row.update(anomaly_score=fallback_score,
-                                   above_threshold=fallback_score >= row["threshold"],
+                                   above_threshold=fallback_score >= row["threshold"] if fallback_score is not None else None,
                                    score_computation="uncached_verification_fallback")
                     else:
                         row["cached_vector_file"] = None
@@ -820,9 +861,11 @@ class ReplayApplication:
                                 observed=self.observed_jpeg, matched=matched_bytes, **additional_previews)
                         self.state.update(status="observing", rows=list(rows), scoring_time_sec=None)
                     if kind == 'vlm' or len(rows) == 1 or len(rows) % 25 == 0:
+                        score_label = f"{row['anomaly_score']:.5f}" if row['anomaly_score'] is not None else "unavailable"
+                        threshold_label = f"{row['threshold']:.5f}" if row['threshold'] is not None else "unavailable"
                         print(f"{Path(bag).name}: {len(rows)}/{total_samples or 'end of recording'}, "
-                              f"t={timestamp:.3f}s, score={row['anomaly_score']:.5f}, "
-                              f"threshold={row['threshold']:.5f}, processing={row['cached_feature_sec']:.3f}s", flush=True)
+                              f"t={timestamp:.3f}s, score={score_label}, "
+                              f"threshold={threshold_label}, processing={row['cached_feature_sec']:.3f}s", flush=True)
                     if failed:
                         message = verification_failure_message(check)
                         if not self.diagnose:

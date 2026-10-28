@@ -1,4 +1,5 @@
 import json
+from contextlib import ExitStack
 from pathlib import Path
 import tempfile
 import threading
@@ -19,6 +20,74 @@ from rynnbrain_vlm.online_replay import (ReplayFeed, SequentialReplayFeed, gmr_s
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_text_enabled_replay_continues_without_matching_classifier(self):
+        import torch
+        for missing in (True, False):
+            with self.subTest(missing=missing), ExitStack() as stack:
+                config = {"vlm_benchmark": {"train_lora": False}, "rynnbrain": {
+                    "source": "rosbag", "input_modes": ["raw"], "camera_topics": ["top"],
+                    "memory_camera_topics": ["top"], "reference_bags": ["reference"],
+                    "inference": {"feature_only": False}, "model": {"lora_adapter_path": None},
+                    "cop_classifier": {"enabled": True, "method": "logistic",
+                                       "model_paths": {"raw": "missing.npz"}}}}
+                model = SimpleNamespace(temporal_profile={}, adapter_identity=None,
+                    adapter_training_bags=[], generate_nominal=Mock(return_value="Current model reference"))
+                factory = stack.enter_context(patch("rynnbrain_vlm.model.RynnBrainModel", return_value=model))
+                saved = SimpleNamespace(input_mode="raw", representation_id="old",
+                    comparison_signature={"nominal_response": "Old LoRA reference"})
+                stack.enter_context(patch("rynnbrain_vlm.cop_classifier.load_classifier",
+                    side_effect=FileNotFoundError("missing weights") if missing else None, return_value=saved))
+                stack.enter_context(patch("rynnbrain_vlm.run._raw_inputs",
+                    return_value=([Image.new("RGB", (2, 2))], [])))
+                stack.enter_context(patch("rynnbrain_vlm.run.cop_comparison_signature", return_value={"model": "base"}))
+                stack.enter_context(patch("rynnbrain_vlm.visual_matching.nominal_matching_bags", return_value=[]))
+                images = []
+                def append(label, image, **kwargs):
+                    images.append(image)
+                    return torch.tensor([1., .2])
+                cache = SimpleNamespace(images=images, append=append, reset=Mock(),
+                    generate_response=Mock(return_value="Decision: success\nVisual evidence: Scissors held."))
+                cache_factory = stack.enter_context(patch("rynnbrain_vlm.online_cache.CachedExecution", return_value=cache))
+                progress = Mock()
+                detector = OnlineDetector(config, progress)
+                factory.assert_called_once_with({"lora_adapter_path": None})
+                self.assertEqual(detector.score_source, "model_text_only")
+                self.assertEqual(detector.score_kind, "unavailable")
+                self.assertIsNone(config["rynnbrain"]["model"]["lora_adapter_path"])
+                model.generate_nominal.assert_called_once()
+                self.assertEqual(cache_factory.call_args.args[2], "Current model reference")
+                detector.reset("heldout")
+                with patch("builtins.print") as terminal:
+                    row, _, _ = detector.append(Image.new("RGB", (2, 2)), 1.)
+                self.assertIsNone(row["anomaly_score"])
+                self.assertIsNone(row["threshold"])
+                self.assertIsNone(row["above_threshold"])
+                self.assertEqual(row["vlm_response_source"], "base_model")
+                self.assertIn("Scissors held", row["vlm_response"])
+                self.assertTrue(terminal.called)
+                with tempfile.TemporaryDirectory() as directory:
+                    app = ReplayApplication({"output_dir": directory, "rynnbrain": {"camera_topics": ["top"]}},
+                                            [Path("heldout")], .01, False)
+                    app.detector = detector
+                    # Reuse the real append, JSON/CSV persistence and score plot with absent scores.
+                    images.clear()
+                    with patch("rosbag_io.iter_rosbag_image_frames", return_value=iter([(0, 1., Image.new("RGB", (2, 2)))])):
+                        app.run_bag(Path("heldout"))
+                    self.assertEqual(app.snapshot()["status"], "completed", app.snapshot().get("error"))
+                    result = next(Path(directory).glob("online_replay/*/heldout/online_results.json"))
+                    self.assertIsNone(json.loads(result.read_text())["rows"][0]["anomaly_score"])
+                    self.assertTrue((result.parent / "online_timeline.png").is_file())
+
+    def test_missing_classifier_still_stops_feature_only_replay(self):
+        config = {"vlm_benchmark": {"train_lora": False}, "rynnbrain": {
+            "source": "rosbag", "camera_topics": ["top"], "inference": {"feature_only": True},
+            "cop_classifier": {"enabled": True, "model_paths": {"raw": "missing.npz"}}}}
+        with patch("rynnbrain_vlm.cop_classifier.load_classifier", side_effect=FileNotFoundError("missing weights")), \
+             patch("rynnbrain_vlm.model.RynnBrainModel") as model:
+            with self.assertRaisesRegex(FileNotFoundError, "missing weights"):
+                OnlineDetector(config)
+        model.assert_not_called()
+
     def test_optional_answers_are_logged_for_each_prefix_without_replacing_scores(self):
         import torch
         detector = OnlineDetector.__new__(OnlineDetector)

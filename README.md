@@ -1625,6 +1625,14 @@ answer format; enabling text does not itself add visual explanations to an adapt
 trained only on decisions and onset times. This does not enable per-prefix text
 generation in the offline benchmark, whose existing final-answer behavior is unchanged.
 
+With text enabled, a missing, disabled or incompatible classifier is reported at
+startup and replay continues with model text only. Scores, thresholds and alarm
+decisions are unavailable (saved as null), not zero or invented probabilities.
+The selected base model or explicit LoRA is unchanged. A fresh nominal-reference
+response is generated with that model rather than reusing an incompatible
+classifier's reference response. With `feature_only: true`, classifier errors
+still stop replay. Existing compatible classifiers continue scoring normally.
+
 The GUI's **Find similar nominal frame** switch displays the exact scored observation beside
 its closest nominal image in the recorded stage. This is an experimental
 retrieval preview; it does **not** replace the CoP classifier memory, change the
