@@ -21,6 +21,72 @@ from rynnbrain_vlm.online_replay import (ReplayFeed, SequentialReplayFeed, gmr_s
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_legacy_lora_classifier_restores_saved_prompts_and_labels_without_retraining(self):
+        import torch
+        from rynnbrain_vlm.model import COP_REPRESENTATION_ID
+        from rynnbrain_vlm.cop_classifier import CoPLogisticClassifier
+        config = {"vlm_benchmark": {"train_lora": False}, "rynnbrain": {
+            "source": "rosbag", "input_modes": ["raw"], "camera_topics": ["top"],
+            "memory_camera_topics": ["top"], "reference_bags": ["reference"], "num_frames": 8,
+            "inference": {"feature_only": True}, "model": {"lora_adapter_path": "/saved/v102"},
+            "online_replay": {"interval_mode": "adaptive", "max_observations": None, "stop_on_alarm": True},
+            "cop_classifier": {"enabled": True, "method": "logistic", "model_paths": {"raw": "v131.npz"},
+                               "training": {"threshold": .7}}}}
+        before = json.dumps(config, sort_keys=True)
+        saved = dict(turn1_prompt="Exact saved reference prompt", turn2_prompt="Exact saved evaluation prompt",
+                     lora_adapter_sha256="legacy-adapter-hash", num_frames=8, nominal_response="Saved reference")
+        current = {**saved, "turn1_prompt": "Manually changed reference", "turn2_prompt": "Manually changed evaluation"}
+        classifier = CoPLogisticClassifier(np.array([1., 0.]), 0., np.zeros(2), .6, "raw",
+                                          COP_REPRESENTATION_ID, saved, {})
+        model = SimpleNamespace(temporal_profile={}, adapter_identity="legacy-adapter-hash",
+            adapter_training_bags=[], generate_nominal=Mock(side_effect=AssertionError("Do not regenerate saved reference")))
+        nominal = [(f"Time {i + 1}, camera top:", Image.new("RGB", (2, 2))) for i in range(8)]
+        history = []
+        def append(label, image, **kwargs):
+            history.append((label, image))
+            return torch.tensor([1., .2])
+        cache = SimpleNamespace(images=history, append=append, reset=Mock())
+        progress = Mock()
+        with patch("rynnbrain_vlm.model.RynnBrainModel", return_value=model), \
+             patch("rynnbrain_vlm.cop_classifier.load_classifier", return_value=classifier), \
+             patch("rynnbrain_vlm.run.cop_comparison_signature", return_value=current), \
+             patch("rynnbrain_vlm.run._raw_inputs", return_value=(nominal, [])), \
+             patch("rynnbrain_vlm.visual_matching.nominal_matching_bags", return_value=[]), \
+             patch("rynnbrain_vlm.online_cache.CachedExecution", return_value=cache) as factory:
+            detector = OnlineDetector(config, progress)
+        self.assertFalse(detector.timestamp_inputs)
+        self.assertEqual(detector.signature, saved)
+        self.assertEqual(factory.call_args.args[1]["images"], nominal)
+        self.assertEqual(factory.call_args.args[1]["text"], saved["turn1_prompt"])
+        self.assertEqual(factory.call_args.args[2], "Saved reference")
+        self.assertEqual(factory.call_args.args[3], saved["turn2_prompt"])
+        self.assertIsNone(factory.call_args.args[-1])
+        self.assertEqual(detector.classifier.threshold, .7)
+        self.assertEqual(classifier.threshold, .6)
+        self.assertTrue(any("Legacy LoRA/classifier" in call.args[0] for call in progress.call_args_list))
+        detector.reset("heldout")
+        row, _, _ = detector.append(Image.new("RGB", (2, 2)), 12.339)
+        self.assertEqual(history[0][0], "Time 1, camera top:")
+        self.assertEqual(row["timestamp_sec"], 12.339)
+        self.assertIsNotNone(row["anomaly_score"])
+        self.assertTrue(row["above_threshold"])
+        model.generate_nominal.assert_not_called()
+        self.assertEqual(json.dumps(config, sort_keys=True), before)
+        self.assertEqual(current["turn2_prompt"], "Manually changed evaluation")
+
+    def test_legacy_prompt_reuse_does_not_override_adapter_identity_or_task(self):
+        saved = dict(turn1_prompt="Saved ref", turn2_prompt="Saved test",
+                     lora_adapter_sha256="old", task_description="Pick scissors")
+        model = SimpleNamespace(temporal_profile={}, adapter_identity="loaded")
+        for field, value in (("lora_adapter_sha256", "different-adapter"), ("task_description", "Different task")):
+            with self.subTest(field=field):
+                current = {**saved, field: value, "turn1_prompt": "Current ref", "turn2_prompt": "Current test"}
+                with patch("rynnbrain_vlm.run.cop_comparison_signature", return_value=current):
+                    signature = replay_comparison_signature(model, {}, {}, "ref", 8, {}, saved)
+                classifier = SimpleNamespace(comparison_signature=saved, representation_id="norm")
+                with self.assertRaisesRegex(ValueError, field):
+                    validate_online_classifier(classifier, signature, "norm", "existing.npz")
+
     def test_replay_signature_marks_base_timestamp_inputs_and_preserves_temporal_adapter(self):
         for profile in ({}, {"protocol": "trained_temporal_protocol"}):
             with self.subTest(profile=profile):

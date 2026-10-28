@@ -79,13 +79,25 @@ def validate_online_classifier(classifier, signature, representation_id, path):
               "Replay does not train models; train_on_benchmark applies only to benchmarks.")
 
 
-def replay_comparison_signature(model, config, vlm, response, frame_count, generation):
-    """Replay always supplies real times, independently of adapter supervision."""
+def legacy_classifier_inputs(model, saved_signature):
+    """An explicitly loaded pre-temporal LoRA retains its classifier's inputs."""
+    return bool(getattr(model, "adapter_identity", None) and not model.temporal_profile
+                and saved_signature and not saved_signature.get("temporal_profile")
+                and not saved_signature.get("replay_timestamp_protocol")
+                and all(isinstance(saved_signature.get(key), str) for key in ("turn1_prompt", "turn2_prompt")))
+
+
+def replay_comparison_signature(model, config, vlm, response, frame_count, generation, saved_signature=None):
+    """Preserve legacy classifier inputs; otherwise supply real replay times."""
     from .run import cop_comparison_signature
     from .prompts import task_context_prompt, evaluation_prompt_multiturn
 
     signature = dict(cop_comparison_signature(model, config, vlm, "raw", response, frame_count, generation))
-    if not model.temporal_profile:
+    if legacy_classifier_inputs(model, saved_signature):
+        # Validate every other field (including the loaded adapter fingerprint)
+        # normally. These exact prompts will also be used for actual inference.
+        signature.update({key: saved_signature[key] for key in ("turn1_prompt", "turn2_prompt")})
+    elif not model.temporal_profile:
         task = vlm.get("task_description", "Robot manipulation task")
         variant = vlm.get("prompt_variant", "A")
         signature.update(
@@ -297,12 +309,14 @@ class OnlineDetector:
             self.response = None
         progress("Loading VLM and LoRA adapter")
         self.model = RynnBrainModel(vlm["model"])
+        self.timestamp_inputs = True
         generation = vlm.get("generation", {})
         if self.complete is not None:
             try:
                 self.signature = replay_comparison_signature(self.model, config, vlm, self.response,
-                                                            self.frame_count, generation)
+                                                            self.frame_count, generation, self.complete.comparison_signature)
                 validate_online_classifier(self.complete, self.signature, COP_REPRESENTATION_ID, self.path)
+                self.timestamp_inputs = not legacy_classifier_inputs(self.model, self.complete.comparison_signature)
                 self.prefix = load_prefix_detector(self.path, self.complete) if self.knn else None
                 self.onset = onset_enabled(settings)
                 self.classifier = self.complete
@@ -316,6 +330,7 @@ class OnlineDetector:
                 progress(f"Classifier incompatible or incomplete; continuing with model text only (no anomaly score): {error}")
                 self.complete = self.classifier = self.prefix = None
                 self.response = None
+                self.timestamp_inputs = True
         self.score_source = ("model_text_only" if self.classifier is None else
                              "nominal_prefix_index_diagnostic" if self.knn else
                              "onset_prefix_classifier" if self.onset else "whole_execution_classifier_on_prefixes")
@@ -338,17 +353,22 @@ class OnlineDetector:
         self.visual_memory = None
         self.capture_visual = False
         self.matching_stages = None
+        if not self.timestamp_inputs:
+            progress("Legacy LoRA/classifier: using its saved prompts and original frame-order labels; "
+                     "recorded timestamps remain in replay logs and results.")
         progress("Reading nominal reference images")
         nominal = []
         for bag in vlm.get("reference_bags", []):
             images, metadata = _raw_inputs(Path(bag), vlm["memory_camera_topics"], self.frame_count)
-            images = timestamped_images(images, metadata, vlm["memory_camera_topics"], self.frame_count)
+            if self.timestamp_inputs:
+                images = timestamped_images(images, metadata, vlm["memory_camera_topics"], self.frame_count)
             nominal.extend(images)
         if not nominal:
             raise ValueError("No nominal reference images were loaded.")
         task = vlm.get("task_description", "Robot manipulation task")
         reference_turn = dict(role="user", images=nominal,
-                              text=task_context_prompt(task, temporal=True, variant=vlm.get('prompt_variant', 'A')))
+                              text=(self.signature["turn1_prompt"] if self.classifier is not None else
+                                    task_context_prompt(task, temporal=True, variant=vlm.get('prompt_variant', 'A'))))
         if self.response is None:
             progress("Generating nominal-reference response with the selected model")
             self.response = self.model.generate_nominal(reference_turn, generation)
@@ -357,7 +377,8 @@ class OnlineDetector:
         progress("Preparing reusable reference cache (first model inference)")
         self.cache = CachedExecution(self.model,
             reference_turn,
-            self.response, evaluation_prompt_multiturn(task, "raw", temporal=True, variant=vlm.get('prompt_variant', 'A')), generation,
+            self.response, (self.signature["turn2_prompt"] if self.classifier is not None else
+                            evaluation_prompt_multiturn(task, "raw", temporal=True, variant=vlm.get('prompt_variant', 'A'))), generation,
             self.observation_limit)
         if not self.feature_only:
             progress("VLM text output enabled: each observation also generates a separate answer; this adds latency")
@@ -418,7 +439,11 @@ class OnlineDetector:
             raise ValueError("Observation timestamps must increase.")
         index = len(self.cache.images)
         topic = self.vlm["camera_topics"][0]
-        label = f"Frame {index + 1}, camera {topic}, time {timestamp:.3f} s from this bag start:"
+        if getattr(self, "timestamp_inputs", True):
+            label = f"Frame {index + 1}, camera {topic}, time {timestamp:.3f} s from this bag start:"
+        else:
+            from .run import _slug
+            label = f"Time {index + 1}, camera {_slug(topic)}:"
         started = synchronized_time()
         if torch.cuda.is_available():
             for device in range(torch.cuda.device_count()):
