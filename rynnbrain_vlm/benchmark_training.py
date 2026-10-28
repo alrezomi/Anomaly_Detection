@@ -126,20 +126,19 @@ def save_reusable_config(path, config):
 def resolve_trained_artifacts(config, progress=print):
     """Find trained artifacts for inference without rewriting the user's config.
 
-    Explicit, available artifacts win when automatic LoRA training is disabled.
+    Disabling automatic LoRA training keeps all explicitly configured paths,
+    including a null adapter selecting the base model, even if files are missing.
     Current prompts, inference options and threshold remain authoritative; replay
     still checks their compatibility with the selected classifier before scoring.
     """
+    if not train_lora_enabled(config):
+        return config
+
     from .cop_classifier import classifier_method, classifier_model_paths
 
     vlm = config.get("rynnbrain", {})
     classifier = vlm.get("cop_classifier", {})
-    configured = classifier_model_paths(classifier)
     modes = list(vlm.get("input_modes", ["raw"]))
-    available = all(configured.get(mode) and Path(configured[mode]).is_file()
-                    and Path(configured[mode]).with_suffix(".json").is_file() for mode in modes)
-    if available and not train_lora_enabled(config):
-        return config
     output = vlm.get("output_dir")
     if not output:
         return config

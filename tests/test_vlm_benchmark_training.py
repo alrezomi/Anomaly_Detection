@@ -128,7 +128,22 @@ class BenchmarkTrainingTests(unittest.TestCase):
         with self.assertRaisesRegex(FileNotFoundError, "missing artifacts"):
             resolve_trained_artifacts(current)
 
-    def test_normal_benchmark_reuse_resolves_same_paths_for_classifier_settings(self):
+    def test_disabled_training_preserves_null_or_explicit_adapter_with_missing_classifier(self):
+        self._completed_artifacts()
+        current = load_pipeline_config(self.config_path)
+        current["vlm_benchmark"]["train_lora"] = False
+        Path(current["rynnbrain"]["cop_classifier"]["model_paths"]["raw"]).unlink(missing_ok=True)
+        for adapter in (None, str(self.root / "explicit_adapter")):
+            with self.subTest(adapter=adapter):
+                current["rynnbrain"]["model"]["lora_adapter_path"] = adapter
+                before = deepcopy(current)
+                progress = Mock()
+                with patch.object(Path, "glob", side_effect=AssertionError("Must not discover runs")):
+                    self.assertIs(resolve_trained_artifacts(current, progress), current)
+                self.assertEqual(current, before)
+                progress.assert_not_called()
+
+    def test_normal_benchmark_keeps_configured_paths_when_training_disabled(self):
         import run_benchmark as benchmark
         from rynnbrain_vlm.cop_classifier import configured_training_settings
         _, saved = self._completed_artifacts()
@@ -137,11 +152,12 @@ class BenchmarkTrainingTests(unittest.TestCase):
         original["rynnbrain"]["cop_classifier"]["train_on_benchmark"] = False
         reuse = self.root / "reuse.json"
         reuse.write_text(json.dumps(original))
+        expected = load_pipeline_config(reuse)
         def check(arguments, config, update):
             settings = configured_training_settings(arguments.config, "raw")
-            self.assertEqual(settings["output_file"], Path(saved["rynnbrain"]["cop_classifier"]["model_paths"]["raw"]))
+            self.assertEqual(settings["output_file"], Path(expected["rynnbrain"]["cop_classifier"]["model_paths"]["raw"]))
             self.assertEqual(config["rynnbrain"]["model"]["lora_adapter_path"],
-                             saved["rynnbrain"]["model"]["lora_adapter_path"])
+                             original["rynnbrain"]["model"]["lora_adapter_path"])
         with patch.object(sys, "argv", ["benchmark", "--config", str(reuse)]), \
              patch.object(benchmark, "_run_benchmark", side_effect=check), \
              patch("rynnbrain_vlm.benchmark_training.subprocess.Popen") as training:
