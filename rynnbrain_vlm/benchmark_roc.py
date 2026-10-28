@@ -256,6 +256,9 @@ def _write_score_roc_report(
     """Sweep continuous classifier scores, independent of the VLM's decision."""
     timeline = any(row.get('benchmark_decision_mode') == 'timeline' for row in master_rows)
     score_column = "classifier_anomaly_score" if anomaly else "classifier_failure_probability"
+    uncensored = not anomaly and any("threshold_selection_peak_score" in row for row in master_rows)
+    if uncensored:
+        score_column = "threshold_selection_peak_score"
     score_name = "anomaly_score" if anomaly else "probability"
     dataframe = pd.DataFrame(master_rows).reindex(columns=[
         "bag_name", "bag_path", "ground_truth_label", "input_mode", score_column, "classifier_threshold",
@@ -342,6 +345,11 @@ def _write_score_roc_report(
     }
     if timeline:
         report['score_units'] = 'maximum prefix score / its threshold' if anomaly else 'maximum prefix failure score in [0, 1]; not a calibrated bag probability'
+    if uncensored:
+        report['score_units'] = 'Maximum score from the complete uncensored threshold-selection trajectory; per-bag output timelines may stop at the chosen threshold.'
+    if not anomaly:
+        from .threshold_sweep import write_threshold_sweep_report
+        report["threshold_sweep"] = write_threshold_sweep_report(master_rows, benchmark_root, input_modes=input_modes)
     (output_dir / "roc_summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return report
 
@@ -451,6 +459,7 @@ def main() -> None:
         print(f"Anomaly-distance reports: {arguments.summary.parent / 'benchmark_anomaly_roc'}")
     print(f"ROC report: {arguments.summary.parent / 'benchmark_roc'}")
     print(f"Probability ROC report: {arguments.summary.parent / 'benchmark_probability_roc'}")
+    print(f"Threshold sweep (60-90%, step 1%): {arguments.summary.parent / 'benchmark_threshold_sweep'}")
     print(f"Failure-probability boxplots: {arguments.summary.parent}")
 
 
