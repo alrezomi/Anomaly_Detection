@@ -2622,7 +2622,7 @@ training finishes:
 docker compose up --build online-replay
 ```
 
-Replay discovers the newest **completed** automatic run under this experiment's
+With `train_lora: true`, replay discovers the newest **completed** automatic run under this experiment's
 `pipeline_runs/` for the selected prompt variant and classifier method. It loads
 the adapter and classifier paths together, and prints the chosen run and paths
 at startup. This also works for runs completed before this discovery feature was
@@ -2631,11 +2631,12 @@ trains, regardless of the benchmark training flags. Your current inference
 options, threshold, prompts, cameras and task description remain in effect;
 the existing feature/classifier compatibility checks still apply.
 
-With `train_lora: false`, valid explicitly configured classifiers remain selected.
-If their files are missing, replay and ordinary benchmark runs can recover the
-paths from a completed automatic run. An ordinary benchmark saves these effective
-inputs in `benchmark_input_config.json` so classifier preparation and inference
-use the same paths. The original configuration is not rewritten.
+With `train_lora: false`, replay and ordinary benchmark runs use only the configured
+adapter and classifier paths. `lora_adapter_path: null` selects the base model;
+no saved LoRA is discovered, even when configured classifier files are missing.
+Missing files or incompatible classifiers produce an error rather than selecting
+another model. Use classifiers trained with the selected base model or adapter.
+The original configuration is not rewritten.
 
 Video/heatmap LoRA inputs still require the existing prepared training videos;
 this option does not create those videos or rebuild DINO memory.
