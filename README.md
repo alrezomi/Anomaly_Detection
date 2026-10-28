@@ -1643,13 +1643,20 @@ processes its selected bag set and exports combined tables/plots. The GUI
 processes only the bag you start, saving each execution under `online_replay/`.
 It does not launch or monitor a benchmark, nor automatically combine its results.
 
-VLM browser replay labels every nominal-reference and execution image with its
-actual recorded time in seconds from that image's own bag start, including when
-running the base model without LoRA. Both prompt functions receive `temporal=True`;
-reference and execution clocks remain separate. The image-history cache and
-sampling interval are unchanged. Existing temporal-adapter classifier signatures
-remain compatible; older classifiers using frame-order-only inputs do not silently
-score these timestamped inputs (text-only replay can still continue as below).
+Base-model VLM browser replay labels every nominal-reference and execution image
+with its actual recorded time in seconds from that image's own bag start. Temporal
+LoRAs retain their trained timestamp format. Both paths use `temporal=True`;
+reference and execution clocks remain separate.
+
+When explicitly loading a legacy LoRA without temporal metadata and its matching
+frame-order-only classifier (for example v102/v131), replay restores the exact
+reference/evaluation prompts saved in the classifier and the original frame-order
+labels. It prints this selection at startup; it does not edit the prompt script,
+configuration or model files. All other feature settings, the loaded adapter
+fingerprint, and the classifier's prefix companion are still checked normally.
+Actual capture times remain in replay logs and saved rows; legacy inputs do not
+inject new seconds labels into the model. This preserves the saved feature
+extractor while allowing adaptive sampling, extended histories and alarm stopping.
 
 When `rynnbrain.inference.feature_only` is `false` (also the default when omitted),
 browser VLM replay additionally generates an answer for **each sampled observation
