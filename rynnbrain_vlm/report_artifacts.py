@@ -45,6 +45,13 @@ def write_report_index(rows, statistics, pca, root, method):
         for metric in statistics.get(name, {}).get('metrics', []):
             lines.append(f"- {name} / {metric['input_mode']} / {metric['failure_category']}: "
                          f"{metric['status']}. {metric.get('reason') or ''}")
+    sweep = statistics.get('probability_roc', {}).get('threshold_sweep', {})
+    if sweep:
+        lines += ['', '## Threshold sweep (60-90%, step 1%)', '',
+                  '[All threshold metrics](benchmark_threshold_sweep/threshold_metrics.csv) · '
+                  '[Best thresholds and ties](benchmark_threshold_sweep/threshold_summary.json)', '',
+                  'Best accuracy is measured on these scored bags. Select a threshold on validation data '
+                  'and evaluate it on separate test bags; the configured threshold is not changed.']
     lines += ['', '## PCA availability', '']
     for mode in (pca or {}).get('modes', []):
         lines.append(f"- {mode['input_mode']}: {mode['status']}. {mode.get('reason') or mode.get('note') or ''}")

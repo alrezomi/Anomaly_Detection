@@ -342,6 +342,9 @@ def _write_score_roc_report(
     }
     if timeline:
         report['score_units'] = 'maximum prefix score / its threshold' if anomaly else 'maximum prefix failure score in [0, 1]; not a calibrated bag probability'
+    if not anomaly:
+        from .threshold_sweep import write_threshold_sweep_report
+        report["threshold_sweep"] = write_threshold_sweep_report(master_rows, benchmark_root, input_modes=input_modes)
     (output_dir / "roc_summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return report
 
@@ -451,6 +454,7 @@ def main() -> None:
         print(f"Anomaly-distance reports: {arguments.summary.parent / 'benchmark_anomaly_roc'}")
     print(f"ROC report: {arguments.summary.parent / 'benchmark_roc'}")
     print(f"Probability ROC report: {arguments.summary.parent / 'benchmark_probability_roc'}")
+    print(f"Threshold sweep (60-90%, step 1%): {arguments.summary.parent / 'benchmark_threshold_sweep'}")
     print(f"Failure-probability boxplots: {arguments.summary.parent}")
 
 

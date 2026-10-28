@@ -2864,6 +2864,29 @@ change in multiples of `1 / normal_count`, and recalls in multiples of
 `1 / failure_count`; several such changes can lie on the same straight segment.
 Several perfect-ranking categories can also overlap on the same curve.
 
+The probability report also writes `benchmark_threshold_sweep/`, comparing
+**60% through 90%, inclusive, in 1% steps** using those already computed scores:
+
+- `threshold_metrics.csv`: accuracy, balanced accuracy, failure recall,
+  false-positive rate, precision, F1 and TP/FP/TN/FN at every threshold.
+- `threshold_metrics_<mode>_<decision_mode>.png`: curves for accuracy, balanced
+  accuracy, recall and FPR; the overall best-accuracy thresholds are highlighted.
+- `threshold_summary.json`: the highest observed accuracy and **all tied
+  thresholds**, plus class counts and exclusions. Comparisons with only one
+  ground-truth class do not produce a best threshold.
+
+Input modes, whole-demo/timeline protocols and failure categories remain separate.
+In timeline mode the sweep uses each bag's maximum saved prefix score, matching
+the existing any-crossing decision rule. It reuses the saved observation sequence;
+it does not simulate different adaptive replay trajectories or extend stopped
+recordings. Missing/invalid scores and unknown labels are excluded and counted.
+This report does not change the config, model weights or classifier files.
+Accuracy depends on the normal/failure class mix; use validation bags to choose
+a threshold, then evaluate that chosen threshold on separate test bags.
+
+Both the ordinary benchmark and the report-regeneration command below produce
+this sweep automatically, with no additional model inference or training.
+
 Both probability and kNN ROC plots emphasize **Overall (all evaluated bags)**
 as a thick dark line drawn above the thinner, lighter category curves. This
 overall ROC pools all scored held-out nominal and failure bags directly; it is

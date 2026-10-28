@@ -844,6 +844,12 @@ def _run_benchmark(arguments, config, update) -> None:
     for metric in statistics["probability_roc"]["metrics"]:
         value = f"AUROC={metric['auroc']:.3f}" if metric["status"] == "created" else metric["reason"]
         print(f"  {metric['input_mode']} / {metric['failure_category']}: {value}")
+    print(f"Threshold sweep (60-90%, step 1%): {benchmark_root / 'benchmark_threshold_sweep'}")
+    for comparison in statistics["probability_roc"].get("threshold_sweep", {}).get("comparisons", []):
+        if comparison["failure_category"] == "all_failures" and comparison["status"] == "created":
+            thresholds = ', '.join(f"{100 * value:.0f}%" for value in comparison["best_accuracy_thresholds"])
+            print(f"  {comparison['input_mode']} / {comparison['benchmark_decision_mode']}: "
+                  f"best observed accuracy={comparison['best_accuracy']:.1%}; tied threshold(s): {thresholds}")
     if statistics["scored_rows"]:
         print(
             "\nOverall accuracy: "
