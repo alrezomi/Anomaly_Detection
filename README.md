@@ -2576,19 +2576,15 @@ times and prefix supervision. This workflow uses the existing trainer and target
 it does not alter prompts, numeric-onset supervision, or graph generation.
 The flag is off when omitted/false, preserving the ordinary benchmark behavior.
 
-Run the usual `docker compose run --rm --build benchmark` command, or launch
-detached for an overnight run (stop the browser's model first to release GPU memory):
+Use the usual benchmark command (stop the browser's model first to release GPU memory):
 
 ```bash
 docker compose stop online-replay
-docker compose run -d --build --name vlm-overnight benchmark
-docker logs -f vlm-overnight
+docker compose run --rm --build benchmark
 ```
 
-Disconnecting or pressing Ctrl+C in `docker logs -f` stops following the log,
-not the detached benchmark. Its terminal output is also saved to
-`benchmark_run.log`. The stopped container is retained so its logs remain
-available the next day; use a different container name for another detached run.
+No additional mode or container name is needed. Terminal output is also saved
+to `benchmark_run.log`.
 
 Each automatic run creates a unique directory under
 `<rynnbrain.output_dir>_benchmark/pipeline_runs/<UTC timestamp>_prompt_<a|b>/`
@@ -2618,6 +2614,29 @@ to load that configuration to reuse the new adapter/classifiers without training
 again. Your original config retains its flag; running it again with
 `train_lora: true` creates another fresh training run. The configured reference,
 LoRA-training and classifier-training bags remain excluded from test evaluation.
+
+The regular browser command can use your original configuration after automatic
+training finishes:
+
+```bash
+docker compose up --build online-replay
+```
+
+Replay discovers the newest **completed** automatic run under this experiment's
+`pipeline_runs/` for the selected prompt variant and classifier method. It loads
+the adapter and classifier paths together, and prints the chosen run and paths
+at startup. This also works for runs completed before this discovery feature was
+added; no retraining or manual timestamp-path editing is needed. Replay never
+trains, regardless of the benchmark training flags. Your current inference
+options, threshold, prompts, cameras and task description remain in effect;
+the existing feature/classifier compatibility checks still apply.
+
+With `train_lora: false`, valid explicitly configured classifiers remain selected.
+If their files are missing, replay and ordinary benchmark runs can recover the
+paths from a completed automatic run. An ordinary benchmark saves these effective
+inputs in `benchmark_input_config.json` so classifier preparation and inference
+use the same paths. The original configuration is not rewritten.
+
 Video/heatmap LoRA inputs still require the existing prepared training videos;
 this option does not create those videos or rebuild DINO memory.
 

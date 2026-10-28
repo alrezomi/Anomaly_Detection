@@ -226,6 +226,8 @@ def gmr_sample_frames(frames, timestamps):
 class OnlineDetector:
     """Load once, reset execution cache between bags, never train artifacts."""
     def __init__(self, config, progress=lambda message: None):
+        from .benchmark_training import resolve_trained_artifacts
+        config = resolve_trained_artifacts(config, progress)
         from .model import RynnBrainModel, COP_REPRESENTATION_ID
         from .cop_classifier import classifier_model_paths, classifier_method, load_classifier
         from .cop_knn import CoPKNNDetector

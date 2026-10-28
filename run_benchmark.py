@@ -874,14 +874,28 @@ def _run_benchmark(arguments, config, update) -> None:
 def main() -> None:
     arguments = parse_arguments()
     config = load_pipeline_config(arguments.config)
-    from rynnbrain_vlm.benchmark_training import train_lora_enabled, prepare_pipeline_run, save_reusable_config
+    from rynnbrain_vlm.benchmark_training import (
+        train_lora_enabled, prepare_pipeline_run, save_reusable_config, resolve_trained_artifacts,
+    )
     automatic_training = train_lora_enabled(config)
+    artifact_messages = []
+    if not automatic_training and not arguments.skip_vlm:
+        resolved = resolve_trained_artifacts(config, artifact_messages.append)
+        if resolved is not config:
+            config = resolved
     base = config.get("rynnbrain", {}).get("output_dir", str(Path(config.get("output_dir", "outputs")) / "rynnbrain"))
     directory = arguments.benchmark_dir or Path(f"{base}_benchmark")
     directory = directory / (config.get('vlm_benchmark') or {}).get('decision_mode', 'whole_demo')
     if automatic_training:
         arguments, config, directory = prepare_pipeline_run(arguments, config)
     with record_run(directory, "benchmark") as update:
+        if artifact_messages:
+            from rynnbrain_vlm.runtime import write_json
+            arguments.config = directory / "benchmark_input_config.json"
+            write_json(arguments.config, config)
+            update(effective_config=str(arguments.config))
+            for message in artifact_messages:
+                print(message, flush=True)
         update(arguments=vars(arguments) | {key: str(value) for key, value in vars(arguments).items() if isinstance(value, Path)})
         if automatic_training:
             update(automatic_lora_training=True, effective_config=str(arguments.config))

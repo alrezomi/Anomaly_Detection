@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 from pipeline_settings import load_pipeline_config
 from rynnbrain_vlm.benchmark_training import (
-    prepare_pipeline_run, run_lora_training, train_lora_enabled,
+    prepare_pipeline_run, run_lora_training, train_lora_enabled, resolve_trained_artifacts,
 )
 
 
@@ -66,6 +66,87 @@ class BenchmarkTrainingTests(unittest.TestCase):
         self.assertFalse(train_lora_enabled({"vlm_benchmark": {"train_lora": False}}))
         with self.assertRaisesRegex(ValueError, "must be true or false"):
             train_lora_enabled({"vlm_benchmark": {"train_lora": "false"}})
+
+    def _completed_artifacts(self, status="completed"):
+        config = load_pipeline_config(self.config_path)
+        arguments, saved, output = prepare_pipeline_run(self.arguments(), config)
+        adapter = Path(saved["rynnbrain"]["model"]["lora_adapter_path"])
+        adapter.mkdir()
+        for name in ["adapter_config.json", "training_manifest.json"]:
+            (adapter / name).write_text("{}")
+        (adapter / "adapter_model.safetensors").write_bytes(b"trained adapter")
+        classifier = Path(saved["rynnbrain"]["cop_classifier"]["model_paths"]["raw"])
+        classifier.parent.mkdir()
+        classifier.write_bytes(b"trained classifier")
+        classifier.with_suffix(".json").write_text("{}")
+        output.mkdir()
+        (output / "benchmark_runtime.json").write_text(json.dumps({"status": status}))
+        return arguments, saved
+
+    def test_replay_finds_existing_completed_run_without_a_new_pointer_or_training(self):
+        _, saved = self._completed_artifacts()
+        current = load_pipeline_config(self.config_path)
+        current["rynnbrain"]["inference"]["feature_only"] = False
+        current["rynnbrain"]["cop_classifier"]["training"]["threshold"] = .7
+        before = deepcopy(current)
+        progress = Mock()
+        resolved = resolve_trained_artifacts(current, progress)
+        self.assertEqual(resolved["rynnbrain"]["model"]["lora_adapter_path"],
+                         saved["rynnbrain"]["model"]["lora_adapter_path"])
+        self.assertEqual(resolved["rynnbrain"]["cop_classifier"]["model_paths"],
+                         saved["rynnbrain"]["cop_classifier"]["model_paths"])
+        self.assertFalse(resolved["rynnbrain"]["inference"]["feature_only"])
+        self.assertEqual(resolved["rynnbrain"]["cop_classifier"]["training"]["threshold"], .7)
+        self.assertEqual(current, before)
+        self.assertEqual(self.config_path.read_bytes(), self.original)
+        self.assertIn("Using completed training run", progress.call_args_list[0].args[0])
+        # Check that OnlineDetector uses the resolved path before loading a model.
+        from rynnbrain_vlm.online_replay import OnlineDetector
+        from rynnbrain_vlm import run  # Bind real imports before mocking the loader.
+        with patch("rynnbrain_vlm.cop_classifier.load_classifier", side_effect=RuntimeError("loader reached")) as loader:
+            with self.assertRaisesRegex(RuntimeError, "loader reached"):
+                OnlineDetector(current)
+        self.assertEqual(loader.call_args.args[0], Path(saved["rynnbrain"]["cop_classifier"]["model_paths"]["raw"]))
+
+    def test_replay_ignores_failed_runs_and_honors_explicit_available_models(self):
+        _, saved = self._completed_artifacts()
+        self._completed_artifacts(status="failed")
+        current = load_pipeline_config(self.config_path)
+        self.assertEqual(resolve_trained_artifacts(current)["rynnbrain"]["model"]["lora_adapter_path"],
+                         saved["rynnbrain"]["model"]["lora_adapter_path"])
+        current["vlm_benchmark"]["train_lora"] = False
+        explicit = Path(current["rynnbrain"]["cop_classifier"]["model_paths"]["raw"])
+        explicit.write_bytes(b"explicit classifier")
+        explicit.with_suffix(".json").write_text("{}")
+        self.assertIs(resolve_trained_artifacts(current), current)
+
+    def test_replay_without_completed_runs_keeps_config_and_missing_artifacts_raise(self):
+        current = load_pipeline_config(self.config_path)
+        self.assertIs(resolve_trained_artifacts(current), current)
+        _, saved = self._completed_artifacts()
+        Path(saved["rynnbrain"]["cop_classifier"]["model_paths"]["raw"]).unlink()
+        with self.assertRaisesRegex(FileNotFoundError, "missing artifacts"):
+            resolve_trained_artifacts(current)
+
+    def test_normal_benchmark_reuse_resolves_same_paths_for_classifier_settings(self):
+        import run_benchmark as benchmark
+        from rynnbrain_vlm.cop_classifier import configured_training_settings
+        _, saved = self._completed_artifacts()
+        original = json.loads(self.original)
+        original["vlm_benchmark"]["train_lora"] = False
+        original["rynnbrain"]["cop_classifier"]["train_on_benchmark"] = False
+        reuse = self.root / "reuse.json"
+        reuse.write_text(json.dumps(original))
+        def check(arguments, config, update):
+            settings = configured_training_settings(arguments.config, "raw")
+            self.assertEqual(settings["output_file"], Path(saved["rynnbrain"]["cop_classifier"]["model_paths"]["raw"]))
+            self.assertEqual(config["rynnbrain"]["model"]["lora_adapter_path"],
+                             saved["rynnbrain"]["model"]["lora_adapter_path"])
+        with patch.object(sys, "argv", ["benchmark", "--config", str(reuse)]), \
+             patch.object(benchmark, "_run_benchmark", side_effect=check), \
+             patch("rynnbrain_vlm.benchmark_training.subprocess.Popen") as training:
+            benchmark.main()
+        training.assert_not_called()
 
     def test_fresh_paths_preserve_old_models_prompt_training_and_user_config(self):
         config = load_pipeline_config(self.config_path)

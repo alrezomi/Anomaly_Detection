@@ -9,7 +9,7 @@ import subprocess
 import sys
 from time import perf_counter
 
-from pipeline_settings import resolve_pipeline_config
+from pipeline_settings import load_pipeline_config, resolve_pipeline_config
 from .runtime import write_json
 
 
@@ -121,3 +121,67 @@ def save_reusable_config(path, config):
     saved["vlm_benchmark"]["train_lora"] = False
     saved["rynnbrain"]["cop_classifier"]["train_on_benchmark"] = False
     write_json(path, saved)
+
+
+def resolve_trained_artifacts(config, progress=print):
+    """Find trained artifacts for inference without rewriting the user's config.
+
+    Explicit, available artifacts win when automatic LoRA training is disabled.
+    Current prompts, inference options and threshold remain authoritative; replay
+    still checks their compatibility with the selected classifier before scoring.
+    """
+    from .cop_classifier import classifier_method, classifier_model_paths
+
+    vlm = config.get("rynnbrain", {})
+    classifier = vlm.get("cop_classifier", {})
+    configured = classifier_model_paths(classifier)
+    modes = list(vlm.get("input_modes", ["raw"]))
+    available = all(configured.get(mode) and Path(configured[mode]).is_file()
+                    and Path(configured[mode]).with_suffix(".json").is_file() for mode in modes)
+    if available and not train_lora_enabled(config):
+        return config
+    output = vlm.get("output_dir")
+    if not output:
+        return config
+    runs = Path(f"{output}_benchmark") / "pipeline_runs"
+    for path in sorted(runs.glob("*/pipeline_config.json"), reverse=True):
+        try:
+            saved = load_pipeline_config(path)
+            trained = saved.get("rynnbrain", {})
+            if (trained.get("prompt_variant", "A") != vlm.get("prompt_variant", "A")
+                    or classifier_method(trained.get("cop_classifier", {})) != classifier_method(classifier)):
+                continue
+            mode = saved.get("vlm_benchmark", {}).get("decision_mode", "whole_demo")
+            runtime = json.loads((path.parent / mode / "benchmark_runtime.json").read_text(encoding="utf-8"))
+            if runtime.get("status") != "completed":
+                continue
+        except (OSError, ValueError, TypeError):
+            continue  # Failed/interrupted runs are not usable completed benchmarks.
+        paths = classifier_model_paths(trained.get("cop_classifier", {}))
+        adapter = trained.get("model", {}).get("lora_adapter_path")
+        required = [Path(paths[name]) for name in modes if paths.get(name)]
+        if len(required) != len(modes):
+            continue
+        required += [item.with_suffix(".json") for item in list(required)]
+        if adapter:
+            required += [Path(adapter) / "adapter_config.json", Path(adapter) / "training_manifest.json"]
+        if not adapter or not any((Path(adapter) / name).is_file()
+                                  for name in ("adapter_model.safetensors", "adapter_model.bin")):
+            raise FileNotFoundError(f"Completed training run is missing its LoRA weights: {path.parent}")
+        missing = [str(item) for item in required if not item.is_file()]
+        if missing:
+            raise FileNotFoundError(f"Completed training run has missing artifacts: {', '.join(missing)}")
+        result = deepcopy(config)
+        target = result["rynnbrain"]
+        target["model"] = {**target.get("model", {}), "lora_adapter_path": adapter}
+        target["cop_classifier"] = {**classifier, "enabled": True,
+                                    "model_paths": {name: paths[name] for name in modes}}
+        target["cop_classifier"]["training"] = {
+            **classifier.get("training", {}),
+            "input_dir": trained["cop_classifier"].get("training", {}).get("input_dir"),
+        }
+        progress(f"Using completed training run: {path.parent}")
+        progress(f"Trained LoRA adapter: {adapter}")
+        progress(f"Trained classifier(s): {target['cop_classifier']['model_paths']}")
+        return result
+    return config
