@@ -118,6 +118,23 @@ class OnlineCacheTests(unittest.TestCase):
         torch.testing.assert_close(following, engine.uncached_vector(), rtol=2e-4, atol=2e-5)
         self.assertTrue(all(torch.equal(before[name], value) for name, value in wrapper.model.named_parameters()))
 
+        # Longer execution histories retain exactly the same nominal reference
+        # and prompt readout; no rolling window or discarded observations.
+        extended = CachedExecution(wrapper, reference, "Normal", "Decide", {}, None)
+        with patch.object(wrapper.model, "generate", side_effect=AssertionError("Feature only")):
+            for step in range(12):
+                with patch.object(visual, "forward", wraps=visual.forward) as vision:
+                    vector = extended.append(f"Frame {step + 1}, time {step * 3.125:.3f} s:",
+                                             Image.new("RGB", (4, 4), (step + 2, 0, 0)))
+                self.assertEqual(vision.call_count, 1)
+                self.assertEqual(len(vision.call_args.kwargs["grid_thw"]), 1)
+                if step in (7, 8, 11):
+                    torch.testing.assert_close(vector, extended.uncached_vector(), rtol=2e-4, atol=2e-5)
+                self.assertEqual(extended.reference_cache.get_seq_length(), pristine)
+        self.assertEqual(len(extended.images), 12)
+        extended.reset()
+        self.assertEqual(len(extended.images), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
