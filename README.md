@@ -2887,6 +2887,50 @@ a threshold, then evaluate that chosen threshold on separate test bags.
 Both the ordinary benchmark and the report-regeneration command below produce
 this sweep automatically, with no additional model inference or training.
 
+For the **sequential GUI-style search followed by one best-threshold report**, add
+`"threshold_search": true` inside the existing `vlm_benchmark` object, alongside
+`"decision_mode": "timeline"` and your selected `folders`. Keep the existing
+LoRA/classifier paths and set `rynnbrain.inference.feature_only: true`. This workflow
+currently supports a raw, single-camera rosbag VLM with a logistic classifier.
+It does not run DINO or whole-demo inference. Use the ordinary `benchmark` command.
+
+The benchmark uses the same `OnlineDetector` and the `rynnbrain.online_replay`
+constant/adaptive interval rules as the GUI, but reads the first recorded frame
+at or after each due bag timestamp without waiting for wall-clock replay. Only
+the current frame and cached preceding observations reach the model. For an
+extended trajectory, keep `online_replay.max_observations: null`; `num_frames: 8`
+still describes the nominal reference. `online_replay.interval_sec` sets the
+constant interval (default 10 seconds); the GUI also uses it as its initial value.
+Adaptive bands remain 10/7/5/3 seconds.
+
+The first pass deliberately continues after alarms so that all thresholds from
+60% through 90% can be compared fairly. It caches each observation **once**, not
+once per threshold. `threshold_selection/` contains compact per-bag NPZ scan
+caches, selection scores, ROC/AUROC, threshold curves and `selected_threshold.json`.
+Both nominal and failure labels are required. All accuracy ties are reported;
+the lowest tied threshold is selected, favoring recall on the same trajectories.
+
+Only **one** full output tree is exported, under `best_threshold/`, using saved
+frames/features rather than repeating model inference. With
+`online_replay.stop_on_alarm: true`, each exported timeline ends at its first
+crossing of the selected threshold; negative runs retain the observation window.
+Usual metrics, timelines, failure-timing graphs, boxplots, ROC/AUROC, PCA, selected
+input images, response/vector records and report index are retained. ROC ranking
+uses `threshold_selection_peak_score` from the uncensored scan; per-bag reported
+probabilities and PCA describe the selected stopping point. There are no
+per-threshold output trees. The original config, prompts and trained model files
+are not edited; `best_threshold/pipeline_config.json` is a separate reusable
+configuration with the chosen cutoff and training/search disabled. Use a fresh
+output directory for another selection run; existing best-threshold reports are
+not overwritten.
+
+`benchmark_frame_runtime.csv`, `.json` and `.png` report mean cached feature and
+classifier processing time per observation and a weighted mean over the selected
+observations. These timings exclude model/reference loading, frame decoding,
+waiting and report export. They are actual processing measurements from the
+single scan, not nominal sampling intervals. Threshold selection on these bags
+is validation, not an independent test of the chosen cutoff.
+
 Both probability and kNN ROC plots emphasize **Overall (all evaluated bags)**
 as a thick dark line drawn above the thinner, lighter category curves. This
 overall ROC pools all scored held-out nominal and failure bags directly; it is

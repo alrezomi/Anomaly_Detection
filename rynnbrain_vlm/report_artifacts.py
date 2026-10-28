@@ -52,6 +52,14 @@ def write_report_index(rows, statistics, pca, root, method):
                   '[Best thresholds and ties](benchmark_threshold_sweep/threshold_summary.json)', '',
                   'Best accuracy is measured on these scored bags. Select a threshold on validation data '
                   'and evaluate it on separate test bags; the configured threshold is not changed.']
+    if any('threshold_selection_peak_score' in row for row in rows):
+        lines += ['', '## Selected threshold and processing time', '',
+                  '[Selected threshold](selected_threshold.json) · '
+                  '[Average processing time](benchmark_frame_runtime.json) · '
+                  '[Per-bag frame timings](benchmark_frame_runtime.csv)', '',
+                  'Per-bag timelines and PCA use the chosen replay stopping point. ROC and threshold '
+                  'selection use the complete uncensored scan, so stopping at one threshold does not '
+                  'hide scores needed to assess higher thresholds.']
     lines += ['', '## PCA availability', '']
     for mode in (pca or {}).get('modes', []):
         lines.append(f"- {mode['input_mode']}: {mode['status']}. {mode.get('reason') or mode.get('note') or ''}")

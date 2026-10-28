@@ -254,7 +254,7 @@ def gmr_sample_frames(frames, timestamps):
 
 class OnlineDetector:
     """Load once, reset execution cache between bags, never train artifacts."""
-    def __init__(self, config, progress=lambda message: None):
+    def __init__(self, config, progress=lambda message: None, *, model=None):
         from .benchmark_training import resolve_trained_artifacts
         config = resolve_trained_artifacts(config, progress)
         from .model import RynnBrainModel, COP_REPRESENTATION_ID
@@ -308,7 +308,7 @@ class OnlineDetector:
             self.complete = None
             self.response = None
         progress("Loading VLM and LoRA adapter")
-        self.model = RynnBrainModel(vlm["model"])
+        self.model = model if model is not None else RynnBrainModel(vlm["model"])
         self.timestamp_inputs = True
         generation = vlm.get("generation", {})
         if self.complete is not None:
@@ -1038,17 +1038,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--bag", type=Path, action="append", help="Optional explicit selection; otherwise lists test_bag and all ROS bags under ANOMALY_DATA_ROOT (/data).")
-    parser.add_argument("--interval-sec", type=float, default=10., help="Minimum elapsed time between selected observations; default 10 s.")
+    parser.add_argument("--interval-sec", type=float, default=None, help="Override online_replay.interval_sec (default 10 s).")
     parser.add_argument("--verify-cache", action="store_true", help="Recompute each prefix and stop on feature/score/decision mismatch. Adds diagnostic runtime.")
     parser.add_argument("--diagnose-cache", action="store_true", help="Check every prefix, continuing mismatches with uncached scores. Cache remains unverified if any check fails.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    if not math.isfinite(args.interval_sec) or args.interval_sec <= 0:
+    if args.interval_sec is not None and (not math.isfinite(args.interval_sec) or args.interval_sec <= 0):
         parser.error("--interval-sec must be finite and positive")
     config = load_pipeline_config(args.config)
+    replay_settings(config)
+    interval = args.interval_sec if args.interval_sec is not None else config.get("rynnbrain", {}).get("online_replay", {}).get("interval_sec", 10.)
     bags = replay_bags(config, args.bag)
-    app = ReplayApplication(config, bags, args.interval_sec, args.verify_cache, args.diagnose_cache)
+    app = ReplayApplication(config, bags, interval, args.verify_cache, args.diagnose_cache)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
     print(f"Replay HTTP server listening on {args.host}:{args.port}. Open http://127.0.0.1:{args.port} on the lab PC.", flush=True)
     print("From another PC, forward this port through SSH or VS Code first. Open the LOCAL forwarded port in your browser "

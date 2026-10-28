@@ -35,10 +35,12 @@ def write_threshold_sweep_report(master_rows, benchmark_root, *, input_modes=Non
 
     root = Path(benchmark_root) / "benchmark_threshold_sweep"
     root.mkdir(parents=True, exist_ok=True)
+    score_column = ("threshold_selection_peak_score" if any("threshold_selection_peak_score" in row for row in master_rows)
+                    else "classifier_failure_probability")
     data = pd.DataFrame(master_rows).reindex(columns=["bag_path", "input_mode", "ground_truth_label",
-        "classifier_failure_probability", "benchmark_decision_mode"])
+        score_column, "benchmark_decision_mode"])
     data["benchmark_decision_mode"] = data["benchmark_decision_mode"].fillna("whole_demo")
-    data["score"] = pd.to_numeric(data["classifier_failure_probability"], errors="coerce")
+    data["score"] = pd.to_numeric(data[score_column], errors="coerce")
     data["valid_score"] = np.isfinite(data["score"]) & data["score"].between(0, 1)
     data["failure_category"] = [failure_category(path, label) for path, label in
                                 zip(data["bag_path"], data["ground_truth_label"])]
@@ -96,7 +98,7 @@ def write_threshold_sweep_report(master_rows, benchmark_root, *, input_modes=Non
             plots.append(str(path))
     csv_path = root / "threshold_metrics.csv"
     pd.DataFrame(metrics, columns=COLUMNS).to_csv(csv_path, index=False)
-    report = dict(score_column="classifier_failure_probability", thresholds=list(THRESHOLDS),
+    report = dict(score_column=score_column, thresholds=list(THRESHOLDS),
         threshold_rule="Predict failure when score >= threshold.",
         score_definition="Whole-demo score in whole_demo mode; maximum observed prefix score in timeline mode.",
         interpretation="Empirical accuracy on these scored bags, not independent test performance. "

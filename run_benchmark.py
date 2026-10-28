@@ -319,6 +319,8 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
     runtime = any("inference_mode" in row for row in master_rows)
     if runtime:
         columns += ["inference_mode", *RUNTIME_FIELDS, "runtime_total_bag_sec"]
+        if any('runtime_frame_count' in row for row in master_rows):
+            columns += ['runtime_frame_count', 'runtime_frame_sec_mean', 'runtime_feature_frame_sec_mean', 'runtime_classifier_frame_sec_mean']
         if "classifier_decision" not in columns:
             columns += ["classifier_decision"]
         columns += ["classifier_correct"]
@@ -344,6 +346,8 @@ def _build_clean_report(master_rows: list[dict[str, Any]]) -> pd.DataFrame:
                 **({key: row.get(key) for key in VLM_TIME_FIELDS} if temporal else {}),
                 **({"inference_mode": row.get("inference_mode"),
                     **{key: row.get(key) for key in (*RUNTIME_FIELDS, "runtime_total_bag_sec")},
+                    **{key: row.get(key) for key in ('runtime_frame_count', 'runtime_frame_sec_mean',
+                        'runtime_feature_frame_sec_mean', 'runtime_classifier_frame_sec_mean')},
                     "classifier_decision": row.get("classifier_decision"),
                     "classifier_correct": row.get("classifier_decision_correct")} if runtime else {}),
                 **({'benchmark_decision_mode': row.get('benchmark_decision_mode'),
@@ -465,7 +469,7 @@ def _write_tables(master_rows, benchmark_root):
         temporary.replace(path)
 
 
-def _run_benchmark(arguments, config, update) -> None:
+def _run_benchmark(arguments, config, update) -> dict[str, Any] | None:
     vlm = dict(config.get("rynnbrain", {}))
     if not vlm and not arguments.skip_vlm:
         raise ValueError("Add a 'rynnbrain' section to pipeline_config.json, or pass --skip-vlm.")
@@ -489,15 +493,19 @@ def _run_benchmark(arguments, config, update) -> None:
     selection = config.get('vlm_benchmark') or {}
     if not isinstance(selection, dict):
         raise ValueError('vlm_benchmark must be an object containing a folders list.')
+    from rynnbrain_vlm.benchmark_replay import threshold_search_enabled, validate_threshold_search
+    threshold_search = threshold_search_enabled(selection)
     if arguments.prepare_classifier:
         vlm['cop_classifier'] = {**vlm.get('cop_classifier', {}), 'enabled': True}
     decision_mode = configure_decision_mode(selection, vlm, skip_vlm=arguments.skip_vlm)
     config['rynnbrain'] = vlm
+    if threshold_search:
+        validate_threshold_search(config, decision_mode, run_dino, arguments.skip_vlm)
     benchmark_root = benchmark_root / decision_mode
     benchmark_root.mkdir(parents=True, exist_ok=True)
     update(decision_mode=decision_mode, benchmark_output_dir=str(benchmark_root))
     print(f'VLM benchmark decision mode: {decision_mode}')
-    if decision_mode == 'timeline':
+    if decision_mode == 'timeline' and not threshold_search:
         print('Offline prefix evaluation: any score >= its threshold is failure; no real-time waiting. '
               'Whole-demo classifier results are retained in whole_demo_classifier_* columns.')
         (benchmark_root/'benchmark_protocol.json').write_text(json.dumps({
@@ -605,6 +613,8 @@ def _run_benchmark(arguments, config, update) -> None:
     if duplicates.any():
         raise ValueError('Selected bag names must be unique to avoid overwriting per-bag outputs. '
                          'Narrow vlm_benchmark.folders or use --bag to select unique names.')
+    if threshold_search and not {'normal', 'fail'}.issubset({record['label'] for record in candidates}):
+        raise ValueError('threshold_search requires selected held-out bags labeled both normal and fail.')
 
     if not arguments.skip_vlm and model is None:
         print("\nLoading RynnBrain model once for the whole benchmark...")
@@ -613,9 +623,21 @@ def _run_benchmark(arguments, config, update) -> None:
         model = RynnBrainModel(vlm["model"])
         update(model_load_sec=clock() - started)
 
-    if reused_classifiers:
+    if reused_classifiers and not threshold_search:
         _validate_reused_classifiers(reused_classifiers, model, config, vlm, reference_response, frame_count, generation)
         print("Saved classifier settings verified; reusing its nominal reference text. No classifier training performed.")
+
+    if threshold_search:
+        from rynnbrain_vlm.online_replay import OnlineDetector
+        from rynnbrain_vlm.benchmark_replay import run_threshold_search
+        detector = OnlineDetector(config, progress=print, model=model)
+        selected_records = [{**record, 'bag_path': str(Path(record['bag_path']) if Path(record['bag_path']).is_absolute()
+                            else (data_root / record['bag_path']).resolve())} for record in candidates]
+        master_rows, best_root, effective = run_threshold_search(config, selected_records, benchmark_root,
+                                                               detector, update, startup_ignore_sec)
+        _write_benchmark_reports(arguments, effective, effective['rynnbrain'], master_rows, best_root,
+                                 folder_names, selected_records, decision_mode, update)
+        return effective
 
     master_rows: list[dict[str, Any]] = []
     _write_tables(master_rows, benchmark_root)
@@ -757,6 +779,12 @@ def _run_benchmark(arguments, config, update) -> None:
         _write_tables(master_rows, benchmark_root)
         update(completed_bags=index)
 
+    _write_benchmark_reports(arguments, config, vlm, master_rows, benchmark_root,
+                             folder_names, candidates, decision_mode, update)
+
+
+def _write_benchmark_reports(arguments, config, vlm, master_rows, benchmark_root,
+                             folder_names, candidates, decision_mode, update):
     update(phase="reports", current_bag=None,
            mean_runtime_sec={key: float(pd.Series([row.get(key) for row in master_rows], dtype=float).dropna().mean())
                              for key in RUNTIME_FIELDS if any(row.get(key) is not None for row in master_rows)})
@@ -765,6 +793,10 @@ def _run_benchmark(arguments, config, update) -> None:
     clean_report_path = benchmark_root / "benchmark_clean.csv"
     statistics = _report_statistics(master_rows)
     statistics['decision_mode'] = decision_mode
+    if any('runtime_frame_count' in row for row in master_rows):
+        from rynnbrain_vlm.benchmark_replay import write_frame_runtime_report
+        statistics['frame_runtime'] = write_frame_runtime_report(master_rows, benchmark_root)
+        print(f"Average processing per observation: {statistics['frame_runtime']['average_processing_sec_per_frame']:.4f} s")
     from rynnbrain_vlm.benchmark_metrics import write_metrics_report
     statistics['folder_metrics'] = write_metrics_report(master_rows, benchmark_root,
         folder_names or list(dict.fromkeys(record['folder'] for record in candidates)),
@@ -827,7 +859,11 @@ def _run_benchmark(arguments, config, update) -> None:
     print(f"Clean report: {clean_report_path}")
     print(f"Statistics: {statistics_path}")
     if decision_mode == 'timeline':
-        print('Classifier metrics use any sampled timeline alarm; whole-demo results remain in whole_demo_classifier_* columns.')
+        if any('threshold_selection_peak_score' in row for row in master_rows):
+            print('Sequential replay metrics use the chosen threshold. ROC ranks complete uncensored scan trajectories; '
+                  'per-bag outputs stop at the first alarm when configured. Whole-demo inference was not run.')
+        else:
+            print('Classifier metrics use any sampled timeline alarm; whole-demo results remain in whole_demo_classifier_* columns.')
     print(f"Recorded vs. predicted failure timing: {benchmark_root / 'benchmark_failure_timing'}")
     if "anomaly_score" in statistics:
         print(f"Nominal kNN distance boxplots: {benchmark_root}")
@@ -907,9 +943,9 @@ def main() -> None:
             update(automatic_lora_training=True, effective_config=str(arguments.config))
             print(f"Automatic LoRA -> classifier -> benchmark run: {arguments.benchmark_dir}", flush=True)
             print(f"Effective configuration: {arguments.config}", flush=True)
-        _run_benchmark(arguments, config, update)
+        finished_config = _run_benchmark(arguments, config, update)
         if automatic_training:
-            save_reusable_config(arguments.config, config)
+            save_reusable_config(arguments.config, finished_config or config)
             print(f"Reusable trained configuration (no retraining): {arguments.config}", flush=True)
 
 

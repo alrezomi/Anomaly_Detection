@@ -17,6 +17,9 @@ def replay_settings(config):
     stop = options.get("stop_on_alarm", False)
     if not isinstance(stop, bool):
         raise ValueError("online_replay.stop_on_alarm must be true or false.")
+    interval = options.get("interval_sec", 10.)
+    if type(interval) not in (int, float) or not math.isfinite(interval) or interval <= 0:
+        raise ValueError("online_replay.interval_sec must be finite and positive.")
     return dict(interval_mode=mode, max_observations=limit, stop_on_alarm=stop)
 
 
