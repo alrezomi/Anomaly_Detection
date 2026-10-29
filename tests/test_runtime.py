@@ -2,15 +2,74 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from threading import Event
+from time import perf_counter
 import unittest
 from unittest.mock import patch
 
 import pandas as pd
 
-from rynnbrain_vlm.runtime import clock, feature_only_enabled, record_run
+from rynnbrain_vlm.runtime import _Tee, clock, feature_only_enabled, record_run
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_blocked_terminal_write_or_flush_does_not_block_run_or_lose_file_log(self):
+        for blocked_operation in ("write", "flush"):
+            with self.subTest(operation=blocked_operation), tempfile.TemporaryDirectory() as directory:
+                release, entered = Event(), Event()
+
+                class Terminal:
+                    def write(self, text):
+                        if blocked_operation == "write":
+                            entered.set()
+                            if not release.wait(3):
+                                raise RuntimeError("Test terminal remained blocked")
+
+                    def flush(self):
+                        if blocked_operation == "flush":
+                            entered.set()
+                            if not release.wait(3):
+                                raise RuntimeError("Test terminal remained blocked")
+
+                try:
+                    started = perf_counter()
+                    with patch.object(sys, "stdout", Terminal()):
+                        with record_run(directory, "test") as update:
+                            self.assertTrue(entered.wait(1))
+                            # Exceed the terminal queue while its first operation is blocked.
+                            for index in range(400):
+                                print(f"observation {index}", flush=True)
+                            update(phase="evaluation", completed_bags=1)
+                    self.assertLess(perf_counter() - started, 2)
+                    root = Path(directory)
+                    state = json.loads((root / "test_runtime.json").read_text())
+                    self.assertEqual(state["status"], "completed")
+                    self.assertEqual(state["completed_bags"], 1)
+                    log = (root / "test_run.log").read_text()
+                    for index in range(400):
+                        self.assertIn(f"observation {index}\n", log)
+                    self.assertIn("Run completed", log)
+                finally:
+                    release.set()
+
+    def test_broken_terminal_preserves_file_and_healthy_terminal_drains_on_close(self):
+        import io
+
+        class BrokenTerminal:
+            def write(self, text):
+                raise BrokenPipeError("terminal disconnected")
+
+        for terminal in (io.StringIO(), BrokenTerminal()):
+            stream = io.StringIO()
+            tee = _Tee(terminal, stream)
+            tee.write("first\n")
+            tee.flush()
+            tee.write("second\n")
+            tee.close()
+            self.assertEqual(stream.getvalue(), "first\nsecond\n")
+            if isinstance(terminal, io.StringIO):
+                self.assertEqual(terminal.getvalue(), stream.getvalue())
+
     def test_clock_waits_for_all_initialized_cuda_devices(self):
         import torch
         with patch.object(torch.cuda, "is_initialized", return_value=True), \
@@ -69,13 +128,15 @@ class RuntimeTests(unittest.TestCase):
                  patch.object(benchmark, "_dino_summary", side_effect=[{}, RuntimeError("second bag stopped")]):
                 with self.assertRaisesRegex(RuntimeError, "second bag stopped"):
                     benchmark.main()
-            saved = root / "rynnbrain_benchmark"
+            saved = root / "rynnbrain_benchmark" / "whole_demo"
             self.assertEqual(pd.read_csv(saved / "benchmark_summary.csv").bag_name.tolist(), ["bag_one"])
             self.assertEqual(pd.read_csv(saved / "benchmark_clean.csv").bag_name.tolist(), ["bag_one"])
             state = json.loads((saved / "benchmark_runtime.json").read_text())
             self.assertEqual(state["status"], "failed")
             self.assertEqual(state["completed_bags"], 1)
             self.assertEqual(state["current_bag"], "bag_two")
+            self.assertEqual(state["selection_total_bags"], 2)
+            self.assertEqual(state["selection_completed_bags"], 2)
             self.assertIn("second bag stopped", (saved / "benchmark_run.log").read_text())
 
 
