@@ -143,12 +143,20 @@ def resolve_trained_artifacts(config, progress=print):
     if not output:
         return config
     runs = Path(f"{output}_benchmark") / "pipeline_runs"
-    for path in sorted(runs.glob("*/pipeline_config.json"), reverse=True):
+    output_path = Path(output)
+    paired_name = (output_path.name.removesuffix("_prompt_b") if output_path.name.endswith("_prompt_b")
+                   else output_path.name + "_prompt_b")
+    comparison_roots = {runs.parent, Path(f"{output_path.with_name(paired_name)}_benchmark")}
+    paths = [*runs.glob("*/pipeline_config.json")]
+    for comparison_root in comparison_roots:
+        paths.extend(comparison_root.glob("prompt_comparisons/*/prompt_*/pipeline_runs/*/pipeline_config.json"))
+    for path in sorted(paths, key=lambda item: item.parent.name, reverse=True):
         try:
             saved = load_pipeline_config(path)
             trained = saved.get("rynnbrain", {})
             if (trained.get("prompt_variant", "A") != vlm.get("prompt_variant", "A")
-                    or classifier_method(trained.get("cop_classifier", {})) != classifier_method(classifier)):
+                    or classifier_method(trained.get("cop_classifier", {})) != classifier_method(classifier)
+                    or trained.get("execution_interval_sec") != vlm.get("execution_interval_sec")):
                 continue
             mode = saved.get("vlm_benchmark", {}).get("decision_mode", "whole_demo")
             runtime = json.loads((path.parent / mode / "benchmark_runtime.json").read_text(encoding="utf-8"))

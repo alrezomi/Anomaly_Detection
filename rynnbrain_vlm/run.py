@@ -161,12 +161,21 @@ def _execution_inputs(config, vlm, frame_count, input_modes):
             raw_inputs, raw_metadata = _heatmap_inputs(raw_paths, topics, frame_count, start, end)
             raw_inputs = [(label.replace("heatmap", "raw frame"), image) for label, image in raw_inputs]
     elif source == "rosbag":
-        raw_inputs, raw_metadata = _raw_inputs(Path(config["test_bag"]), topics, frame_count)
+        from .execution_sampling import execution_sampling, interval_execution_inputs
+        policy = execution_sampling(vlm)
+        if policy:
+            if list(input_modes) != ["raw"]:
+                raise ValueError("Interval execution sampling requires input_modes=['raw'].")
+            raw_inputs, raw_metadata = interval_execution_inputs(Path(config["test_bag"]), topics, policy)
+        else:
+            raw_inputs, raw_metadata = _raw_inputs(Path(config["test_bag"]), topics, frame_count)
     else:
         raise ValueError("rynnbrain.source must be 'generated_videos' or 'rosbag'")
     if vlm.get("_temporal_profile"):
         validate_profile(vlm["_temporal_profile"], config, vlm, frame_count, input_modes)
-        raw_inputs = timestamped_images(raw_inputs, raw_metadata, topics, frame_count)
+        from .execution_sampling import execution_sampling, execution_step_count
+        actual_count = execution_step_count(raw_metadata, frame_count, execution_sampling(vlm))
+        raw_inputs = timestamped_images(raw_inputs, raw_metadata, topics, actual_count)
     selected = {}
     for mode in input_modes:
         if mode == "raw":

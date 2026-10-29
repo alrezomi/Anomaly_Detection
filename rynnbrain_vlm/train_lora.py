@@ -27,6 +27,16 @@ def training_settings(config: dict[str, Any]) -> dict[str, Any]:
         "class_weight": "balanced", "input_mode": "raw", **supplied,
     }
     settings["temporal_profile"] = training_profile(config, settings)
+    if vlm.get("execution_interval_sec") is not None and not settings["temporal_profile"]:
+        raise ValueError("execution_interval_sec requires lora.training.temporal_supervision=true.")
+    expected = config.get("vlm_benchmark", {}).get("expected_prompt_texts")
+    if expected is not None:
+        task = vlm.get("task_description", "Robot manipulation task")
+        temporal = bool(settings["temporal_profile"])
+        actual = dict(turn1_prompt=task_context_prompt(task, temporal=temporal, variant=vlm.get("prompt_variant", "A")),
+                      turn2_prompt=evaluation_prompt_multiturn(task, "raw", temporal=temporal, variant=vlm.get("prompt_variant", "A")))
+        if actual != expected:
+            raise ValueError("Prompt text changed after the A/B comparison was prepared; start a new comparison.")
     folder = "lora_temporal_adapter" if settings["temporal_profile"] else "lora_adapter"
     settings["output_dir"] = supplied.get("output_dir") or str(Path(vlm["output_dir"]) / folder)
     settings["benchmark_dir"] = supplied.get("benchmark_dir") or f"{vlm['output_dir']}_benchmark"
@@ -197,6 +207,23 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
                                   target_text=sample.get("target_text"))
         return {key: value.to(wrapper.input_device) if isinstance(value, torch.Tensor) else value for key, value in data.items()}
 
+    if wrapper.temporal_profile.get("execution_sampling"):
+        # Check each recording's longest history before applying any optimizer update.
+        # Never shorten the history silently to fit the old eight-frame budget.
+        budgets = []
+        for row in rows:
+            sample = max((item for item in prepared if item["bag_name"] == row["bag_name"]),
+                         key=lambda item: len(item["images"]))
+            try:
+                batch = example(sample)
+                budgets.append(dict(bag_name=row["bag_name"], images=len(sample["images"]),
+                                    tokens=int(batch["input_ids"].shape[1]), limit=settings["max_tokens"]))
+                del batch
+            except ValueError as error:
+                raise ValueError(f"Interval training token check failed for {row['bag_name']} "
+                                 f"({len(sample['images'])} observations): {error}") from error
+        (output / "token_budget.json").write_text(json.dumps(budgets, indent=2), encoding="utf-8")
+
     wrapper.model = attach_lora(wrapper.model, dict(vlm.get("lora", {})))
     model = wrapper.model
     model.config.use_cache = False
@@ -211,6 +238,8 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
         "vlm_config": vlm, "nominal_response": nominal_response,
         "trainable_parameters": trainable_count,
         "temporal_profile": wrapper.temporal_profile,
+        "prompt_texts": {"turn1_prompt": nominal_turn["text"], "turn2_prompt": evaluation_prompt_multiturn(
+            task, settings["input_mode"], temporal=temporal, variant=vlm.get('prompt_variant', 'A'))},
         "temporal_training_data": temporal_records,
         "supervision": ("Prefix Decision plus annotated Failure onset (s) and EOS; context/images masked. "
                         "No failure before marker, failure at/after marker including recovery. Numeric time is a token target, not a regression loss."

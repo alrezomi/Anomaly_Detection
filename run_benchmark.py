@@ -495,11 +495,14 @@ def _run_benchmark(arguments, config, update) -> dict[str, Any] | None:
         raise ValueError('vlm_benchmark must be an object containing a folders list.')
     from rynnbrain_vlm.benchmark_replay import threshold_search_enabled, validate_threshold_search
     threshold_search = threshold_search_enabled(selection)
+    from rynnbrain_vlm.execution_sampling import execution_sampling, validate_interval_replay
+    interval_replay = execution_sampling(vlm) is not None
+    validate_interval_replay(vlm)
     if arguments.prepare_classifier:
         vlm['cop_classifier'] = {**vlm.get('cop_classifier', {}), 'enabled': True}
     decision_mode = configure_decision_mode(selection, vlm, skip_vlm=arguments.skip_vlm)
     config['rynnbrain'] = vlm
-    if threshold_search:
+    if threshold_search or interval_replay:
         validate_threshold_search(config, decision_mode, run_dino, arguments.skip_vlm)
     benchmark_root = benchmark_root / decision_mode
     benchmark_root.mkdir(parents=True, exist_ok=True)
@@ -651,14 +654,14 @@ def _run_benchmark(arguments, config, update) -> dict[str, Any] | None:
         _validate_reused_classifiers(reused_classifiers, model, config, vlm, reference_response, frame_count, generation)
         print("Saved classifier settings verified; reusing its nominal reference text. No classifier training performed.")
 
-    if threshold_search:
+    if threshold_search or interval_replay:
         from rynnbrain_vlm.online_replay import OnlineDetector
         from rynnbrain_vlm.benchmark_replay import run_threshold_search
         detector = OnlineDetector(config, progress=print, model=model)
         selected_records = [{**record, 'bag_path': str(Path(record['bag_path']) if Path(record['bag_path']).is_absolute()
                             else (data_root / record['bag_path']).resolve())} for record in candidates]
         master_rows, best_root, effective = run_threshold_search(config, selected_records, benchmark_root,
-                                                               detector, update, startup_ignore_sec)
+            detector, update, startup_ignore_sec, **({"select_threshold": False} if not threshold_search else {}))
         _write_benchmark_reports(arguments, effective, effective['rynnbrain'], master_rows, best_root,
                                  folder_names, selected_records, decision_mode, update)
         return effective
@@ -942,6 +945,10 @@ def _write_benchmark_reports(arguments, config, vlm, master_rows, benchmark_root
 def main() -> None:
     arguments = parse_arguments()
     config = load_pipeline_config(arguments.config)
+    from rynnbrain_vlm.prompt_comparison import comparison_variants, run_prompt_comparison
+    if comparison_variants(config):
+        run_prompt_comparison(arguments, config)
+        return
     from rynnbrain_vlm.benchmark_training import (
         train_lora_enabled, prepare_pipeline_run, save_reusable_config, resolve_trained_artifacts,
     )

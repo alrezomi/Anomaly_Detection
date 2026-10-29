@@ -90,7 +90,7 @@ def _grouped_predictions(matrix, labels, groups, bag_targets, *, c_value, class_
 def train_onset_classifier(records, targets, complete_path, complete_metadata, options):
     from .cop_classifier import (CoPLogisticClassifier, fit_logistic_classifier, save_classifier,
                                  load_classifier, _classification_metrics)
-    from .cop_timeline import _load_prefix_cache, _prefix_cache_paths, timeline_sampling, _model_fingerprint
+    from .cop_timeline import _load_prefix_cache, _prefix_cache_paths, signature_sampling, _model_fingerprint
 
     if complete_metadata["input_mode"] != "raw" or complete_metadata["comparison_signature"].get("source") != "rosbag":
         raise ValueError("Timestamp-supervised training needs raw rosbag vectors on the stage annotation clock.")
@@ -99,7 +99,7 @@ def train_onset_classifier(records, targets, complete_path, complete_metadata, o
     path.unlink(missing_ok=True)
     path.with_suffix(".json").unlink(missing_ok=True)
     selected, annotations, excluded = select_annotated_records(records, targets, options)
-    sampling = timeline_sampling({}, complete_metadata["comparison_signature"]["num_frames"])
+    sampling = signature_sampling(complete_metadata["comparison_signature"])
     matrix, labels, rows, bag_targets = [], [], [], {}
     for record in selected:
         name = record.metadata["bag_name"]
@@ -170,7 +170,7 @@ def train_onset_classifier(records, targets, complete_path, complete_metadata, o
 
 def load_onset_classifier(complete_path, complete_classifier, *, bag_name):
     from .cop_classifier import load_classifier
-    from .cop_timeline import _model_fingerprint, timeline_sampling
+    from .cop_timeline import _model_fingerprint, signature_sampling
 
     path = onset_model_path(complete_path)
     if not path.is_file() or not path.with_suffix('.json').is_file():
@@ -182,7 +182,7 @@ def load_onset_classifier(complete_path, complete_classifier, *, bag_name):
     if (metadata.get("protocol") != ONSET_PROTOCOL
             or metadata.get("complete_model_sha256") != _model_fingerprint(Path(complete_path))
             or classifier.comparison_signature != complete_classifier.comparison_signature
-            or metadata.get("sampling") != timeline_sampling({}, complete_classifier.comparison_signature["num_frames"])):
+            or metadata.get("sampling") != signature_sampling(complete_classifier.comparison_signature)):
         raise ValueError("Timestamp-supervised logistic model is stale; rerun cop-classifier-train.")
     if bag_name in metadata["training_bags"]:
         raise ValueError("This bag trained the onset classifier; select a held-out evaluation bag.")

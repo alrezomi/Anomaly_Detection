@@ -666,6 +666,7 @@ class OnlineReplayTests(unittest.TestCase):
                 return {'status': 'ready'}
             detector.prepare_matching = prepare
             app.detector = detector
+            app.state['match_preview'] = True  # Legacy API preview is explicitly requested.
             with patch('rosbag_io.iter_rosbag_image_frames', return_value=iter([(0, 0., Image.new('RGB', (4, 4)))])), \
                  patch('rynnbrain_vlm.online_replay.save_plot'), \
                  patch('rynnbrain_vlm.visual_matching.read_corrected_failure_annotation', return_value={'status': 'available', 'time_sec': 0.}):
@@ -683,6 +684,7 @@ class OnlineReplayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app = ReplayApplication({'output_dir': directory, 'rynnbrain': {'camera_topics': ['top']}},
                                     [Path('test')], 1., False)
+            app.state['match_preview'] = True  # Legacy API coverage; browser preview is removed.
             row = dict(timestamp_sec=0., anomaly_score=.2, threshold=.5, cached_feature_sec=.001,
                        verification=None)
             app.detector = SimpleNamespace(reset=Mock(), prepare_matching=Mock(side_effect=ValueError('Missing stage')),

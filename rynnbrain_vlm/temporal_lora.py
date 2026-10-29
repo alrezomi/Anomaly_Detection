@@ -29,9 +29,18 @@ def training_profile(config, settings):
             raise ValueError(f"Temporal LoRA requires nonempty, unique {name}.")
     if memory != topics:
         raise ValueError("Temporal LoRA requires the same ordered camera_topics and memory_camera_topics.")
-    return {"protocol": PROTOCOL, "camera_topics": list(topics), "memory_camera_topics": list(memory),
+    profile = {"protocol": PROTOCOL, "camera_topics": list(topics), "memory_camera_topics": list(memory),
             "num_frames": int(vlm.get("num_frames", 4)), "input_mode": "raw", "source": "rosbag",
             "timestamp_decimals": 3}
+    from .execution_sampling import execution_sampling
+    sampling = execution_sampling(vlm)
+    if sampling:
+        if len(topics) != 1:
+            raise ValueError("Interval temporal training currently requires one camera topic.")
+        if vlm.get("cop_classifier", {}).get("method", "logistic") != "logistic":
+            raise ValueError("Interval temporal training requires a logistic classifier.")
+        profile["execution_sampling"] = sampling
+    return profile
 
 
 def adapter_profile(adapter_path):
@@ -43,15 +52,21 @@ def adapter_profile(adapter_path):
 
 
 def validate_profile(profile, config, vlm, frame_count, input_modes):
+    from .execution_sampling import execution_sampling
+    sampling = execution_sampling(vlm)
     if not profile:
+        if sampling:
+            raise ValueError("Interval inputs require a temporal adapter trained with execution_interval_sec.")
         return
     topics = list(vlm.get("camera_topics", config.get("camera_topics", [])))
     if (vlm.get("source") != "rosbag" or list(input_modes) != ["raw"]
             or topics != profile["camera_topics"]
             or list(vlm.get("memory_camera_topics", topics)) != profile["memory_camera_topics"]
-            or frame_count != profile["num_frames"]):
+            or frame_count != profile["num_frames"]
+            or sampling != profile.get("execution_sampling")):
         raise ValueError("Temporal adapter inputs differ from training. Use source=rosbag, input_modes=['raw'], "
-                         "and the same camera_topics, memory_camera_topics and num_frames as its training_manifest.json.")
+                         "and the same camera_topics, memory_camera_topics, num_frames and execution_interval_sec "
+                         "as its training_manifest.json.")
 
 
 def timestamped_images(images, metadata, topics, frame_count):
@@ -86,9 +101,11 @@ def temporal_annotation(row, config, startup_ignore_sec):
 
 def prefix_samples(row, images, metadata, profile, annotation):
     from .cop_timeline import selected_frame_prefixes
+    from .execution_sampling import execution_step_count
 
-    timestamped_images(images, metadata, profile["camera_topics"], profile["num_frames"])
-    snapshots = selected_frame_prefixes(metadata, len(images), profile["num_frames"])
+    count = execution_step_count(metadata, profile["num_frames"], profile.get("execution_sampling"))
+    timestamped_images(images, metadata, profile["camera_topics"], count)
+    snapshots = selected_frame_prefixes(metadata, len(images), count)
     onset = annotation.get("time_sec")
     first_time = min(float(frame["timestamp_sec"]) for frame in metadata)
     if onset is not None and not first_time <= onset <= snapshots[-1]["timestamp_sec"]:
