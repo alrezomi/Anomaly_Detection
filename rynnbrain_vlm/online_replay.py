@@ -309,6 +309,13 @@ class OnlineDetector:
             self.response = None
         progress("Loading VLM and LoRA adapter")
         self.model = model if model is not None else RynnBrainModel(vlm["model"])
+        trained_sampling = self.model.temporal_profile.get("execution_sampling")
+        self.note = (f"Execution training sampled every {trained_sampling['interval_sec']:g} seconds, "
+                     "with actual bag timestamps and growing image histories. "
+                     "Changing the replay interval changes the tested sampling policy."
+                     if trained_sampling else SAMPLING_NOTE)
+        if trained_sampling:
+            progress(self.note)
         self.timestamp_inputs = True
         generation = vlm.get("generation", {})
         if self.complete is not None:
@@ -548,7 +555,7 @@ class ReplayApplication:
         self.state["replay_mode"] = "diagnostic" if diagnose else "strict" if verify else "cached"
         self.state["initialization_phase"] = "Starting model worker"
         self.state["excluded_bag_indices"] = []
-        self.state["match_preview"] = True
+        self.state["match_preview"] = False
         self.state["matching_status"] = "Not prepared"
         self.state['detector_type'] = 'vlm'
         self.state['requested_detector'] = 'vlm'
@@ -1048,7 +1055,8 @@ def main():
         parser.error("--interval-sec must be finite and positive")
     config = load_pipeline_config(args.config)
     replay_settings(config)
-    interval = args.interval_sec if args.interval_sec is not None else config.get("rynnbrain", {}).get("online_replay", {}).get("interval_sec", 10.)
+    vlm = config.get("rynnbrain", {})
+    interval = args.interval_sec if args.interval_sec is not None else vlm.get("online_replay", {}).get("interval_sec", vlm.get("execution_interval_sec", 10.))
     bags = replay_bags(config, args.bag)
     app = ReplayApplication(config, bags, interval, args.verify_cache, args.diagnose_cache)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
@@ -1056,7 +1064,11 @@ def main():
     print("From another PC, forward this port through SSH or VS Code first. Open the LOCAL forwarded port in your browser "
           "(e.g. http://127.0.0.1:18765 for a tunnel from local 18765 to lab 8765). "
           "The page is available while the model loads.", flush=True)
-    print(SAMPLING_NOTE, flush=True)
+    if vlm.get("execution_interval_sec") is not None:
+        print(f"Configured execution interval: {vlm['execution_interval_sec']:g}s. "
+              "Model and classifier compatibility will be checked during initialization.", flush=True)
+    else:
+        print(SAMPLING_NOTE, flush=True)
     app.worker.start()
     # Compose sends SIGTERM, whereas an interactive Python session gets SIGINT.
     # Route both through the same cleanup so in-flight results can be saved.

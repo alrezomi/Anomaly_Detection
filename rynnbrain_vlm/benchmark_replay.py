@@ -38,7 +38,7 @@ def _scan_bag(detector, config, bag, cache_path, frame_iterator=None):
 
     vlm = config["rynnbrain"]
     policy = replay_settings(config)
-    constant_interval = float(vlm.get("online_replay", {}).get("interval_sec", 10.))
+    constant_interval = float(vlm.get("online_replay", {}).get("interval_sec", vlm.get("execution_interval_sec", 10.)))
     if not np.isfinite(constant_interval) or constant_interval <= 0:
         raise ValueError("online_replay.interval_sec must be finite and positive.")
     due = float(vlm.get("sampling_start_sec") or 0.)
@@ -225,17 +225,17 @@ def _export_bag(detector, config, record, cache_path, output, threshold, startup
     return row
 
 
-def run_threshold_search(config, records, root, detector, update, startup_ignore_sec):
-    selection = root / "threshold_selection"
+def run_threshold_search(config, records, root, detector, update, startup_ignore_sec, *, select_threshold=True):
+    selection = root / ("threshold_selection" if select_threshold else "replay_observations")
     selection.mkdir(parents=True, exist_ok=True)
-    if not {"normal", "fail"}.issubset({record["label"] for record in records}):
+    if select_threshold and not {"normal", "fail"}.issubset({record["label"] for record in records}):
         raise ValueError("threshold_search requires held-out bags labeled both normal and fail; "
                          "add a genuine failure category before running model inference.")
-    output = root / "best_threshold"
-    if output.exists() and any(output.iterdir()):
+    output = root / "best_threshold" if select_threshold else root
+    if select_threshold and output.exists() and any(output.iterdir()):
         raise ValueError(f"Best-threshold output already exists: {output}. Use a fresh output_dir or --benchmark-dir.")
-    print("Sequential threshold selection: same cached detector and interval rules as GUI, no real-time waits. "
-          "Alarms do not stop the search scan; only the chosen-threshold output is stopped.", flush=True)
+    print("Sequential replay: same cached detector and interval rules as GUI, no real-time waits. "
+          "Full scans retain scores for ROC; exported trajectories follow the configured stop policy.", flush=True)
     peaks, scans = [], []
     for index, record in enumerate(records, 1):
         bag = Path(record["bag_path"])
@@ -249,8 +249,21 @@ def run_threshold_search(config, records, root, detector, update, startup_ignore
                 if scan["complete"] else None, classifier_threshold=float(detector.classifier.threshold),
             evaluation_error=scan["error"]))
         pd.DataFrame(peaks).to_csv(selection / "benchmark_summary.csv", index=False)
-    return _export_threshold_reports(config, records, selection, output, detector, scans, peaks,
-                                     update, startup_ignore_sec)
+    if select_threshold:
+        return _export_threshold_reports(config, records, selection, output, detector, scans, peaks,
+                                         update, startup_ignore_sec)
+    threshold = float(detector.classifier.threshold)
+    results = [_export_bag(detector, config, record, cache, output, threshold, startup_ignore_sec,
+                          full_csv_directory=selection) for record, cache, scan in scans]
+    effective = deepcopy(config)
+    effective["vlm_benchmark"]["train_lora"] = False
+    effective["rynnbrain"]["cop_classifier"]["train_on_benchmark"] = False
+    write_json(output / "pipeline_config.json", effective)
+    write_json(output / "benchmark_protocol.json", dict(decision_mode="timeline", threshold_search=False,
+               threshold=threshold, execution_interval_sec=config["rynnbrain"].get("execution_interval_sec"),
+               note="Cached causal replay; full scans support ROC, outputs follow configured stopping policy."))
+    update(completed_bags=len(results), benchmark_output_dir=str(output))
+    return results, output, effective
 
 
 def _export_threshold_reports(config, records, selection, output, detector, scans, peaks, update, startup_ignore_sec):

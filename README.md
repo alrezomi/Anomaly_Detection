@@ -2698,6 +2698,89 @@ The original configuration is not rewritten.
 Video/heatmap LoRA inputs still require the existing prepared training videos;
 this option does not create those videos or rebuild DINO memory.
 
+### Compare prompt A and B with a fixed execution interval
+
+The ordinary benchmark command can queue two independent fresh training runs.
+Set these fields in your existing configuration (retain your bag lists, model
+settings and other parameters):
+
+```json
+{
+  "vlm_benchmark": {
+    "train_lora": true,
+    "prompt_variants": ["A", "B"],
+    "decision_mode": "timeline",
+    "threshold_search": false
+  },
+  "rynnbrain": {
+    "prompt_variant": "A",
+    "execution_interval_sec": 3.0,
+    "inference": {"feature_only": true},
+    "online_replay": {
+      "interval_mode": "constant",
+      "interval_sec": 3.0,
+      "max_observations": null,
+      "stop_on_alarm": true
+    },
+    "lora": {"training": {"temporal_supervision": true}},
+    "cop_classifier": {
+      "enabled": true,
+      "method": "logistic",
+      "logistic_onset": {"enabled": true}
+    }
+  }
+}
+```
+
+Choose a new experiment `output_dir`. Then run:
+
+```bash
+docker compose stop online-replay
+docker compose run --rm -T --build benchmark
+```
+
+Each variant starts from the base model, trains its own LoRA and classifier, and
+evaluates held-out bags. The runs execute sequentially in separate processes so
+the preceding VLM releases its GPU memory. Existing training/reference exclusions
+apply, and the comparison checks that both evaluated bag/label sets are identical.
+Failures stop the queue and retain completed outputs.
+
+`execution_interval_sec` selects the first available camera image at or after the
+next due recording time, then schedules the next deadline from that selected
+image's actual time. LoRA examples include every growing prefix; classifier
+training uses those same prefixes with onset labels. Evaluation uses the GUI's
+cached detector without wall-clock waits. No eight-observation execution cap is
+applied. `num_frames` continues to control the uniformly sampled nominal reference.
+The current implementation supports one raw camera, temporal LoRA and logistic
+onset classification. Training checks the longest history in every bag against
+`lora.training.max_tokens` before optimizer updates; it never silently truncates
+images. More observations increase training time and GPU memory requirements.
+
+Edit the **temporal** branches of the existing A/B prompt functions before running.
+The code does not rewrite the prompts. It saves the exact rendered text in
+`prompt_texts.json` and each adapter's manifest, rejects identical A/B text before
+training, and checks that the text has not changed between queue preparation and
+training. The repository's default B delegates to A until you customize it.
+
+Outputs are isolated under
+`<rynnbrain.output_dir>_benchmark/prompt_comparisons/<timestamp>_interval_3s/`.
+`prompt_comparison.csv` and `.json` link each variant's model pair, reusable config,
+full reports, accuracy, threshold and mean processing time. Each prompt retains
+the usual per-bag outputs and combined graphs under its own `pipeline_runs/` folder.
+With `threshold_search:false`, both use your configured classifier threshold.
+With `threshold_search:true`, each runs the existing timing-cost threshold search.
+Threshold selection on these bags remains a development result; use separate
+recordings to assess a final chosen threshold.
+
+After both runs finish, the original config with `train_lora:true` lets replay
+discover the completed comparison model pair matching `rynnbrain.prompt_variant`.
+Choose `"A"` or `"B"` there to inspect either pair; keep `execution_interval_sec:3`.
+Each saved `pipeline_config.json` also contains explicit paths with training disabled.
+
+The VLM nearest-nominal preview checkbox has been removed from the browser and
+defaults off. Configured nominal reference demonstrations remain part of VLM input.
+DINO retains its own matching and scoring.
+
 ### Offline timeline decision mode
 
 Set `vlm_benchmark.decision_mode` to `"timeline"` to benchmark **alarms during

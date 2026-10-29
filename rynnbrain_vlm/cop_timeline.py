@@ -21,11 +21,20 @@ DENSE_PROTOCOL = "sample_index_capped_prefixes_v2"
 
 
 def timeline_sampling(vlm: dict, full_count: int) -> dict:
+    from .execution_sampling import execution_sampling
+    interval = execution_sampling(vlm)
+    if interval:
+        return {**interval, "step_count": None}
     count = vlm.get("cop_classifier", {}).get("timeline_num_frames", full_count)
     if isinstance(count, bool) or not isinstance(count, int) or count < full_count:
         raise ValueError("cop_classifier.timeline_num_frames must be an integer >= rynnbrain.num_frames.")
     return {"protocol": PREFIX_PROTOCOL if count == full_count else DENSE_PROTOCOL,
             "step_count": count, "context_frames": full_count}
+
+
+def signature_sampling(signature):
+    interval = signature.get("temporal_profile", {}).get("execution_sampling")
+    return {**interval, "step_count": None} if interval else timeline_sampling({}, signature["num_frames"])
 
 
 TIMELINE_NOTE = (
@@ -88,7 +97,8 @@ def _load_prefix_cache(record, sampling=None, *, require_timestamps=False):
     path, sidecar = _prefix_cache_paths(record)
     metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     signature = record.metadata["comparison_signature"]
-    sampling = sampling or timeline_sampling({}, signature["num_frames"])
+    sampling = sampling or signature_sampling(signature)
+    expected_count = sampling["step_count"] or len(metadata.get("snapshots", []))
     with np.load(path, allow_pickle=False) as archive:
         vectors = np.asarray(archive["vectors"], dtype=np.float32)
     if (metadata.get("protocol") != sampling["protocol"]
@@ -96,13 +106,14 @@ def _load_prefix_cache(record, sampling=None, *, require_timestamps=False):
             or not record.metadata.get("evaluation_id")
             or metadata.get("full_evaluation_id") != record.metadata["evaluation_id"]
             or metadata.get("comparison_signature") != signature
-            or vectors.shape != (sampling["step_count"], record.vector.size)
+            or expected_count < 1
+            or vectors.shape != (expected_count, record.vector.size)
             or not np.isfinite(vectors).all()
             or not np.array_equal(vectors[-1], record.vector)):
         raise ValueError(f"Missing or stale nominal-prefix vectors for {record.metadata['bag_name']}.")
     if require_timestamps:
         times = np.asarray([row.get("timestamp_sec", np.nan) for row in metadata.get("snapshots", [])], dtype=float)
-        if (times.shape != (sampling["step_count"],) or not np.isfinite(times).all()
+        if (times.shape != (expected_count,) or not np.isfinite(times).all()
                 or (times < 0).any() or (np.diff(times) <= 0).any()):
             raise ValueError("Prefix cache has no valid bag-relative timestamps; prepare it again.")
     return vectors
@@ -123,14 +134,22 @@ def prepare_nominal_prefixes(model, config, vlm, records, nominal_images, refere
             except (ValueError, OSError, KeyError, EOFError, BadZipFile):
                 pass
         signature = record.metadata["comparison_signature"]
-        mode, count = record.metadata["input_mode"], sampling["step_count"]
+        mode = record.metadata["input_mode"]
+        count = sampling["step_count"] or signature["num_frames"]
         bag_config = {**config, "test_bag": record.metadata["test_bag"],
                       "output_dir": str(record.metadata_path.parent.parent.parent)}
         selected, _ = _execution_inputs(bag_config, vlm, count, [mode])
         images, frames = selected[mode]
+        if sampling["step_count"] is None:
+            count = len(frames)
         snapshots = selected_frame_prefixes(frames, len(images), count, sampling["context_frames"])
         turns = [{"role": "user", "images": nominal_images, "text": signature["turn1_prompt"]},
                  {"role": "user", "images": images, "text": signature["turn2_prompt"]}]
+        cached_prefix = None
+        if sampling["step_count"] is None:
+            from .online_cache import CachedExecution
+            cached_prefix = CachedExecution(model, turns[0], reference_response, signature["turn2_prompt"],
+                                           generation, max_frames=None)
         vectors = []
         for snapshot in snapshots:
             if snapshot["sample_index"] == count - 1:
@@ -138,10 +157,13 @@ def prepare_nominal_prefixes(model, config, vlm, records, nominal_images, refere
             else:
                 print(f"Extracting training prefix: {record.metadata['bag_name']} "
                       f"({snapshot['sample_index'] + 1}/{count})")
-                prefix = {**turns[1], "images": [images[i] for i in snapshot["image_indices"]]}
-                vector = _as_numpy(model.extract_multiturn_cop_vector(
-                    [turns[0], prefix], generation, reference_response=reference_response,
-                ))
+                if cached_prefix is not None:
+                    vector = _as_numpy(cached_prefix.append(*images[snapshot["sample_index"]]))
+                else:
+                    prefix = {**turns[1], "images": [images[i] for i in snapshot["image_indices"]]}
+                    vector = _as_numpy(model.extract_multiturn_cop_vector(
+                        [turns[0], prefix], generation, reference_response=reference_response,
+                    ))
             if vector.shape != record.vector.shape or not np.isfinite(vector).all():
                 raise ValueError(f"Invalid prefix vector for {record.metadata['bag_name']}.")
             vectors.append(vector)
@@ -343,7 +365,10 @@ def write_logistic_timeline(
     csv_path.unlink(missing_ok=True)
     plot_path.unlink(missing_ok=True)
     images = turns[1]["images"]
-    snapshots = selected_frame_prefixes(frame_metadata, len(images), comparison_signature["num_frames"])
+    from .execution_sampling import execution_step_count
+    count = execution_step_count(frame_metadata, comparison_signature["num_frames"],
+        comparison_signature.get("temporal_profile", {}).get("execution_sampling"))
+    snapshots = selected_frame_prefixes(frame_metadata, len(images), count)
     score_source = "full_execution_classifier"
     if use_onset_classifier:
         from .cop_onset import load_onset_classifier
