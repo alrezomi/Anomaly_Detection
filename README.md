@@ -2894,6 +2894,19 @@ LoRA/classifier paths and set `rynnbrain.inference.feature_only: true`. This wor
 currently supports a raw, single-camera rosbag VLM with a logistic classifier.
 It does not run DINO or whole-demo inference. Use the ordinary `benchmark` command.
 
+For long runs, disable the interactive pseudo-terminal with `-T`:
+
+```bash
+docker compose run --rm -T --build benchmark
+```
+
+`benchmark_run.log` is flushed to disk on each write. Terminal mirroring runs
+separately so a stalled or disconnected terminal cannot block benchmark progress;
+if the terminal stops accepting output, only terminal copies may be dropped.
+The file log remains complete. During bag selection, `benchmark_runtime.json`
+records the current bag and `selection_completed_bags` / `selection_total_bags`;
+after selection it advances to model loading and then threshold scoring.
+
 The benchmark uses the same `OnlineDetector` and the `rynnbrain.online_replay`
 constant/adaptive interval rules as the GUI, but reads the first recorded frame
 at or after each due bag timestamp without waiting for wall-clock replay. Only

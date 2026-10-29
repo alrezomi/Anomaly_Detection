@@ -575,11 +575,14 @@ def _run_benchmark(arguments, config, update) -> dict[str, Any] | None:
     update(phase="bag_selection")
     print(f"Using bags discovered under: {data_root}")
     excluded_names = _excluded_bag_names(config, arguments.include_nominal_bags)
-    records = [
-        infer_bag_record(bag_path, stage_topic, startup_ignore_sec)
-        for bag_path in all_bags
-        if bag_path.name not in excluded_names
-    ]
+    selected_paths = [path for path in all_bags if path.name not in excluded_names]
+    records = []
+    update(selection_total_bags=len(selected_paths), selection_completed_bags=0)
+    for index, bag_path in enumerate(selected_paths, 1):
+        update(current_bag=bag_path.name)
+        print(f"Reading bag labels [{index}/{len(selected_paths)}]: {bag_path.name}", flush=True)
+        records.append(infer_bag_record(bag_path, stage_topic, startup_ignore_sec))
+        update(selection_completed_bags=index)
     for record in records:
         path = Path(record['bag_path'])
         record['folder'] = _benchmark_folder(path if path.is_absolute() else data_root/path, data_root, folder_names)
@@ -600,6 +603,7 @@ def _run_benchmark(arguments, config, update) -> dict[str, Any] | None:
     )
     selection_df = pd.DataFrame(records)
     selection_df.to_csv(benchmark_root / "benchmark_bag_selection.csv", index=False)
+    update(phase="bag_selection_complete", current_bag=None, selected_bags=len(records))
     excluded_count = sum(path.name in excluded_names for path in all_bags)
     print(f"Found {len(all_bags)} bag(s), excluding {excluded_count} nominal/reference/LoRA/classifier-training bag(s) from this selection.")
     print(f"Benchmarking {len(records)} demonstration(s).")
