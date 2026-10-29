@@ -338,8 +338,10 @@ def evaluate_multiturn(
     if feature_only:
         provenance["response_source"] = "not_generated"
 
-    if not training_vectors_only and Path(config["test_bag"]).name in getattr(model, "adapter_training_bags", set()):
-        raise ValueError("This bag was used to train the loaded LoRA adapter; select a held-out evaluation bag.")
+    used_bags = (getattr(model, "adapter_training_bags", set()) |
+                 getattr(model, "adapter_validation_bags", set()))
+    if not training_vectors_only and Path(config["test_bag"]).name in used_bags:
+        raise ValueError("This bag was used for LoRA training or checkpoint selection; select a held-out evaluation bag.")
 
     print("[MULTI-TURN MODE] Nominal reference followed by execution evaluation")
     print(f"Task: {task_description}\n")

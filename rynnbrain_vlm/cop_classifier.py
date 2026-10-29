@@ -812,6 +812,9 @@ def prepare_training_vectors(
 
     if model is None:
         model = RynnBrainModel(vlm["model"])
+    overlap = set(names) & getattr(model, "adapter_validation_bags", set())
+    if overlap:
+        raise ValueError("LoRA validation bags cannot train the classifier: " + ", ".join(sorted(overlap)))
     count = int(vlm.get("num_frames", 4))
     temporal_profile = getattr(model, "temporal_profile", {})
     if temporal_profile:

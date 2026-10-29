@@ -81,6 +81,7 @@ class RynnBrainModel:
         self.adapter_identity = None
         self.lora_adapter_path = config.get("lora_adapter_path")
         self.adapter_training_bags: set[str] = set()
+        self.adapter_validation_bags: set[str] = set()
         self.temporal_profile = {}
         if config.get("lora_adapter_path"):
             from .lora import load_lora_adapter
@@ -88,6 +89,9 @@ class RynnBrainModel:
             self.model, self.adapter_identity, self.adapter_training_bags = load_lora_adapter(
                 self.model, config["lora_adapter_path"], self.model_id
             )
+            from .lora import adapter_training_bag_names
+            self.adapter_validation_bags = (adapter_training_bag_names(
+                config["lora_adapter_path"], include_validation=True) - self.adapter_training_bags)
             from .temporal_lora import adapter_profile
             self.temporal_profile = adapter_profile(config["lora_adapter_path"])
         self.model.eval()

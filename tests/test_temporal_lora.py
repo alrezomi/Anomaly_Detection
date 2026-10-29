@@ -94,6 +94,15 @@ class TemporalLoraTests(unittest.TestCase):
         self.assertEqual(reader.call_count, 2)
         self.assertTrue(all(call.args[1] == ["top", "side"] for call in reader.call_args_list))
 
+    def test_checkpoint_selection_bag_is_not_a_held_out_test(self):
+        from rynnbrain_vlm import run
+        model = SimpleNamespace(model_id='test', temporal_profile=self.profile, adapter_identity='saved',
+            adapter_training_bags=set(), adapter_validation_bags={'val_bag'}, lora_adapter_path='saved')
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, 'checkpoint selection'):
+                run.evaluate_multiturn(model, {**self.config, 'test_bag': 'val_bag'}, self.config['rynnbrain'],
+                                       3, {}, Path(directory))
+
     def test_single_evaluation_matches_training_prompt_and_returns_generated_time(self):
         import torch
         from rynnbrain_vlm import run

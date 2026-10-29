@@ -206,11 +206,15 @@ def _excluded_bag_names(
 ) -> set[str]:
     rynnbrain = config.get("rynnbrain", {})
     names = {Path(bag).name for bag in rynnbrain.get("reference_bags", [])}
+    lora_training = rynnbrain.get("lora", {}).get("training", {})
+    for key in ("validation_normal_bags", "validation_failure_bags"):
+        names |= {str(bag).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+                  for bag in lora_training.get(key, [])}
     adapter_path = rynnbrain.get("model", {}).get("lora_adapter_path")
     if adapter_path:
         from rynnbrain_vlm.lora import adapter_training_bag_names
 
-        names |= adapter_training_bag_names(adapter_path)
+        names |= adapter_training_bag_names(adapter_path, include_validation=True)
     if not include_nominal_bags:
         names |= {Path(bag).name for bag in config.get("nominal_bags", [])}
     classifier = rynnbrain.get("cop_classifier", {})
