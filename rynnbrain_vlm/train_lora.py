@@ -309,6 +309,9 @@ def train(config: dict[str, Any], settings: dict[str, Any], rows: list[dict[str,
                 best_epoch = epoch
                 best_loss = validation_loss if validation_loss is not None else float("inf")
             history.append({"epoch": epoch, "training_loss": epoch_loss / len(training), "validation_loss": validation_loss})
+            if validation_loss is not None:
+                print(f"Epoch {epoch} complete: validation_loss={validation_loss:.6f}, "
+                      f"saved_epoch={best_epoch}", flush=True)
             (output / "training_summary.json").write_text(json.dumps({
                 "saved_epoch": best_epoch, "optimizer_steps": step, "epochs": history,
                 "selection": "lowest validation loss" if validation else "last epoch (no validation supplied)",

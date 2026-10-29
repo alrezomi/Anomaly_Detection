@@ -182,6 +182,18 @@ class BenchmarkSelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "LoRA training"):
                 _select_named_records([], ["trained_bag"], _excluded_bag_names(config, True))
 
+    def test_checkpoint_validation_bags_are_excluded_from_saved_and_current_settings(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = Path(directory)
+            (adapter / 'training_manifest.json').write_text(json.dumps({'bags': [
+                {'bag_name': 'optimizer_train', 'split': 'train'},
+                {'bag_name': 'checkpoint_validation', 'split': 'validation'}]}))
+            config = {'rynnbrain': {'model': {'lora_adapter_path': str(adapter)}, 'lora': {'training': {
+                'validation_normal_bags': ['/data/current_validation'], 'validation_failure_bags': []}}}}
+            self.assertEqual(_excluded_bag_names(config, include_nominal_bags=True),
+                             {'optimizer_train', 'checkpoint_validation', 'current_validation'})
+
     def test_clean_report_contains_only_decision_fields(self) -> None:
         report = _build_clean_report(
             [

@@ -63,6 +63,7 @@ class LoraSelectionTests(unittest.TestCase):
                 {"bag_name": "train", "split": "train"}, {"bag_name": "validation", "split": "validation"},
             ]}))
             self.assertEqual(adapter_training_bag_names(root), {"train"})
+            self.assertEqual(adapter_training_bag_names(root, include_validation=True), {"train", "validation"})
 
 
 class LoraGradientTests(unittest.TestCase):

@@ -322,6 +322,20 @@ class BenchmarkTrainingTests(unittest.TestCase):
         self.assertEqual(runtime["lora_training_status"], "failed")
         self.assertFalse((runtime_path.parent / "benchmark_summary.csv").exists())
 
+    def test_validation_bags_cannot_be_reused_for_classifier_training(self):
+        config = load_pipeline_config(self.config_path)
+        training = config['rynnbrain']['lora']['training']
+        training['validation_normal_bags'] = [self.bags['test_normal']]
+        training['validation_failure_bags'] = [self.bags['test_fail']]
+        classifier = config['rynnbrain']['cop_classifier']['training']
+        classifier['normal_bags'].append(self.bags['test_normal'])
+        with self.assertRaisesRegex(ValueError, 'Remove LoRA validation bags'):
+            prepare_pipeline_run(self.arguments(), config)
+        classifier['normal_bags'].remove(self.bags['test_normal'])
+        _, effective, _ = prepare_pipeline_run(self.arguments(), config)
+        self.assertEqual(effective['rynnbrain']['lora']['training']['validation_normal_bags'],
+                         [self.bags['test_normal']])
+
     def test_successful_exit_without_checkpoint_is_not_accepted(self):
         child = Mock()
         child.stdout = iter([])

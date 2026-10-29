@@ -352,6 +352,10 @@ class OnlineDetector:
             progress(f"Extended replay enabled: reference remains {self.frame_count} frames; "
                      "execution history may exceed training length and grows in memory.")
         self.excluded = set(self.model.adapter_training_bags)
+        self.excluded.update(getattr(self.model, "adapter_validation_bags", set()))
+        validation_settings = vlm.get("lora", {}).get("training", {})
+        for key in ("validation_normal_bags", "validation_failure_bags"):
+            self.excluded.update(Path(value).name for value in validation_settings.get(key, []))
         if self.complete is not None:
             self.excluded.update(self.complete.metadata.get("training_bags", []))
             self.excluded.update(self.classifier.metadata.get("training_bags", []))

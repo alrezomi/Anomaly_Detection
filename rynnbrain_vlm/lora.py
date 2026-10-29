@@ -127,12 +127,14 @@ def answer_loss(model: Any, example: dict[str, Any]) -> Any:
     return F.cross_entropy(outputs.logits[0].float(), labels[0, positions + 1])
 
 
-def adapter_training_bag_names(adapter_path: str | Path) -> set[str]:
+def adapter_training_bag_names(adapter_path: str | Path, *, include_validation: bool = False) -> set[str]:
+    """Read optimizer-training bags, optionally including checkpoint-selection bags."""
     manifest_path = Path(adapter_path) / "training_manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"Missing LoRA training provenance: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return {row["bag_name"] for row in manifest["bags"] if row["split"] == "train"}
+    splits = {"train", "validation"} if include_validation else {"train"}
+    return {row["bag_name"] for row in manifest["bags"] if row["split"] in splits}
 
 
 def load_lora_adapter(model: Any, adapter_path: str | Path, model_id: str) -> tuple[Any, str, set[str]]:

@@ -66,7 +66,14 @@ def prepare_pipeline_run(arguments, config):
     # Check explicit LoRA lists before allocating the GPU or creating run artifacts.
     settings = training_settings(result)
     data_root = arguments.data_root or Path(os.environ.get("ANOMALY_DATA_ROOT", "/data"))
-    resolve_bag_selection(settings, data_root, result["rynnbrain"]["reference_bags"])
+    selected = resolve_bag_selection(settings, data_root, result["rynnbrain"]["reference_bags"])
+    validation_names = {row["bag_name"] for row in selected if row["split"] == "validation"}
+    classifier_names = {str(value).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+                        for key in ("bags", "normal_bags", "failure_bags")
+                        for value in classifier_training.get(key, [])}
+    overlap = validation_names & classifier_names
+    if overlap:
+        raise ValueError("Remove LoRA validation bags from classifier training lists: " + ", ".join(sorted(overlap)))
     root.mkdir(parents=True, exist_ok=False)
     write_json(root / "requested_config.json", requested)
     write_json(root / "lora_training_config.json", result)

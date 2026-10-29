@@ -2700,6 +2700,13 @@ this option does not create those videos or rebuild DINO memory.
 
 ### Compare prompt A and B with a fixed execution interval
 
+LoRA `validation_normal_bags` and `validation_failure_bags` are separate recordings
+used after each epoch to select the checkpoint with the lowest validation loss.
+They receive no optimizer updates. Move whole bags out of both LoRA and classifier
+training lists when reserving them for validation; keep the same split for A and B.
+Training still runs the configured epoch count. The final benchmark and replay
+exclude these recordings because checkpoint selection has already used them.
+
 The ordinary benchmark command can queue two independent fresh training runs.
 Set these fields in your existing configuration (retain your bag lists, model
 settings and other parameters):
