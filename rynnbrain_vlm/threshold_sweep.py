@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 
-THRESHOLDS = tuple(percent / 100 for percent in range(60, 91))
+THRESHOLDS = tuple(percent / 100 for percent in range(101))
 COLUMNS = ["input_mode", "benchmark_decision_mode", "failure_category", "threshold", "threshold_percent",
            "normal_count", "failure_count", "true_positive", "false_positive", "true_negative", "false_negative",
            "accuracy", "balanced_accuracy", "recall", "false_positive_rate", "precision", "f1", "is_best_accuracy"]
@@ -105,7 +105,7 @@ def write_threshold_sweep_report(master_rows, benchmark_root, *, input_modes=Non
             "Select thresholds on validation bags and evaluate the chosen threshold on separate test bags.",
         sampling_note="Reuses saved scores and observation sequences. Does not resimulate adaptive replay, "
             "change frame sampling, retrain models, or modify the configured threshold.",
-        tie_policy="Report all thresholds tied for best accuracy within 0.60 to 0.90 inclusive.",
+        tie_policy="Report all thresholds tied for best accuracy within 0.00 to 1.00 inclusive.",
         units="Thresholds and metrics use fractions in [0, 1]; plots use percent.",
         comparisons=comparisons, csv=str(csv_path), plot_files=plots)
     (root / "threshold_summary.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
@@ -132,7 +132,7 @@ def _plot_sweep(curves, mode, protocol, path):
                 best = [row for row in rows if row["is_best_accuracy"]]
                 axis.scatter([row["threshold_percent"] for row in best], [100 * row["accuracy"] for row in best],
                              s=18, color="#c27524", zorder=4, label="Best accuracy (including ties)")
-            axis.set(title=title, ylim=(-2, 102), xlim=(60, 90), ylabel="Percent")
+            axis.set(title=title, ylim=(-2, 102), xlim=(0, 100), ylabel="Percent")
             axis.grid(alpha=.2)
     for axis in axes[-1]:
         axis.set_xlabel("Failure-score threshold (%)")

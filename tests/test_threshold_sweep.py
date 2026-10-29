@@ -17,6 +17,12 @@ def row(name, label, score, *, mode="raw", protocol="timeline", category="Failur
 
 
 class ThresholdSweepTests(unittest.TestCase):
+    def test_best_threshold_can_be_outside_old_range(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [row('n', 'normal', .92), row('f', 'fail', .98)]
+            report = write_threshold_sweep_report(rows, Path(directory))
+            self.assertEqual(report['comparisons'][0]['best_accuracy_thresholds'], [p / 100 for p in range(93, 99)])
+
     def test_sweeps_every_percent_reports_all_accuracy_ties_and_preserves_inputs(self):
         rows = [row("n1", "normal", .65), row("n2", "normal", .75),
                 row("f1", "fail", .8), row("f2", "fail", .95)]
@@ -29,7 +35,11 @@ class ThresholdSweepTests(unittest.TestCase):
             self.assertEqual(overall["best_accuracy_thresholds"], [p / 100 for p in range(76, 81)])
             data = pd.read_csv(report["csv"])
             data = data[data.failure_category == "all_failures"]
-            self.assertEqual(list(data.threshold_percent), list(range(60, 91)))
+            self.assertEqual(list(data.threshold_percent), list(range(101)))
+            self.assertEqual(data.iloc[0].recall, 1.)
+            self.assertEqual(data.iloc[0].false_positive_rate, 1.)
+            self.assertEqual(data.iloc[-1].recall, 0.)
+            self.assertEqual(data.iloc[-1].false_positive_rate, 0.)
             at_75 = data[data.threshold_percent == 75].iloc[0]
             self.assertEqual((at_75.true_positive, at_75.false_positive, at_75.true_negative, at_75.false_negative), (2, 1, 1, 0))
             self.assertEqual(at_75.accuracy, .75)
@@ -59,7 +69,7 @@ class ThresholdSweepTests(unittest.TestCase):
             self.assertEqual(comparisons["raw", "timeline", "Failure_1_grasp_miss"]["failure_count"], 1)
             self.assertEqual(comparisons["raw", "timeline", "Failure_2_slip"]["normal_count"], 1)
             self.assertEqual(comparisons["raw", "whole_demo", "all_failures"]["best_accuracy"], 1.)
-            self.assertEqual(comparisons["heatmap", "timeline", "all_failures"]["best_accuracy"], 0.)
+            self.assertEqual(comparisons["heatmap", "timeline", "all_failures"]["best_accuracy"], .5)
             self.assertEqual(len(report["plot_files"]), 3)
 
     def test_invalid_scores_unknown_labels_and_single_class_do_not_produce_a_best_threshold(self):

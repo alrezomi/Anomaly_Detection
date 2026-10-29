@@ -47,7 +47,7 @@ def write_report_index(rows, statistics, pca, root, method):
                          f"{metric['status']}. {metric.get('reason') or ''}")
     sweep = statistics.get('probability_roc', {}).get('threshold_sweep', {})
     if sweep:
-        lines += ['', '## Threshold sweep (60-90%, step 1%)', '',
+        lines += ['', '## Threshold sweep (0-100%, step 1%)', '',
                   '[All threshold metrics](benchmark_threshold_sweep/threshold_metrics.csv) · '
                   '[Best thresholds and ties](benchmark_threshold_sweep/threshold_summary.json)', '',
                   'Best accuracy is measured on these scored bags. Select a threshold on validation data '
@@ -60,6 +60,8 @@ def write_report_index(rows, statistics, pca, root, method):
                   'Per-bag timelines and PCA use the chosen replay stopping point. ROC and threshold '
                   'selection use the complete uncensored scan, so stopping at one threshold does not '
                   'hide scores needed to assess higher thresholds.']
+    if (root / 'benchmark_failure_probability_points.csv').is_file():
+        lines += ['', '[Probability dot categories and demo names](benchmark_failure_probability_points.csv)', '']
     lines += ['', '## PCA availability', '']
     for mode in (pca or {}).get('modes', []):
         lines.append(f"- {mode['input_mode']}: {mode['status']}. {mode.get('reason') or mode.get('note') or ''}")

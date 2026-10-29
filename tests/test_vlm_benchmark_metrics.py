@@ -35,6 +35,7 @@ class VlmFolderMetricsTests(unittest.TestCase):
         self.assertEqual(classifier.false_positive_rate, 0.)
         self.assertEqual(classifier.timing_mae_sec, 2.)
         self.assertTrue(table[table.folder.eq('empty')].recall.isna().all())
+        self.assertTrue(table[table.folder.eq('empty')].availability_reason.str.startswith('No selected bags').all())
 
     def test_input_modes_are_not_pooled_and_absent_class_rates_stay_unavailable(self):
         rows = self.rows()+[dict(ground_truth_label='normal', decision='success', input_mode='heatmap', folder='other')]

@@ -55,6 +55,10 @@ def folder_metrics(rows, folders, input_modes=None):
                     values = pd.to_numeric(group[column], errors='coerce').dropna()
                     return float(values.mean()) if len(values) else None
                 result.append(dict(input_mode=mode, decision_source=source, folder=folder,
+                    availability_reason=("No selected bags in this folder after discovery, exclusions and bag filters."
+                        if not len(group) else "No selected bags have known normal/fail ground truth."
+                        if not len(known) else "No valid binary decisions; inspect errors and abstentions."
+                        if not len(valid) else None),
                     selected_bags=len(group), known_label_count=len(known), unknown_label_count=len(group)-len(known),
                     evaluated_bags=len(valid), error_bags=int(error.sum()),
                     abstained_or_unavailable_bags=len(known)-len(valid)-int(error.sum()),

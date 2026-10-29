@@ -459,7 +459,7 @@ def main() -> None:
         print(f"Anomaly-distance reports: {arguments.summary.parent / 'benchmark_anomaly_roc'}")
     print(f"ROC report: {arguments.summary.parent / 'benchmark_roc'}")
     print(f"Probability ROC report: {arguments.summary.parent / 'benchmark_probability_roc'}")
-    print(f"Threshold sweep (60-90%, step 1%): {arguments.summary.parent / 'benchmark_threshold_sweep'}")
+    print(f"Threshold sweep (0-100%, step 1%): {arguments.summary.parent / 'benchmark_threshold_sweep'}")
     print(f"Failure-probability boxplots: {arguments.summary.parent}")
 
 

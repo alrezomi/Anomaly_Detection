@@ -143,7 +143,7 @@ class BenchmarkReplayTests(unittest.TestCase):
             choice = json.loads((output / "selected_threshold.json").read_text())
             self.assertEqual(choice["threshold"], .75)
             self.assertEqual(choice["accuracy"], 1.)
-            self.assertEqual(choice["tied_thresholds"], [i / 100 for i in range(75, 91)])
+            self.assertEqual(choice["tied_thresholds"], [i / 100 for i in range(75, 95)])
             rows = pd.read_csv(output / "benchmark_summary.csv").set_index("bag_name")
             self.assertEqual(rows.loc["failure", "classifier_failure_probability"], .8)
             self.assertAlmostEqual(rows.loc["failure", "threshold_selection_peak_score"], 242 / 255)
@@ -177,3 +177,21 @@ class BenchmarkReplayTests(unittest.TestCase):
                 self.assertTrue((output / path).is_file(), path)
             self.assertFalse((timeline / "normal").exists())
             self.assertFalse((output / "threshold_60").exists())
+            # Re-select on saved observations and export every graph without model/ROS-image inference.
+            from rynnbrain_vlm.benchmark_replay import refresh_saved_threshold_reports
+            original_output = (output / 'benchmark_summary.csv').read_bytes()
+            original_scan_csv = (timeline / 'threshold_selection/failure.csv').read_bytes()
+            with patch('run_benchmark.RynnBrainModel', side_effect=AssertionError('No model loading')), \
+                 patch('rynnbrain_vlm.online_replay.OnlineDetector', side_effect=AssertionError('No detector loading')), \
+                 patch('rosbag_io.iter_rosbag_image_frames', side_effect=AssertionError('No image sampling')), \
+                 patch('rynnbrain_vlm.visual_matching.read_corrected_failure_annotation', side_effect=annotation):
+                refreshed, new_root, _ = refresh_saved_threshold_reports(timeline)
+            self.assertEqual(new_root, timeline / 'best_threshold_0_100')
+            self.assertEqual((output / 'benchmark_summary.csv').read_bytes(), original_output)
+            self.assertEqual((timeline / 'threshold_selection/failure.csv').read_bytes(), original_scan_csv)
+            self.assertEqual(len(detector.calls), 12)
+            self.assertEqual(len(refreshed), 2)
+            self.assertTrue((new_root / 'REPORTS.md').is_file())
+            self.assertTrue((new_root / 'benchmark_failure_probability_points.csv').is_file())
+            thresholds = pd.read_csv(new_root / 'benchmark_threshold_sweep/threshold_metrics.csv')
+            self.assertEqual(set(thresholds.threshold_percent), set(range(101)))

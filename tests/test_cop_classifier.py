@@ -20,6 +20,20 @@ from rynnbrain_vlm.cop_classifier import (
 
 
 class CoPClassifierTests(unittest.TestCase):
+    def test_full_range_reporting_cutoffs_can_be_reused_without_changing_weights(self):
+        from rynnbrain_vlm.cop_classifier import CoPLogisticClassifier, with_decision_threshold
+        classifier = CoPLogisticClassifier(np.array([1., -1.]), 0., np.zeros(2), .5, 'raw', 'test', {}, {})
+        probability = classifier.predict_failure_probability([1., .2])
+        for threshold in (0., 1.):
+            selected = with_decision_threshold(classifier, {'training': {'threshold': threshold}})
+            self.assertEqual(selected.threshold, threshold)
+            self.assertIs(selected.weights, classifier.weights)
+            self.assertEqual(selected.predict_failure_probability([1., .2]), probability)
+        self.assertEqual(classifier.threshold, .5)
+        for invalid in (-.01, 1.01, True, float('nan')):
+            with self.assertRaises(ValueError):
+                with_decision_threshold(classifier, {'training': {'threshold': invalid}})
+
     signature = {
         "model_id": "test-model",
         "input_mode": "raw",

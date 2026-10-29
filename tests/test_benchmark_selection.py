@@ -85,6 +85,10 @@ class BenchmarkSelectionTests(unittest.TestCase):
                 _run_benchmark(args, config, lambda **kwargs: None)
             self.assertEqual(evaluate.call_args.args[2]['cop_classifier']['plot_timeline'], mode == 'timeline')
             output = root/'reports'/mode
+            discovery = pd.read_csv(output / 'benchmark_bag_discovery.csv')
+            self.assertEqual(discovery.selection_status.tolist(), ['selected'])
+            counts = pd.read_csv(output / 'benchmark_folder_selection.csv')
+            self.assertEqual(counts.selected_bags.tolist(), [1])
             index = (output/'REPORTS.md').read_text(encoding='utf-8')
             self.assertIn('benchmark_probability_roc/roc_raw.png', index)
             self.assertIn('benchmark_probability_roc/auroc_raw.png', index)

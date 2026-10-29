@@ -108,7 +108,7 @@ def _choose_threshold(report):
     return min(overall[0]["best_accuracy_thresholds"]), overall[0]
 
 
-def _export_bag(detector, config, record, cache_path, output, threshold, startup_ignore_sec):
+def _export_bag(detector, config, record, cache_path, output, threshold, startup_ignore_sec, *, full_csv_directory=None):
     from .cop_analysis import save_cop_vector
     from .cop_timeline import _plot_timeline, first_alert_interval
     from .failure_timing import evaluate_failure_timing
@@ -145,7 +145,7 @@ def _export_bag(detector, config, record, cache_path, output, threshold, startup
         timeline_csv = directory / "logistic_timeline_raw.csv"
         plot = directory / "logistic_timeline_raw.png"
         pd.DataFrame(prefix).to_csv(timeline_csv, index=False)
-        full_csv = cache_path.with_suffix(".csv")
+        full_csv = ((Path(full_csv_directory) / cache_path.name) if full_csv_directory else cache_path).with_suffix(".csv")
         pd.DataFrame(full).to_csv(full_csv, index=False)
         label = record["label"]
         peak = max((row["anomaly_score"] for row in full), default=None) if saved["complete"] else None
@@ -219,9 +219,6 @@ def _export_bag(detector, config, record, cache_path, output, threshold, startup
 
 
 def run_threshold_search(config, records, root, detector, update, startup_ignore_sec):
-    from .threshold_sweep import write_threshold_sweep_report
-    from .benchmark_roc import write_probability_roc_report
-
     selection = root / "threshold_selection"
     selection.mkdir(parents=True, exist_ok=True)
     if not {"normal", "fail"}.issubset({record["label"] for record in records}):
@@ -245,6 +242,15 @@ def run_threshold_search(config, records, root, detector, update, startup_ignore
                 if scan["complete"] else None, classifier_threshold=float(detector.classifier.threshold),
             evaluation_error=scan["error"]))
         pd.DataFrame(peaks).to_csv(selection / "benchmark_summary.csv", index=False)
+    return _export_threshold_reports(config, records, selection, output, detector, scans, peaks,
+                                     update, startup_ignore_sec)
+
+
+def _export_threshold_reports(config, records, selection, output, detector, scans, peaks, update, startup_ignore_sec):
+    from .threshold_sweep import write_threshold_sweep_report
+    from .benchmark_roc import write_probability_roc_report
+
+    selection.mkdir(parents=True, exist_ok=True)
     report = write_threshold_sweep_report(peaks, selection, input_modes=["raw"])
     threshold, overall = _choose_threshold(report)
     choice = dict(threshold=threshold, threshold_percent=round(threshold * 100),
@@ -271,10 +277,59 @@ def run_threshold_search(config, records, root, detector, update, startup_ignore
     effective["rynnbrain"]["cop_classifier"]["train_on_benchmark"] = False
     write_json(output / "pipeline_config.json", effective)
     write_json(output / "selected_threshold.json", choice)
-    results = [_export_bag(detector, config, record, cache, output, threshold, startup_ignore_sec)
+    results = [_export_bag(detector, config, record, cache, output, threshold, startup_ignore_sec,
+                           full_csv_directory=selection)
                for record, cache, scan in scans]
     write_json(output / "benchmark_protocol.json", {**choice, "decision_mode": "timeline", "threshold_search": True})
     update(completed_bags=len(results), benchmark_output_dir=str(output))
+    return results, output, effective
+
+
+def refresh_saved_threshold_reports(root):
+    """Re-select and export from saved scans without loading a model or classifier."""
+    from types import SimpleNamespace
+    from .runtime import record_run
+    from run_benchmark import _write_benchmark_reports
+
+    root = Path(root)
+    previous = root / "best_threshold"
+    config = json.loads((previous / "pipeline_config.json").read_text(encoding="utf-8"))
+    records = pd.read_csv(previous / "benchmark_bag_selection.csv", keep_default_na=False).to_dict("records")
+    peaks = pd.read_csv(root / "threshold_selection" / "benchmark_summary.csv").to_dict("records")
+    output = root / "best_threshold_0_100"
+    if output.exists() and any(output.iterdir()):
+        raise ValueError(f"Refreshed reports already exist: {output}. Existing reports were not changed.")
+    scans = []
+    provenance = None
+    timestamp_inputs = True
+    for record in records:
+        cache = root / "threshold_selection" / f"{record['bag_name']}.npz"
+        with np.load(cache, allow_pickle=False) as saved:
+            scan = json.loads(saved["metadata_json"].tobytes())
+        scans.append((record, cache, scan))
+        if provenance is None and scan["rows"]:
+            response_path = previous / record["bag_name"] / "rynnbrain_multiturn" / "rynnbrain_responses_multiturn.json"
+            response = json.loads(response_path.read_text(encoding="utf-8"))
+            provenance = response["results"][0]
+            selected = response.get("selected_raw_frames", [])
+            if selected:
+                timestamp_inputs = selected[0].get("model_label", "").startswith("Frame ")
+    if provenance is None:
+        raise ValueError("No saved observation provenance is available; cannot export threshold reports.")
+    detector = SimpleNamespace(model=SimpleNamespace(adapter_identity=provenance.get("lora_adapter_sha256")),
+        path=Path(provenance["classifier_model_path"]), signature=provenance["comparison_signature"],
+        response=provenance["nominal_response"], timestamp_inputs=timestamp_inputs,
+        score_source="saved_cached_replay_classifier")
+    if len(peaks) != len(records) or {row["bag_name"] for row in peaks} != {row["bag_name"] for row in records}:
+        raise ValueError("Saved selection scores do not match the saved bag selection.")
+    selection = root / "threshold_selection_0_100"
+    with record_run(selection, "report_refresh") as update:
+        print("Refreshing 0-100% threshold reports from saved scans. No model inference or training.", flush=True)
+        results, output, effective = _export_threshold_reports(config, records, selection, output, detector,
+            scans, peaks, update, config.get("startup_ignore_sec", .1))
+        folders = config.get("vlm_benchmark", {}).get("folders", [])
+        _write_benchmark_reports(SimpleNamespace(skip_vlm=False), effective, effective["rynnbrain"], results,
+                                 output, folders, records, "timeline", update)
     return results, output, effective
 
 
@@ -304,3 +359,10 @@ def write_frame_runtime_report(rows, root):
     figure.savefig(root / "benchmark_frame_runtime.png", dpi=150)
     plt.close(figure)
     return summary
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Refresh a completed threshold search from saved observations; no model inference.")
+    parser.add_argument("--input-dir", type=Path, required=True, help="Completed benchmark timeline directory")
+    refresh_saved_threshold_reports(parser.parse_args().input_dir)
