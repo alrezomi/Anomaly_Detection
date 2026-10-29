@@ -613,6 +613,26 @@ def _run_benchmark(arguments, config, update) -> dict[str, Any] | None:
     print(selection_df[selection_columns].to_string(index=False) if records else "  (none)")
 
     candidates = records[: arguments.limit] if arguments.limit else records
+    selected_paths = {str(record['bag_path']) for record in candidates}
+    discovery_rows = [dict(bag_name=path.name, bag_path=str(path),
+        folder=_benchmark_folder(path, data_root, folder_names),
+        selection_status='excluded_training_reference_or_memory' if path.name in excluded_names
+            else 'selected' if str(path) in selected_paths else 'not_selected_by_bag_filter_or_limit') for path in all_bags]
+    pd.DataFrame(discovery_rows, columns=['bag_name', 'bag_path', 'folder', 'selection_status']).to_csv(
+        benchmark_root / 'benchmark_bag_discovery.csv', index=False)
+    folder_counts = []
+    for folder in folder_names:
+        found = [row for row in discovery_rows if row['folder'] == folder]
+        count = sum(row['selection_status'] == 'selected' for row in found)
+        excluded = sum(row['selection_status'] == 'excluded_training_reference_or_memory' for row in found)
+        reason = ('No recognizable ROS bags discovered (check metadata.yaml and mounted files).'
+                  if not found else 'All discovered bags were excluded as training/reference/nominal memory.'
+                  if excluded == len(found) else 'No bags remain after explicit bag filters or limit.' if not count else None)
+        folder_counts.append(dict(folder=folder, discovered_bags=len(found), excluded_bags=excluded,
+                                  selected_bags=count, availability_reason=reason))
+        if not count:
+            print(f"Folder {folder}: selected=0, discovered={len(found)}, excluded={excluded}. {reason}", flush=True)
+    pd.DataFrame(folder_counts).to_csv(benchmark_root / 'benchmark_folder_selection.csv', index=False)
     duplicates = pd.Series([record['bag_name'] for record in candidates], dtype=str).duplicated(keep=False)
     if duplicates.any():
         raise ValueError('Selected bag names must be unique to avoid overwriting per-bag outputs. '
@@ -884,7 +904,7 @@ def _write_benchmark_reports(arguments, config, vlm, master_rows, benchmark_root
     for metric in statistics["probability_roc"]["metrics"]:
         value = f"AUROC={metric['auroc']:.3f}" if metric["status"] == "created" else metric["reason"]
         print(f"  {metric['input_mode']} / {metric['failure_category']}: {value}")
-    print(f"Threshold sweep (60-90%, step 1%): {benchmark_root / 'benchmark_threshold_sweep'}")
+    print(f"Threshold sweep (0-100%, step 1%): {benchmark_root / 'benchmark_threshold_sweep'}")
     for comparison in statistics["probability_roc"].get("threshold_sweep", {}).get("comparisons", []):
         if comparison["failure_category"] == "all_failures" and comparison["status"] == "created":
             thresholds = ', '.join(f"{100 * value:.0f}%" for value in comparison["best_accuracy_thresholds"])

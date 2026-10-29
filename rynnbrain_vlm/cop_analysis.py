@@ -125,6 +125,17 @@ def discover_saved_vectors(
 
 
 def _probability_category(row: dict[str, Any]) -> str:
+    folder = row.get("folder")
+    if isinstance(folder, str) and folder.strip() and folder.lower() not in {"nan", "none"}:
+        return folder
+    path = str(row.get("bag_path") or row.get("test_bag") or "").replace("\\", "/").rstrip("/")
+    parents = path.split("/")[:-1]
+    if parents:
+        nominal = next((index for index, part in enumerate(parents) if part.lower() == "nominal"), None)
+        if nominal is not None:
+            return "/".join(parents[nominal:])
+        if parents[-1]:
+            return parents[-1]
     if _canonical_label(row.get("ground_truth_label")) == "normal":
         return "Nominal"
     category = row.get("failure_category")
@@ -229,6 +240,7 @@ def _write_score_report(
     output_directory.mkdir(parents=True, exist_ok=True)
     modes = sorted(set(input_modes or []) | {str(row["input_mode"]) for row in rows if row.get("input_mode")})
     summary_rows = []
+    point_rows = []
     mode_reports = []
     styles = _pca_category_styles({_probability_category(row) for row in rows
                                    if _canonical_label(row.get("ground_truth_label")) in PCA_LABELS})
@@ -261,7 +273,12 @@ def _write_score_report(
                 continue
             score = score if anomaly else 100.0 * score
             groups[label].append(score)
-            points[label].append((_probability_category(row), score))
+            category = _probability_category(row)
+            points[label].append((category, score))
+            point_rows.append(dict(input_mode=mode, ground_truth_label=label, category=category,
+                bag_name=row.get("bag_name") or str(row.get("bag_path", "")).replace("\\", "/").rstrip("/").split("/")[-1],
+                bag_path=row.get("bag_path"), score=score, units="distance" if anomaly else "percent",
+                marker=str(styles[category]["marker"]), color=styles[category]["color"]))
         summaries = []
         for label, values in groups.items():
             summary = {column: None for column in columns}
@@ -288,11 +305,14 @@ def _write_score_report(
                              "scored_rows": valid_count, "excluded_rows": excluded, "groups": summaries})
     csv_path = output_directory / f"{file_prefix}_summary.csv"
     pd.DataFrame(summary_rows, columns=columns).to_csv(csv_path, index=False)
+    points_path = output_directory / f"{file_prefix}_points.csv"
+    pd.DataFrame(point_rows, columns=["input_mode", "ground_truth_label", "category", "bag_name", "bag_path",
+                                     "score", "units", "marker", "color"]).to_csv(points_path, index=False)
     return {"grouping": "ground_truth_label", "units": ("threshold_ratio" if timeline else "distance") if anomaly else "percent",
             "decision_mode": "timeline" if timeline else "whole_demo",
             "note": "Classifier estimates; groups are actual outcomes, not predicted decisions. Input modes are kept separate.",
             "unassigned_mode_rows": sum(not bool(row.get("input_mode")) for row in rows),
-            "summary_csv": str(csv_path), "modes": mode_reports}
+            "summary_csv": str(csv_path), "points_csv": str(points_path), "modes": mode_reports}
 
 
 def write_failure_probability_report(rows, output_directory, *, input_modes=None):

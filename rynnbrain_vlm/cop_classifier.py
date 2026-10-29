@@ -25,8 +25,8 @@ def with_decision_threshold(classifier, config):
     value = config.get('training', {}).get('threshold')
     if not isinstance(classifier, CoPLogisticClassifier) or value is None:
         return classifier
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value) or not 0 < value < 1:
-        raise ValueError('cop_classifier.training.threshold must be a finite number strictly between 0 and 1.')
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError('cop_classifier.training.threshold must be a finite number between 0 and 1 inclusive.')
     return replace(classifier, threshold=float(value))
 
 

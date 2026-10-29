@@ -2865,7 +2865,7 @@ change in multiples of `1 / normal_count`, and recalls in multiples of
 Several perfect-ranking categories can also overlap on the same curve.
 
 The probability report also writes `benchmark_threshold_sweep/`, comparing
-**60% through 90%, inclusive, in 1% steps** using those already computed scores:
+**0% through 100%, inclusive, in 1% steps** using those already computed scores:
 
 - `threshold_metrics.csv`: accuracy, balanced accuracy, failure recall,
   false-positive rate, precision, F1 and TP/FP/TN/FN at every threshold.
@@ -2917,7 +2917,7 @@ constant interval (default 10 seconds); the GUI also uses it as its initial valu
 Adaptive bands remain 10/7/5/3 seconds.
 
 The first pass deliberately continues after alarms so that all thresholds from
-60% through 90% can be compared fairly. It caches each observation **once**, not
+0% through 100% can be compared fairly. It caches each observation **once**, not
 once per threshold. `threshold_selection/` contains compact per-bag NPZ scan
 caches, selection scores, ROC/AUROC, threshold curves and `selected_threshold.json`.
 Both nominal and failure labels are required. All accuracy ties are reported;
@@ -2943,6 +2943,37 @@ observations. These timings exclude model/reference loading, frame decoding,
 waiting and report export. They are actual processing measurements from the
 single scan, not nominal sampling intervals. Threshold selection on these bags
 is validation, not an independent test of the chosen cutoff.
+
+To refresh a completed sequential search using its saved observations, without
+loading the VLM or repeating inference:
+
+```bash
+docker compose run --rm -T --build --entrypoint python benchmark \
+  -m rynnbrain_vlm.benchmark_replay \
+  --input-dir /outputs/experiments/YOUR_EXPERIMENT/rynnbrain_benchmark/timeline
+```
+
+The refresh writes `threshold_selection_0_100/` and `best_threshold_0_100/`,
+preserving the original best-threshold reports and NPZ observation caches.
+The new best-threshold tree includes the complete usual report set and the
+originally measured processing times. Its timelines are re-exported at the new
+first-alarm stopping point from cached images/features. Refreshing requires the
+saved scan NPZ files and original best-threshold provenance/configuration.
+Existing refreshed reports are not overwritten. Recorded failure annotations
+are read again, but model weights and raw execution images are not loaded.
+
+Probability plots identify the actual source folder for both successful and
+failed executions, including each nominal setting and nonstandard failure
+folders. `benchmark_failure_probability_points.csv` maps every plotted score to
+its bag, category, marker and colour. The two boxplots still group actual
+normal/failure outcomes. Scores are failure scores even for successful bags;
+timeline peaks are not calibrated execution-level probabilities.
+
+An N/A folder accuracy with `selected_bags=0` means no cases from that folder
+were evaluated. `benchmark_bag_discovery.csv` and
+`benchmark_folder_selection.csv` distinguish missing bag metadata, training/
+reference exclusions, and explicit bag filters or limits. Known-label counts
+and availability explanations remain in `benchmark_metrics.csv`.
 
 Both probability and kNN ROC plots emphasize **Overall (all evaluated bags)**
 as a thick dark line drawn above the thinner, lighter category curves. This

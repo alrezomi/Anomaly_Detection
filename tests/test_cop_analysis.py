@@ -18,6 +18,27 @@ from rynnbrain_vlm.cop_analysis import (
 
 
 class CoPAnalysisTests(unittest.TestCase):
+    def test_probability_dots_preserve_nominal_subfolders_and_nonstandard_failure_categories(self):
+        rows = [dict(input_mode="raw", ground_truth_label=label, folder=folder,
+                     bag_path=f"/data/{folder}/{name}", bag_name=name, classifier_failure_probability=score)
+                for label, folder, name, score in [
+                    ("normal", "Nominal/setting 1", "n1", .1),
+                    ("normal", "Nominal/setting 2", "n2", .2),
+                    ("normal", "Nominal/ft_nominal", "n3", .3),
+                    ("normal", "Failure_8_unrelated_object", "n4", .4),
+                    ("fail", "ft2_slip_at_start", "f1", .9)]]
+        with tempfile.TemporaryDirectory() as directory:
+            report = write_failure_probability_report(rows, Path(directory))
+            points = pd.read_csv(report["points_csv"])
+            self.assertEqual(list(points.category), [row['folder'] for row in rows])
+            self.assertEqual(list(points.bag_name), ['n1', 'n2', 'n3', 'n4', 'f1'])
+            self.assertEqual(list(points.score), [10., 20., 30., 40., 90.])
+            self.assertEqual(points.marker.nunique(), 5)
+            from rynnbrain_vlm.cop_analysis import _probability_category
+            fallback = dict(rows[0]); fallback.pop('folder')
+            self.assertEqual(_probability_category(fallback), 'Nominal/setting 1')
+            self.assertTrue(Path(report['modes'][0]['plot_file']).exists())
+
     def test_probability_statistics_use_ground_truth_percentages_and_separate_modes(self):
         rows = [
             {"input_mode": "raw", "ground_truth_label": "normal", "decision": "failure", "classifier_failure_probability": value}
