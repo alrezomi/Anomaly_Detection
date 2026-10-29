@@ -2920,8 +2920,37 @@ The first pass deliberately continues after alarms so that all thresholds from
 0% through 100% can be compared fairly. It caches each observation **once**, not
 once per threshold. `threshold_selection/` contains compact per-bag NPZ scan
 caches, selection scores, ROC/AUROC, threshold curves and `selected_threshold.json`.
-Both nominal and failure labels are required. All accuracy ties are reported;
-the lowest tied threshold is selected, favoring recall on the same trajectories.
+Both nominal and failure labels are required. Sequential threshold selection now
+minimizes a balanced first-alarm timing cost. The accuracy-only optimum and all
+its ties remain available for comparison; the probability ROC is unchanged.
+
+For a normal bag, any alarm costs 1 and no alarm costs 0. For a failure bag with
+recorded onset `t0` and last scored time `T`, the first alarm at `a >= t0` costs
+`(a - t0) / (T - t0)`. A missed failure or first alarm before `t0` costs 1;
+a later correct crossing cannot rescue a premature stop. Selection minimizes
+`0.5 * mean(normal costs) + 0.5 * mean(failure costs)` over 0–100%, in 1% steps.
+Costs tied within absolute tolerance `1e-12` choose the lowest threshold.
+There is no added configuration parameter or delay deadline. Normal and failure
+classes each have half the weight, so class imbalance alone cannot favor one.
+
+This is a transparent application-specific starting cost, inspired by delay-
+sensitive evaluation in [NAB](https://arxiv.org/abs/1510.03336) and
+[quickest change detection](https://arxiv.org/abs/1210.5552); it is **not** the
+official NAB score or a universally optimal economic cost. Normalizing by the
+remaining observed horizon makes the same delay less costly in a longer bag.
+The cost of a detector that never alarms is 0.5. The report includes improvement
+over that baseline; a minimum near 0.5 is weak evidence for a useful detector.
+Annotations unavailable or outside the scored window, and incomplete/invalid
+histories, are explicitly excluded and counted. If no evaluable normal/failure
+comparison remains, selection stops with a saved explanation. No failure time
+is invented and annotations never enter inference.
+
+`benchmark_temporal_cost/` contains the cost/false-alarm/delay plots, CSV metrics
+for every threshold, and every bag's first alarm, status, raw delay and cost.
+Delay in this objective uses observation timestamps; it excludes processing,
+transport and display latency. The separately measured frame-processing report
+is retained. Mean/median/90th-percentile raw delays describe post-onset detections
+only; missed and premature detections remain full penalties in the cost.
 
 Only **one** full output tree is exported, under `best_threshold/`, using saved
 frames/features rather than repeating model inference. With
@@ -2929,8 +2958,9 @@ frames/features rather than repeating model inference. With
 crossing of the selected threshold; negative runs retain the observation window.
 Usual metrics, timelines, failure-timing graphs, boxplots, ROC/AUROC, PCA, selected
 input images, response/vector records and report index are retained. ROC ranking
-uses `threshold_selection_peak_score` from the uncensored scan; per-bag reported
-probabilities and PCA describe the selected stopping point. There are no
+uses `threshold_selection_peak_score` from the uncensored scan, as does the
+comparison boxplot. Per-bag reported probabilities and PCA describe the selected
+stopping point. There are no
 per-threshold output trees. The original config, prompts and trained model files
 are not edited; `best_threshold/pipeline_config.json` is a separate reusable
 configuration with the chosen cutoff and training/search disabled. Use a fresh
@@ -2953,8 +2983,9 @@ docker compose run --rm -T --build --entrypoint python benchmark \
   --input-dir /outputs/experiments/YOUR_EXPERIMENT/rynnbrain_benchmark/timeline
 ```
 
-The refresh writes `threshold_selection_0_100/` and `best_threshold_0_100/`,
-preserving the original best-threshold reports and NPZ observation caches.
+The refresh writes `threshold_selection_timing/` and `best_threshold_timing/`,
+preserving the original best-threshold reports, previous `*_0_100` reports,
+and NPZ observation caches. No additional model run or retraining is needed.
 The new best-threshold tree includes the complete usual report set and the
 originally measured processing times. Its timelines are re-exported at the new
 first-alarm stopping point from cached images/features. Refreshing requires the

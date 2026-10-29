@@ -62,6 +62,14 @@ def write_report_index(rows, statistics, pca, root, method):
                   'hide scores needed to assess higher thresholds.']
     if (root / 'benchmark_failure_probability_points.csv').is_file():
         lines += ['', '[Probability dot categories and demo names](benchmark_failure_probability_points.csv)', '']
+    if (root / 'benchmark_temporal_cost/cost_summary.json').is_file():
+        lines += ['', '## First-alarm delay and threshold cost', '',
+                  '[Cost definition and minimum](benchmark_temporal_cost/cost_summary.json) · '
+                  '[Cost and timing at every threshold](benchmark_temporal_cost/threshold_costs.csv) · '
+                  '[Every bag and threshold](benchmark_temporal_cost/per_bag_costs.csv)', '',
+                  'Selection balances nominal false alarms with normalized first-alarm delay. Premature '
+                  'stops and misses receive full failure cost. Delay is normalized by the observed '
+                  'post-onset horizon, an explicit application assumption; raw delay seconds are also reported.']
     lines += ['', '## PCA availability', '']
     for mode in (pca or {}).get('modes', []):
         lines.append(f"- {mode['input_mode']}: {mode['status']}. {mode.get('reason') or mode.get('note') or ''}")
