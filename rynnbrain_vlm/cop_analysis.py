@@ -247,6 +247,8 @@ def _write_score_report(
     suffix = "score" if anomaly else "percent"
     score_name = "anomaly_score" if anomaly else "probability"
     score_column = "classifier_anomaly_score" if anomaly else "classifier_failure_probability"
+    if timeline and not anomaly and any('threshold_selection_peak_score' in row for row in rows):
+        score_column = 'threshold_selection_peak_score'
     file_prefix = "benchmark_anomaly_score" if anomaly else "benchmark_failure_probability"
     columns = ["input_mode", "ground_truth_label", "count"] + [f"{key}_{suffix}" for key in ("mean", "median", "q1", "q3", "min", "max")]
     for mode in modes:
@@ -312,6 +314,7 @@ def _write_score_report(
             "decision_mode": "timeline" if timeline else "whole_demo",
             "note": "Classifier estimates; groups are actual outcomes, not predicted decisions. Input modes are kept separate.",
             "unassigned_mode_rows": sum(not bool(row.get("input_mode")) for row in rows),
+            "score_column": score_column,
             "summary_csv": str(csv_path), "points_csv": str(points_path), "modes": mode_reports}
 
 

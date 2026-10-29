@@ -108,11 +108,18 @@ def _choose_threshold(report):
     return min(overall[0]["best_accuracy_thresholds"]), overall[0]
 
 
+def _read_timing_annotation(bag, config):
+    from .visual_matching import read_corrected_failure_annotation
+    try:
+        return read_corrected_failure_annotation(Path(bag), config.get('stage_topic', '/recording_stage'))
+    except Exception as error:
+        return dict(status='unavailable', time_sec=None, error=f'{type(error).__name__}: {error}')
+
+
 def _export_bag(detector, config, record, cache_path, output, threshold, startup_ignore_sec, *, full_csv_directory=None):
     from .cop_analysis import save_cop_vector
     from .cop_timeline import _plot_timeline, first_alert_interval
     from .failure_timing import evaluate_failure_timing
-    from .visual_matching import read_corrected_failure_annotation
     from .run import write_multiturn_outputs
 
     vlm = config["rynnbrain"]
@@ -197,7 +204,7 @@ def _export_bag(detector, config, record, cache_path, output, threshold, startup
                 {**row, "test_bag": str(bag), "comparison_signature": detector.signature,
                  "vector_timestamp_sec": prefix[-1]["timestamp_sec"], "vector_failure_probability": prefix[-1]["anomaly_score"]})
             row.update(cop_vector_path=str(vector_path), cop_metadata_path=str(sidecar))
-    annotation = read_corrected_failure_annotation(bag, config.get("stage_topic", "/recording_stage"))
+    annotation = _read_timing_annotation(bag, config)
     # Evaluate early alarms against the complete scan window, even if the chosen
     # replay stops before the eventual recorded failure marker.
     row.update(evaluate_failure_timing(annotation,
@@ -249,13 +256,29 @@ def run_threshold_search(config, records, root, detector, update, startup_ignore
 def _export_threshold_reports(config, records, selection, output, detector, scans, peaks, update, startup_ignore_sec):
     from .threshold_sweep import write_threshold_sweep_report
     from .benchmark_roc import write_probability_roc_report
+    from .temporal_threshold import write_temporal_cost_report
 
     selection.mkdir(parents=True, exist_ok=True)
     report = write_threshold_sweep_report(peaks, selection, input_modes=["raw"])
-    threshold, overall = _choose_threshold(report)
+    accuracy_threshold, overall = _choose_threshold(report)
+    annotations = {record['bag_name']: _read_timing_annotation(record['bag_path'], config)
+                   for record in records if record['label'] == 'fail'}
+    temporal = write_temporal_cost_report(scans, annotations, selection)
+    if temporal['status'] != 'created':
+        raise ValueError('Cannot select a timing-cost threshold: complete histories with known failure onsets '
+                         'are required. See benchmark_temporal_cost/cost_summary.json; original reports remain available.')
+    threshold = temporal['selected_threshold']
+    threshold_rows = pd.read_csv(report['csv'])
+    selected_accuracy = float(threshold_rows.loc[(threshold_rows.input_mode == 'raw') &
+        (threshold_rows.benchmark_decision_mode == 'timeline') & (threshold_rows.failure_category == 'all_failures') &
+        np.isclose(threshold_rows.threshold, threshold), 'accuracy'].iloc[0])
     choice = dict(threshold=threshold, threshold_percent=round(threshold * 100),
-        accuracy=overall["best_accuracy"], tied_thresholds=overall["best_accuracy_thresholds"],
-        tie_rule="Lowest threshold among equal maximum accuracies, favoring recall.",
+        selection_method='balanced_normalized_first_alarm_cost',
+        accuracy=selected_accuracy, tied_thresholds=temporal['tied_thresholds'],
+        minimum_cost=temporal['minimum_cost'], cost_definition=temporal,
+        accuracy_only_threshold=accuracy_threshold, accuracy_only_best=overall['best_accuracy'],
+        accuracy_only_tied_thresholds=overall['best_accuracy_thresholds'],
+        tie_rule=temporal['tie_rule'],
         observation_policy=replay_settings(config),
         sampling="First recorded frame at or after the next due bag timestamp; no wall-clock waits or future frames.",
         ranking="ROC uses complete uncensored scan peaks; chosen-threshold timelines stop at the first alarm when requested.",
@@ -265,7 +288,8 @@ def _export_threshold_reports(config, records, selection, output, detector, scan
         row["classifier_threshold"] = threshold
     pd.DataFrame(peaks).to_csv(selection / "benchmark_summary.csv", index=False)
     write_probability_roc_report(peaks, selection, input_modes=["raw"])
-    print(f"Selected threshold: {threshold:.0%}; observed accuracy={overall['best_accuracy']:.1%}. "
+    print(f"Selected threshold: {threshold:.0%}; timing cost={temporal['minimum_cost']:.4f}; "
+          f"observed bag accuracy={selected_accuracy:.1%}. Accuracy-only cutoff={accuracy_threshold:.0%}. "
           "Generating one full set of outputs from saved observations.", flush=True)
     update(phase="best_threshold_outputs", selected_threshold=threshold, current_bag=None)
     output.mkdir(parents=True, exist_ok=True)
@@ -280,6 +304,8 @@ def _export_threshold_reports(config, records, selection, output, detector, scan
     results = [_export_bag(detector, config, record, cache, output, threshold, startup_ignore_sec,
                            full_csv_directory=selection)
                for record, cache, scan in scans]
+    # Keep the cost graph and audit alongside all existing best-threshold reports.
+    write_temporal_cost_report(scans, annotations, output)
     write_json(output / "benchmark_protocol.json", {**choice, "decision_mode": "timeline", "threshold_search": True})
     update(completed_bags=len(results), benchmark_output_dir=str(output))
     return results, output, effective
@@ -296,7 +322,7 @@ def refresh_saved_threshold_reports(root):
     config = json.loads((previous / "pipeline_config.json").read_text(encoding="utf-8"))
     records = pd.read_csv(previous / "benchmark_bag_selection.csv", keep_default_na=False).to_dict("records")
     peaks = pd.read_csv(root / "threshold_selection" / "benchmark_summary.csv").to_dict("records")
-    output = root / "best_threshold_0_100"
+    output = root / "best_threshold_timing"
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"Refreshed reports already exist: {output}. Existing reports were not changed.")
     scans = []
@@ -322,9 +348,9 @@ def refresh_saved_threshold_reports(root):
         score_source="saved_cached_replay_classifier")
     if len(peaks) != len(records) or {row["bag_name"] for row in peaks} != {row["bag_name"] for row in records}:
         raise ValueError("Saved selection scores do not match the saved bag selection.")
-    selection = root / "threshold_selection_0_100"
+    selection = root / "threshold_selection_timing"
     with record_run(selection, "report_refresh") as update:
-        print("Refreshing 0-100% threshold reports from saved scans. No model inference or training.", flush=True)
+        print("Selecting a timing-cost threshold over 0-100% from saved scans. No model inference or training.", flush=True)
         results, output, effective = _export_threshold_reports(config, records, selection, output, detector,
             scans, peaks, update, config.get("startup_ignore_sec", .1))
         folders = config.get("vlm_benchmark", {}).get("folders", [])

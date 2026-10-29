@@ -141,23 +141,26 @@ class BenchmarkReplayTests(unittest.TestCase):
             timeline = root / "vlm_benchmark" / "timeline"
             output = timeline / "best_threshold"
             choice = json.loads((output / "selected_threshold.json").read_text())
-            self.assertEqual(choice["threshold"], .75)
+            self.assertEqual(choice["threshold"], .81)
+            self.assertEqual(choice['selection_method'], 'balanced_normalized_first_alarm_cost')
+            self.assertEqual(choice['accuracy_only_threshold'], .75)
+            self.assertAlmostEqual(choice['minimum_cost'], .5 * 2/18)
             self.assertEqual(choice["accuracy"], 1.)
-            self.assertEqual(choice["tied_thresholds"], [i / 100 for i in range(75, 95)])
+            self.assertEqual(choice["tied_thresholds"], [i / 100 for i in range(81, 95)])
             rows = pd.read_csv(output / "benchmark_summary.csv").set_index("bag_name")
-            self.assertEqual(rows.loc["failure", "classifier_failure_probability"], .8)
+            self.assertAlmostEqual(rows.loc["failure", "classifier_failure_probability"], 242 / 255)
             self.assertAlmostEqual(rows.loc["failure", "threshold_selection_peak_score"], 242 / 255)
-            self.assertEqual(rows.loc["failure", "predicted_failure_time_sec"], 15.)
-            self.assertEqual(rows.loc["failure", "failure_time_error_sec"], -1.)
+            self.assertEqual(rows.loc["failure", "predicted_failure_time_sec"], 18.)
+            self.assertEqual(rows.loc["failure", "failure_time_error_sec"], 2.)
             self.assertEqual(rows.loc["failure", "stop_reason"], "alarm_threshold")
             prefix = pd.read_csv(output / "failure/rynnbrain_multiturn/logistic_timeline_raw.csv")
-            self.assertEqual(list(prefix.timestamp_sec), [0., 10., 15.])
+            self.assertEqual(list(prefix.timestamp_sec), [0., 10., 15., 18.])
             self.assertTrue(prefix.above_threshold.iloc[-1])
             full = pd.read_csv(timeline / "threshold_selection/failure.csv")
             self.assertEqual(len(full), 7)
-            self.assertEqual(set(full.threshold), {.75})
+            self.assertEqual(set(full.threshold), {.81})
             runtime = json.loads((output / "benchmark_frame_runtime.json").read_text())
-            self.assertEqual(runtime["observations"], 8)
+            self.assertEqual(runtime["observations"], 9)
             self.assertAlmostEqual(runtime["average_processing_sec_per_frame"], .005)
             clean = pd.read_csv(output / "benchmark_clean.csv")
             self.assertAlmostEqual(clean.runtime_frame_sec_mean.iloc[0], .005)
@@ -166,11 +169,12 @@ class BenchmarkReplayTests(unittest.TestCase):
             self.assertEqual(stats["probability_roc"]["score_column"], "threshold_selection_peak_score")
             self.assertEqual(stats["probability_roc"]["metrics"][0]["auroc"], 1.)
             effective = json.loads((output / "pipeline_config.json").read_text())
-            self.assertEqual(effective["rynnbrain"]["cop_classifier"]["training"]["threshold"], .75)
+            self.assertEqual(effective["rynnbrain"]["cop_classifier"]["training"]["threshold"], .81)
             self.assertFalse(effective["vlm_benchmark"]["threshold_search"])
             for path in ["benchmark_bag_selection.csv", "benchmark_metrics.png", "benchmark_failure_probability_raw.png", "benchmark_frame_runtime.png",
                          "benchmark_probability_roc/roc_raw.png", "benchmark_probability_roc/auroc_raw.png",
                          "benchmark_failure_timing/failure_timing_raw_logistic.png", "cop_pca/cop_pca_raw.png", "REPORTS.md",
+                         "benchmark_temporal_cost/threshold_costs.png", "benchmark_temporal_cost/per_bag_costs.csv",
                          "normal/rynnbrain_multiturn/rynnbrain_results_multiturn.csv",
                          "failure/rynnbrain_multiturn/rynnbrain_responses_multiturn.json",
                          "failure/rynnbrain_multiturn/logistic_timeline_raw.png"]:
@@ -186,7 +190,7 @@ class BenchmarkReplayTests(unittest.TestCase):
                  patch('rosbag_io.iter_rosbag_image_frames', side_effect=AssertionError('No image sampling')), \
                  patch('rynnbrain_vlm.visual_matching.read_corrected_failure_annotation', side_effect=annotation):
                 refreshed, new_root, _ = refresh_saved_threshold_reports(timeline)
-            self.assertEqual(new_root, timeline / 'best_threshold_0_100')
+            self.assertEqual(new_root, timeline / 'best_threshold_timing')
             self.assertEqual((output / 'benchmark_summary.csv').read_bytes(), original_output)
             self.assertEqual((timeline / 'threshold_selection/failure.csv').read_bytes(), original_scan_csv)
             self.assertEqual(len(detector.calls), 12)

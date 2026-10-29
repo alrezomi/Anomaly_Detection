@@ -817,6 +817,8 @@ def _write_benchmark_reports(arguments, config, vlm, master_rows, benchmark_root
     clean_report_path = benchmark_root / "benchmark_clean.csv"
     statistics = _report_statistics(master_rows)
     statistics['decision_mode'] = decision_mode
+    if (benchmark_root / 'selected_threshold.json').is_file():
+        statistics['threshold_selection'] = json.loads((benchmark_root / 'selected_threshold.json').read_text(encoding='utf-8'))
     if any('runtime_frame_count' in row for row in master_rows):
         from rynnbrain_vlm.benchmark_replay import write_frame_runtime_report
         statistics['frame_runtime'] = write_frame_runtime_report(master_rows, benchmark_root)

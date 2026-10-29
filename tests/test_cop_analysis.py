@@ -18,6 +18,18 @@ from rynnbrain_vlm.cop_analysis import (
 
 
 class CoPAnalysisTests(unittest.TestCase):
+    def test_timeline_boxplot_uses_same_uncensored_scores_as_roc(self):
+        rows = [dict(bag_name='failure', input_mode='raw', ground_truth_label='fail',
+                     benchmark_decision_mode='timeline', classifier_failure_probability=.6,
+                     threshold_selection_peak_score=.99)]
+        with tempfile.TemporaryDirectory() as directory:
+            report = write_failure_probability_report(rows, Path(directory))
+            self.assertEqual(report['score_column'], 'threshold_selection_peak_score')
+            self.assertEqual(report['modes'][0]['groups'][1]['median_percent'], 99.)
+            rows[0]['classifier_failure_probability'] = .9
+            unchanged = write_failure_probability_report(rows, Path(directory))
+            self.assertEqual(unchanged['modes'][0]['groups'][1]['median_percent'], 99.)
+
     def test_probability_dots_preserve_nominal_subfolders_and_nonstandard_failure_categories(self):
         rows = [dict(input_mode="raw", ground_truth_label=label, folder=folder,
                      bag_path=f"/data/{folder}/{name}", bag_name=name, classifier_failure_probability=score)
