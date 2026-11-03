@@ -523,17 +523,20 @@ def save_plot(rows, path, probability):
                   ha="center", va="center")
     fallback = any(row.get("score_computation") == "uncached_verification_fallback" for row in rows)
     kind = rows[0].get('score_kind', '')
-    title = (('GMR causal anomaly scores' if rows[0].get('score_computation') == 'causal_ts' else 'GMR offline score playback') if kind in {'gmr_epsilon', 'gmr_distance'} else
+    title = (('GMR causal anomaly scores' if rows[0].get('score_computation') == 'causal_ts' else 'GMR offline score playback') if kind in {'gmr_epsilon', 'gmr_distance', 'gmr_sensor_ratio'} else
              'DINO per-image replay' if kind == 'dino_distance' else
              'Online replay · uncached fallback on failed checks' if fallback else 'Online replay · cached execution history')
     axis.set(xlabel="Observation time from bag start (s)",
-             ylabel="Failure score (%)" if probability else 'Smoothed epsilon' if kind == 'gmr_epsilon' else "Anomaly distance",
+             ylabel="Failure score (%)" if probability else 'Smoothed epsilon' if kind == 'gmr_epsilon' else
+                    'Distance / threshold (largest sensor)' if kind == 'gmr_sensor_ratio' else "Anomaly distance",
              title=title)
     axis.spines[["top", "right"]].set_visible(False)
     axis.grid(alpha=.15)
     axis.legend(frameon=False)
     caption = ("Joint distance and nominal adaptive limit. Filtered alarm uses trailing epsilon smoothing and voting."
                if kind == 'gmr_distance' else
+               "Largest per-sensor distance / own nominal limit. Each sensor's alarm uses trailing smoothing and voting."
+               if kind == 'gmr_sensor_ratio' else
                "Elapsed-time replay; offline-trained scores require online validation. Lines connect scored observations.")
     figure.text(.1, .01, caption, fontsize=8)
     figure.tight_layout(rect=(0, .04, 1, 1))
@@ -563,7 +566,7 @@ class ReplayApplication:
         self.state["matching_status"] = "Not prepared"
         self.state['detector_type'] = 'vlm'
         self.state['requested_detector'] = 'vlm'
-        self.state['gmr_signal'] = 'pose'
+        self.state['gmr_signal'] = 'pose_force'
         self.jpeg = None
         self.matched_jpeg = None
         self.observed_jpeg = None
@@ -588,8 +591,8 @@ class ReplayApplication:
             if detector_type not in {'vlm', 'dino', 'gmr'}:
                 raise ValueError('Choose VLM, DINO or GMR online TS.')
             gmr_signal = self.state['gmr_signal'] if gmr_signal is None else gmr_signal
-            if not isinstance(gmr_signal, str) or gmr_signal not in {'pose', 'joints', 'gripper', 'pose_gripper', 'force'}:
-                raise ValueError('Select TCP pose, joint positions, gripper, pose + gripper, or force/torque.')
+            if not isinstance(gmr_signal, str) or gmr_signal not in {'pose_force', 'pose', 'joints', 'gripper', 'pose_gripper', 'force'}:
+                raise ValueError('Select TCP position (+ force), joint positions, gripper, position + gripper, or force.')
             switching = detector_type != self.state['detector_type']
             if type(index) is not int or not 0 <= index < len(self.bags):
                 raise ValueError("Select a listed bag.")
@@ -712,7 +715,7 @@ class ReplayApplication:
         kind = self.state['detector_type']
         causal_gmr = kind == 'gmr' and hasattr(self.detector, 'create_feed')
         if causal_gmr:
-            self.update(gmr_stage=0)
+            self.update(gmr_stage=0, gmr_release=None)
         preparation_metadata = {}
         if hasattr(self.detector, 'prepare_replay'):
             def preparation_progress(message):
@@ -814,6 +817,7 @@ class ReplayApplication:
                 stage_clock = self.detector.sampler.clock
                 metadata['stage_boundaries_sec'] = dict(stage_clock.boundaries)
                 metadata['recorded_failure_annotation'] = list(stage_clock.failures)
+                metadata['release_check'] = self.detector.release_result
             data = {**metadata, "status": status, "error": error, "rows": rows,
                     "cache_verification_status": verification_status(),
                     "elapsed_sec": time.monotonic() - feed.origin}

@@ -224,14 +224,14 @@ class OnlineReplayTests(unittest.TestCase):
     def test_gui_ts_selection_is_separate_from_pipeline_config(self):
         config = {'rynnbrain': {'num_frames': 8}}
         app = ReplayApplication(config, [Path('heldout')], 10., False)
-        self.assertEqual(app.snapshot()['gmr_signal'], 'pose')
+        self.assertEqual(app.snapshot()['gmr_signal'], 'pose_force')
         app.update(status='ready')
         app.start(0, detector_type='gmr', gmr_signal='pose_gripper')
         self.assertEqual(app.snapshot()['gmr_signal'], 'pose_gripper')
         self.assertEqual(app.jobs.get_nowait(), 0)
         self.assertEqual(config, {'rynnbrain': {'num_frames': 8}})
         app.update(status='completed')
-        with self.assertRaisesRegex(ValueError, 'Select TCP pose'):
+        with self.assertRaisesRegex(ValueError, 'Select TCP position'):
             app.start(0, detector_type='gmr', gmr_signal=[])
 
     def test_sequential_feed_keeps_every_sample_when_inference_falls_behind(self):

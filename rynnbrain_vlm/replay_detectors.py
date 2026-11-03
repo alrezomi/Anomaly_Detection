@@ -208,25 +208,35 @@ def synchronized_wrench(bag, topic, settings):
     return processed
 
 
-GMR_SIGNALS = {'pose': 'TCP pose', 'joints': 'Joint positions', 'gripper': 'Gripper position',
-               'pose_gripper': 'TCP pose + gripper position', 'force': 'Force / torque'}
+GMR_SIGNALS = {'pose_force': 'TCP position + force', 'pose': 'TCP position', 'joints': 'Joint positions',
+               'gripper': 'Gripper position', 'pose_gripper': 'TCP position + gripper position',
+               'force': 'Force'}
+GMR_OPTIONAL_SIGNALS = {'pose_force': ['force', 'gripper'], 'pose': ['gripper'], 'pose_gripper': []}
 
 
 def gmr_signal_topics(bag, mode):
-    """Select typed topics explicitly, rather than treating arbitrary TS as force."""
+    """Select typed topics explicitly, rather than treating arbitrary TS as force.
+
+    Optional signals are selected when present; the caller decides whether
+    every bag has them. Gripper feedback enables the release-location check.
+    """
     from rosbag_io import list_bag_topics
     if mode == 'force':
         return {'force': wrench_topic(bag)}
     if mode not in GMR_SIGNALS:
         raise ValueError('Select a supported GMR signal in the GUI.')
     topics = list_bag_topics(bag)
-    kinds = ['pose', 'gripper'] if mode == 'pose_gripper' else [mode]
+    kinds = {'pose_gripper': ['pose', 'gripper'], 'pose_force': ['pose']}.get(mode, [mode])
     specifications = {
+        'force': ('/force_torque_sensor_broadcaster/wrench', ['geometry_msgs/msg/Wrench', 'geometry_msgs/msg/WrenchStamped']),
         'pose': ('/tcp_pose_broadcaster/pose', ['geometry_msgs/msg/PoseStamped']),
         'joints': ('/joint_states', ['sensor_msgs/msg/JointState']),
         'gripper': ('/Robotiq2FGripperRobotInputMsg',
                     ['robotiq_hand_e_gripper_interfaces/msg/Robotiq2FGripperRobotInput']),
     }
+    for kind in GMR_OPTIONAL_SIGNALS.get(mode, []):
+        if (topics.message_type.isin(specifications[kind][1]) & (topics.message_count > 0)).any():
+            kinds.append(kind)
     selected = {}
     for kind in kinds:
         preferred, types = specifications[kind]

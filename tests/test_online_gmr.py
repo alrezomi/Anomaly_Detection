@@ -38,7 +38,7 @@ class OnlineGmrTests(unittest.TestCase):
         model = self.correlated_model()
         scaled = np.array([.25, 1., -1.])
         distance, component = model._score_scaled_point(scaled)
-        channels = channel_diagnostics(model, scaled, component, 2.)
+        channels = channel_diagnostics(model, scaled, 2.)
         self.assertGreater(distance, 2.)  # Opposite deviations violate the learned correlation.
         self.assertEqual(channels['a_position']['observed'], 12.)
         self.assertEqual(channels['b_position']['observed'], -23.)
@@ -57,33 +57,41 @@ class OnlineGmrTests(unittest.TestCase):
         endpoint = 2. * covariance[:, 0] / np.sqrt(covariance[0, 0])
         self.assertAlmostEqual(float(endpoint @ np.linalg.pinv(covariance) @ endpoint), 4.)
 
-    def test_distance_display_preserves_existing_filtered_alarms(self):
+    def test_each_sensor_has_its_own_threshold_and_alarm(self):
         import pandas as pd
         from time_series_gmr_scripts import run_time_series_test as settings
+        force = GMRAnomalyDetector(['phase'], ['force_z'], n_components=1)
+        force.scaler.mean_, force.scaler.scale_ = np.zeros(2), np.ones(2)
+        force.gmm.weights_, force.gmm.means_, force.gmm.covariances_ = np.array([1.]), np.zeros((1, 2)), np.eye(2)[None]
         detector = GmrOnlineDetector({'output_dir': '.', 'nominal_bags': []}, Mock())
         detector.reset('test')
-        detector.model = self.correlated_model()
-        detector.columns = detector.model.output_columns
+        detector.sensors = {'position': ['a_position', 'b_position'], 'force': ['force_z']}
+        detector.models = {'position': self.correlated_model(), 'force': force}
         detector.durations = [1., 1.]
-        detector.thresholds = pd.DataFrame({'phase_center': [0., 1.], 'threshold_mahalanobis': [1., 3.]})
+        detector.thresholds = {
+            'position': pd.DataFrame({'phase_center': [0., 1.], 'threshold_mahalanobis': [1., 3.]}),
+            'force': pd.DataFrame({'phase_center': [0., 1.], 'threshold_mahalanobis': [2., 2.]})}
         legacy_alarm = TrailingAlarm(settings.SCORE_SMOOTH_WINDOW, settings.MAJORITY_WINDOW, settings.MAJORITY_VOTES)
-        limits = []
         for i in range(20):
             t = i / 10
             stage = 1 if t < 1 else 2
             elapsed = t if stage == 1 else t - 1
-            detector.pending = dict(stage=stage, stage_elapsed=elapsed, a_position=12., b_position=-23.)
+            detector.pending = dict(stage=stage, stage_elapsed=elapsed, a_position=12., b_position=-23., force_z=0.)
             row, _, _ = detector.append(None, t)
-            smoothed, alarm = legacy_alarm.append(row['raw_distance'] / row['adaptive_threshold'])
-            self.assertEqual(row['anomaly_score'], row['raw_distance'])
-            self.assertEqual(row['threshold'], row['adaptive_threshold'])
-            self.assertEqual(row['epsilon_smooth'], smoothed)
+            position = row['sensors']['position']
+            smoothed, alarm = legacy_alarm.append(position['distance'] / position['threshold'])
+            # Position keeps the existing per-sensor smoothing and voting; force is nominal.
+            self.assertEqual(position['epsilon_smooth'], smoothed)
             self.assertEqual(row['alarm_filtered'], alarm)
-            self.assertEqual(row['score_kind'], 'gmr_distance')
-            self.assertEqual(row['above_threshold'], row['raw_distance'] > row['threshold'])
-            self.assertEqual(set(row['channels']), {'a_position', 'b_position'})
-            limits.append(row['threshold'])
-        self.assertGreater(limits[-1], limits[0])
+            self.assertEqual(row['alarm_sources'], ['position'] if alarm else [])
+            self.assertFalse(row['sensors']['force']['alarm'])
+            self.assertAlmostEqual(row['sensors']['force']['distance'], 0.)
+            self.assertEqual(row['score_sensor'], 'position')
+            self.assertEqual(row['anomaly_score'], position['epsilon_raw'])
+            self.assertEqual(row['threshold'], 1.)
+            self.assertEqual(row['score_kind'], 'gmr_sensor_ratio')
+            self.assertEqual(set(row['channels']), {'a_position', 'b_position', 'force_z'})
+        self.assertTrue(row['alarm_filtered'])
 
     def test_stage_filter_end_and_failures(self):
         sampler = CausalSamples(['joints'])
@@ -147,12 +155,99 @@ class OnlineGmrTests(unittest.TestCase):
         self.assertEqual([r['gripper_position'] for r in rows], [.1, .1, .1, .9, .9, .9])
         negative_q = {**pose, 'orientation_w': -1.}
         self.assertEqual(signal_values('pose', pose), signal_values('pose', negative_q))
+        self.assertEqual(set(signal_values('pose', pose)), {'position_x', 'position_y', 'position_z'})
         with self.assertRaisesRegex(ValueError, 'reference frame'):
             list(CausalSamples(['pose']).packets(iter([(0., 'stage', '1'), (0., 'pose', pose),
                  (.2, 'pose', {**pose, 'pose_frame': 'other'})])))
         with self.assertRaisesRegex(ValueError, 'stale'):
             list(CausalSamples(['pose']).packets(iter([(0., 'stage', '1'), (0., 'pose', pose),
                  (2., 'stage', '3')])) )
+
+    def test_force_is_tick_averaged_and_zeroed_at_stage_one(self):
+        def wrench(fz):
+            return dict(force_x=0., force_y=0., force_z=fz, torque_x=9., torque_y=9., torque_z=9.)
+        pose = dict(position_x=0., position_y=0., position_z=0., pose_frame='base')
+        events = [(0., 'force', wrench(100.)), (.01, 'stage', '1'), (.01, 'pose', pose),
+                  (.04, 'force', wrench(10.)), (.08, 'force', wrench(12.)),
+                  (.14, 'force', wrench(15.)), (.18, 'force', wrench(17.)), (.25, 'stage', '2'), (.3, 'stage', '3')]
+        rows = [r for _, k, r in CausalSamples(['pose', 'force']).packets(iter(events)) if k == 'sample']
+        # Pre-stage force is ignored. Ticks at .11 and .21 average 10/12 then 15/17;
+        # the first averaged tick is the zero.
+        self.assertEqual([r['force_z'] for r in rows], [0., 5.])
+        self.assertNotIn('torque_x', rows[0])
+
+    def test_release_is_first_opening_after_grasp_and_waits_past_stage_three(self):
+        def run(opens):
+            pose = lambda t: dict(position_x=t, position_y=0., position_z=0., pose_frame='base')
+            events = [(0., 'stage', '1'), (.5, 'stage', '2'), (1., 'stage', '3')]
+            events += [(round(t, 9), 'pose', pose(t)) for t in np.arange(0., 1.6, .05)]
+            events += [(.02, 'gripper', {'gripper_position': .01}), (.2, 'gripper', {'gripper_position': .9}),
+                       (1.1, 'gripper', {'gripper_position': .9})]
+            if opens:
+                events += [(1.32, 'gripper', {'gripper_position': .05})]
+            sampler = CausalSamples(['pose'], release=True)
+            packets = list(sampler.packets(iter(sorted(events, key=lambda e: e[0]))))
+            return sampler, packets
+        sampler, packets = run(True)
+        samples = [p for _, k, p in packets if k == 'sample']
+        self.assertTrue(all(r['time'] < 1. for r in samples))
+        self.assertNotIn('gripper_position', samples[0])
+        self.assertEqual([k for _, k, _ in packets][-1], 'release')
+        self.assertEqual(sampler.release['stage'], 3)
+        self.assertAlmostEqual(sampler.release['position_x'], 1.3)
+        sampler, packets = run(False)
+        self.assertIsNone(sampler.release)
+        self.assertEqual(sampler.clock.stage, 3)
+
+    def test_release_threshold_is_calibrated_on_held_out_nominal_releases(self):
+        rng = np.random.default_rng(0)
+        names = [f'nominal_{i}' for i in range(12)]
+        detector = GmrOnlineDetector({'output_dir': '.', 'nominal_bags': names}, Mock())
+        detector.reset('test')
+        nominal = np.array([.37, -.68, -.03])
+        releases = [dict(zip(['position_x', 'position_y', 'position_z'], nominal + rng.normal(0, .005, 3)))
+                    for _ in names]
+        detector.calibrate_release(releases, Mock())
+        inside = detector.check_release(dict(time=1., stage=3, **releases[0]))
+        self.assertFalse(inside['alarm'])
+        beside = dict(zip(['position_x', 'position_y', 'position_z'], nominal + [0., .2, 0.]))
+        self.assertTrue(detector.check_release(dict(time=2., stage=3, **beside))['alarm'])
+        self.assertTrue(detector.check_release(None)['alarm'])
+
+    def test_gmr_blends_overlapping_components(self):
+        model = GMRAnomalyDetector(['phase'], ['a_position'], n_components=2)
+        model.gmm.weights_ = np.array([.5, .5])
+        model.gmm.means_ = np.array([[-1., 0.], [1., 10.]])
+        model.gmm.covariances_ = np.array([np.eye(2), np.eye(2)])
+        mean, covariance, _ = model._predict_output_distribution(np.array([0.]))
+        self.assertAlmostEqual(mean[0], 5.)
+        self.assertAlmostEqual(covariance[0, 0], 1. + 25. + model.reg_covar)
+        # Midway between components, the blended prediction does not jump to either one.
+        self.assertAlmostEqual(model._score_scaled_point(np.array([0., 5.]))[0], 0.)
+
+    def test_pose_force_uses_force_only_when_every_bag_recorded_it(self):
+        def events(bag, topics, *_args):
+            pose = lambda t: dict(position_x=np.sin(t) + (.02 if bag == 'nominal_b' else 0.), position_y=t,
+                                  position_z=0., pose_frame='base')
+            stream = [(0., 'stage', '1'), (1., 'stage', '2'), (2., 'stage', '3')]
+            stream += [(round(t, 9), 'pose', pose(t)) for t in np.arange(0., 2.5, .05)]
+            if 'force' in topics:
+                stream += [(round(t, 9), 'force', dict(force_x=0., force_y=0., force_z=np.cos(t) + .1 * (bag == 'nominal_b')))
+                           for t in np.arange(0., 2.5, .01)]
+            return iter(sorted(stream, key=lambda e: e[0]))
+        for test_topics, columns in [({'pose': '/pose', 'force': '/wrench'}, ['force_x', 'force_y', 'force_z']), ({'pose': '/pose'}, [])]:
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch('rynnbrain_vlm.replay_detectors.gmr_signal_topics',
+                       side_effect=lambda bag, mode: test_topics if bag == 'test' else {'pose': '/pose', 'force': '/wrench'}), \
+                 patch('rynnbrain_vlm.visual_matching._source_identity', return_value=[]), \
+                 patch('rosbag_io.iter_ts_replay_events', side_effect=events):
+                detector = GmrOnlineDetector(dict(output_dir=directory, nominal_bags=['nominal_a', 'nominal_b']), Mock())
+                detector.reset('test')
+                prepared = detector.prepare_replay(Mock(), threading.Event())
+                self.assertEqual(detector.columns, sorted(['position_x', 'position_y', 'position_z', *columns]))
+                self.assertEqual(list(detector.sensors), ['force', 'position'] if columns else ['position'])
+                self.assertEqual('force' in prepared['topics'], bool(columns))
+                self.assertEqual('position only' in prepared['signal_description'], not columns)
 
     def test_trailing_filter_cannot_anticipate_future_alarm(self):
         def scores(sequence):

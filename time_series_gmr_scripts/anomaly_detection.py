@@ -109,10 +109,11 @@ class GMRAnomalyDetector:
             )
         )
 
-    def _select_component_from_input(
+    def _input_responsibilities(
         self,
         scaled_input: np.ndarray,
-    ) -> int:
+    ) -> np.ndarray:
+        """Posterior probability of each component given only the inputs."""
         input_indices, _ = self._index_sets()
         log_probabilities: list[float] = []
 
@@ -134,7 +135,9 @@ class GMRAnomalyDetector:
             )
             log_probabilities.append(float(log_probability))
 
-        return int(np.argmax(log_probabilities))
+        log_probabilities = np.asarray(log_probabilities)
+        responsibilities = np.exp(log_probabilities - log_probabilities.max())
+        return responsibilities / responsibilities.sum()
 
     def _conditional_output_distribution(
         self,
@@ -175,6 +178,41 @@ class GMRAnomalyDetector:
 
         return conditional_mean, conditional_covariance
 
+    def _predict_output_distribution(
+        self,
+        scaled_input: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, int]:
+        """
+        Blend the component conditionals by their input responsibilities.
+
+        This is the moment-matched GMR prediction. Scoring against only the
+        most likely component jumps where components overlap, and those jumps
+        dominated the calibrated thresholds. The most responsible component
+        is still returned for the component-level reference limits.
+        """
+        responsibilities = self._input_responsibilities(scaled_input)
+        conditionals = [
+            self._conditional_output_distribution(scaled_input, component)
+            for component in range(self.n_components)
+        ]
+
+        mean = sum(
+            weight * conditional_mean
+            for weight, (conditional_mean, _) in zip(responsibilities, conditionals)
+        )
+        covariance = sum(
+            weight
+            * (
+                conditional_covariance
+                + np.outer(conditional_mean - mean, conditional_mean - mean)
+            )
+            for weight, (conditional_mean, conditional_covariance) in zip(
+                responsibilities, conditionals
+            )
+        )
+
+        return mean, covariance, int(np.argmax(responsibilities))
+
     def _score_scaled_point(
         self,
         scaled_joint_sample: np.ndarray,
@@ -183,12 +221,8 @@ class GMRAnomalyDetector:
         scaled_input = scaled_joint_sample[input_indices]
         scaled_output = scaled_joint_sample[output_indices]
 
-        component = self._select_component_from_input(scaled_input)
-        predicted_mean, predicted_covariance = (
-            self._conditional_output_distribution(
-                scaled_input=scaled_input,
-                component=component,
-            )
+        predicted_mean, predicted_covariance, component = (
+            self._predict_output_distribution(scaled_input)
         )
 
         difference = scaled_output - predicted_mean

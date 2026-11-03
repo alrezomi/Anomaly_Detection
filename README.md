@@ -1747,8 +1747,31 @@ Use the **Detector** selector before starting an execution:
   Each image supplies its native score, adaptive threshold and heatmap. If
   inference cannot keep up, replay falls behind wall time rather than dropping
   inputs; Observation → result includes this delay.
-- **GMR online TS** has a **TS signal** selector: TCP pose (default), joint
-  positions, gripper position, TCP pose + gripper position, or force/torque.
+- **GMR online TS** has a **TS signal** selector: TCP position + force
+  (default), TCP position, joint positions, gripper position, TCP position +
+  gripper position, or force. TCP pose means **position only** (x, y, z): the
+  wrist legitimately finishes rotated either way in nominal runs, so
+  orientation made every nominal distance large. In *TCP position + force*,
+  force is used only when **every** nominal bag and the test bag recorded a
+  wrench topic; otherwise the model is trained and scored on position alone and
+  the GUI subtitle says "force not recorded: position only".
+
+  **Gripper release check** (TCP position and TCP position + force modes, when
+  every bag recorded gripper feedback): the release is the first time the
+  gripper opens after a grasp, i.e. it closed past half travel and then fell
+  below half of that grip. The TCP position at that moment is compared with the
+  nominal release positions (mean and covariance in metres, with a 1 mm variance
+  floor). Its threshold uses the same calibration as the GMR threshold:
+  held-out nominal distances, `THRESHOLD_QUANTILE` x `THRESHOLD_MARGIN`.
+  Preparation prints the nominal run with the largest held-out release
+  distance, because one unusual nominal (e.g. a re-grasp) sets this threshold.
+  The stage-3 marker is pressed at release and the gripper feedback opens about
+  0.2-1 s later, so after stage 3 GMR sampling stops but the replay keeps
+  reading until the gripper opens (or the recording ends, which is reported as
+  an alarm). An opening before stage 3 (dropping or re-grasping the object) is
+  checked the same way. The result is shown next to the GMR decision and saved
+  as `release_check` in `online_results.json`. The trajectory alarm itself is
+  unchanged; the GUI decision is an alarm if either check fails.
   It fits and calibrates a separate model for the selected signals using the
   existing top-level `nominal_bags`. No new config fields or paths are needed.
   The first run prepares the nominal model; subsequent runs reuse it. Test
@@ -1781,15 +1804,23 @@ Use the **Detector** selector before starting an execution:
   There is no eight-observation limit. If processing falls behind, replay keeps
   the samples and reports the delay rather than silently skipping them.
 
-  GMR scaling, conditional Mahalanobis distance and nominal adaptive threshold
-  calibration retain their existing methods. Score smoothing is now a trailing
+  GMR scaling and nominal adaptive threshold calibration retain their existing
+  methods. The conditional prediction is standard GMR: every component's
+  conditional mean/covariance is blended by its responsibility for the current
+  phase. (Scoring against only the single most likely component jumped by
+  10-200x where components overlap, and those jumps set the thresholds.) Score smoothing is now a trailing
   11-sample median (past/current data only), followed by the existing 6-of-8
-  majority vote. These filters introduce detection delay. The main graph shows
-  **raw joint Mahalanobis distance and its adaptive nominal threshold**, in
-  distance units. Red points mark instantaneous threshold crossings; the
-  separate filtered-alarm status still uses the trailing median of epsilon
-  (distance / threshold) and majority voting. This display change does not
-  change alarm decisions or require recalibrating an existing online model.
+  majority vote. These filters introduce detection delay.
+
+  **One GMR per sensor.** Position, force (and gripper/joints in those modes)
+  each get their own GMR, held-out calibration, adaptive threshold, smoothing
+  and vote, so one sensor's nominal variation (e.g. contact-force spikes) does
+  not loosen another sensor's limit. The alarm fires when **any** sensor's
+  filtered alarm fires, and the GUI names it, e.g. "Filtered GMR alarm (force)".
+  The main graph shows the **largest distance / threshold ratio across
+  sensors**, so the threshold line is 1. Rows save each sensor's result under
+  `sensors`, plus `alarm_sources` and `score_sensor` (the sensor plotted).
+  Red points mark instantaneous threshold crossings.
   CSV/JSON save both forms: `anomaly_score`/`raw_distance`,
   `threshold`/`adaptive_threshold`, `epsilon_raw`, `epsilon_smooth`,
   `alarm_filtered`, current stage and estimated phase. **Scoring time**
@@ -1798,8 +1829,7 @@ Use the **Detector** selector before starting an execution:
 
   **Individual signal plots** show every channel used by the selected TS mode,
   measured values, conditional nominal means, and projected joint-limit envelopes
-  in original units. Hover over a plot to inspect a timestamp. Orientation plots
-  are the six rotation-matrix features used by GMR, not Euler angles. The
+  in original units. Hover over a plot to inspect a timestamp. The
   envelopes are the projection of the joint Mahalanobis boundary onto each axis:
   `mean_j +/- distance_threshold * sqrt(covariance_jj)`, transformed back through
   the nominal scaler. The covariance includes the same regularization used by
@@ -1815,8 +1845,11 @@ Use the **Detector** selector before starting an execution:
 
 The signal readers prefer `/tcp_pose_broadcaster/pose`, `/joint_states`, and
 `/Robotiq2FGripperRobotInputMsg`. The same typed topics must exist in all nominal
-and test bags. TCP position uses metres; orientation uses six rotation-matrix
-components so quaternion sign changes do not create artificial anomalies.
+and test bags. TCP position uses metres. Force uses
+`/force_torque_sensor_broadcaster/wrench` (force x/y/z only, no torque). It is
+averaged over each 10 Hz tick and expressed as the change since the first tick
+of stage 1, because the sensor zero drifts by more than 10 N between recording
+sessions.
 Joint positions retain their names and native units; joint effort is not
 treated as measured TCP force. Joint angles that wrap in the recordings may
 still require separate preprocessing. `/tf` is not used as a force source.
