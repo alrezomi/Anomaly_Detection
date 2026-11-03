@@ -208,7 +208,7 @@ def synchronized_wrench(bag, topic, settings):
     return processed
 
 
-GMR_SIGNALS = {'pose_force': 'TCP position + force', 'pose': 'TCP position', 'joints': 'Joint positions',
+GMR_SIGNALS = {'pose_force': 'TCP position + force + gripper', 'pose': 'TCP position', 'joints': 'Joint positions',
                'gripper': 'Gripper position', 'pose_gripper': 'TCP position + gripper position',
                'force': 'Force'}
 GMR_OPTIONAL_SIGNALS = {'pose_force': ['force', 'gripper'], 'pose': ['gripper'], 'pose_gripper': []}

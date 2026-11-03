@@ -93,6 +93,23 @@ class OnlineGmrTests(unittest.TestCase):
             self.assertEqual(set(row['channels']), {'a_position', 'b_position', 'force_z'})
         self.assertTrue(row['alarm_filtered'])
 
+    def test_force_only_alarms_above_its_safety_limit(self):
+        import pandas as pd
+        detector = GmrOnlineDetector({'output_dir': '.', 'nominal_bags': []}, Mock())
+        detector.reset('test')
+        detector.sensors = {'position': ['a_position', 'b_position']}
+        detector.models = {'position': self.correlated_model()}
+        detector.thresholds = {'position': pd.DataFrame({'phase_center': [0., 1.], 'threshold_mahalanobis': [100., 100.]})}
+        detector.durations, detector.force_limit = [1., 1.], 50.
+        for fz, alarm in [(-30., False), (-60., True)]:
+            detector.pending = dict(stage=1, stage_elapsed=.5, a_position=10., b_position=-20.,
+                                    force_x=0., force_y=0., force_z=fz)
+            row, _, _ = detector.append(None, .5)
+            self.assertEqual(row['sensors']['force']['distance'], abs(fz))
+            self.assertEqual(row['sensors']['force']['alarm'], alarm)
+            self.assertEqual(row['alarm_sources'], ['force'] if alarm else [])
+            self.assertIsNone(row['channels']['force_z']['expected'])
+
     def test_stage_filter_end_and_failures(self):
         sampler = CausalSamples(['joints'])
         packets = list(sampler.packets(execution()))
@@ -191,13 +208,26 @@ class OnlineGmrTests(unittest.TestCase):
         sampler, packets = run(True)
         samples = [p for _, k, p in packets if k == 'sample']
         self.assertTrue(all(r['time'] < 1. for r in samples))
-        self.assertNotIn('gripper_position', samples[0])
+        # The gripper is shown with each sample but is not a GMR channel.
+        self.assertNotIn('gripper_position', sampler.columns)
+        self.assertEqual(samples[-1]['gripper_position'], .9)
         self.assertEqual([k for _, k, _ in packets][-1], 'release')
         self.assertEqual(sampler.release['stage'], 3)
         self.assertAlmostEqual(sampler.release['position_x'], 1.3)
         sampler, packets = run(False)
         self.assertIsNone(sampler.release)
         self.assertEqual(sampler.clock.stage, 3)
+
+    def test_scoring_continues_for_the_window_after_stage_three(self):
+        pose = lambda t: dict(position_x=t, position_y=0., position_z=0., pose_frame='base')
+        events = [(0., 'stage', '1'), (.5, 'stage', '2'), (1., 'stage', '3')]
+        events += [(round(t, 9), 'pose', pose(t)) for t in np.arange(0., 3., .05)]
+        sampler = CausalSamples(['pose'], post_sec=.5)
+        samples = [p for _, k, p in sampler.packets(iter(sorted(events, key=lambda e: e[0]))) if k == 'sample']
+        after = [r for r in samples if r['stage'] == 3]
+        self.assertEqual(len(after), 6)  # Ticks at 1.0 ... 1.5 s, then sampling stops.
+        self.assertAlmostEqual(after[-1]['stage_elapsed'], .5)
+        self.assertAlmostEqual(estimate_phase(3, .25, [1., 2., .5]), 5 / 6)
 
     def test_release_threshold_is_calibrated_on_held_out_nominal_releases(self):
         rng = np.random.default_rng(0)
@@ -245,9 +275,11 @@ class OnlineGmrTests(unittest.TestCase):
                 detector.reset('test')
                 prepared = detector.prepare_replay(Mock(), threading.Event())
                 self.assertEqual(detector.columns, sorted(['position_x', 'position_y', 'position_z', *columns]))
-                self.assertEqual(list(detector.sensors), ['force', 'position'] if columns else ['position'])
+                # Force is a safety limit, not a GMR sensor.
+                self.assertEqual(list(detector.sensors), ['position'])
+                self.assertEqual(detector.force_limit is not None, bool(columns))
                 self.assertEqual('force' in prepared['topics'], bool(columns))
-                self.assertEqual('position only' in prepared['signal_description'], not columns)
+                self.assertEqual('force not recorded' in prepared['signal_description'], not columns)
 
     def test_trailing_filter_cannot_anticipate_future_alarm(self):
         def scores(sequence):

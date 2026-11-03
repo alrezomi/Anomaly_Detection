@@ -81,6 +81,10 @@ SCORE_SMOOTH_WINDOW = 11
 MAJORITY_WINDOW = 8
 MAJORITY_VOTES = 6
 
+# Online GUI replay only: keep scoring this long after the stage-3 (release)
+# marker. Nominal training uses the same window as a third progress interval.
+POST_STAGE3_SEC = 5.0
+
 
 # ============================================================
 # 5. OUTPUT PATHS
