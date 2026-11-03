@@ -2,7 +2,8 @@
 
 DINO (camera) and GMR (TCP position, force limit, gripper release) score the
 same execution together. When one DINO camera scores ALARM_RUN consecutive
-frames above its threshold, the replay pauses and the base VLM (no LoRA) is
+frames above its threshold (the pooled 3x3 score, the DINO benchmark's
+decision score), the replay pauses and the base VLM (no LoRA) is
 asked in the main VLM's multi-turn form: turn 1 shows a complete nominal
 execution (rynnbrain.reference_bags, num_frames frames, the main VLM's
 reference prompt); turn 2 shows raw frames of this execution up to the alarm
@@ -10,8 +11,11 @@ and asks whether a failure happened or the robot can safely continue. A failure 
 answer resumes it, and that camera must drop below its threshold before it can
 trigger another check. GMR is shown but does not trigger checks yet. The
 execution, and with it the replay, ends POST_STAGE3_SEC after stage 3, as for
-GMR, so the robot returning home cannot trigger a check.
+GMR, so the robot returning home cannot trigger a check. The trigger rule
+(AlarmEpisodes) and the question (VlmChecker) are shared with the offline
+benchmark in cascade_benchmark.py.
 """
+from collections import defaultdict
 import heapq
 import io
 import re
@@ -53,11 +57,110 @@ def select_vlm_frame_times(boundaries, alarm_sec):
     return picks
 
 
+def current_stage(boundaries, timestamp):
+    return max((stage for stage, start in boundaries.items() if start <= timestamp), default=0)
+
+
 def parse_verdict(answer):
     """'failure' or 'safe'. Anything unclear stops the robot."""
     match = re.search(r'^\s*Decision\s*:\s*(.+)$', answer, flags=re.IGNORECASE | re.MULTILINE)
     decision = (match.group(1) if match else answer).lower()
     return 'safe' if 'safe' in decision and 'fail' not in decision else 'failure'
+
+
+class AlarmEpisodes:
+    """ALARM_RUN consecutive frames above threshold in one camera start an alarm
+    episode; that camera must drop below its threshold before the next one."""
+    def __init__(self):
+        self.streaks = defaultdict(int)
+        self.armed = defaultdict(lambda: True)
+
+    def update(self, camera, above):
+        """Record one frame; True when it starts a new alarm episode."""
+        self.streaks[camera] = self.streaks[camera] + 1 if above else 0
+        if not above:
+            self.armed[camera] = True
+        if self.streaks[camera] >= ALARM_RUN and self.armed[camera]:
+            self.armed[camera] = False
+            return True
+        return False
+
+
+class VlmChecker:
+    """The base VLM (no LoRA), asked in the main VLM's multi-turn form.
+
+    Turn 1 is a complete nominal execution (rynnbrain.reference_bags,
+    num_frames frames, the main VLM's reference prompt); the model's answer to
+    it is generated once. Turn 2 is frames of the current execution up to the
+    alarm, with the stage-aware question.
+    """
+    def __init__(self, config, progress):
+        from pathlib import Path
+        from .model import RynnBrainModel
+        from .prompts import task_context_prompt
+        from .run import _raw_inputs
+        from .temporal_lora import timestamped_images
+        vlm = config['rynnbrain']
+        self.task = vlm.get('task_description', 'Robot manipulation task')
+        self.generation = vlm.get('generation', {})
+        self.topic = (config.get('camera_topics') or vlm['camera_topics'])[0]
+        progress('Loading the base VLM (no LoRA) for alarm checks')
+        self.model = RynnBrainModel({**vlm['model'], 'lora_adapter_path': None})
+        # Turn 1 exactly as the main online VLM builds it: a complete nominal execution.
+        progress('Reading the nominal reference execution for the VLM')
+        topics = vlm.get('memory_camera_topics') or [self.topic]
+        frame_count = int(vlm.get('num_frames', 8))
+        self.reference_bags = list(vlm.get('reference_bags', []))
+        self.reference_names = {Path(bag).name for bag in self.reference_bags}
+        reference = []
+        for bag in self.reference_bags:
+            images, metadata = _raw_inputs(Path(bag), topics, frame_count)
+            reference.extend(timestamped_images(images, metadata, topics, frame_count))
+        if not reference:
+            raise ValueError('The VLM check needs rynnbrain.reference_bags (a complete nominal execution).')
+        self.reference_turn = dict(role='user', images=reference, text=task_context_prompt(
+            self.task, temporal=True, variant=vlm.get('prompt_variant', 'A')))
+        progress('Generating the VLM response to the nominal reference')
+        self.reference_response = self.model.generate_nominal(self.reference_turn, self.generation)
+        self.signature = dict(vlm_model=vlm['model']['model_id'], vlm_camera=self.topic,
+                              reference_bags=self.reference_bags, reference_response=self.reference_response,
+                              alarm_run=ALARM_RUN, context_sec=CONTEXT_SEC,
+                              min_frame_spacing_sec=MIN_FRAME_SPACING_SEC, max_vlm_frames=MAX_VLM_FRAMES)
+
+    def ask(self, frames, boundaries, alarm_sec):
+        """Ask whether a failure happened by alarm_sec.
+
+        frames: time-ordered (timestamp, (source, payload)) received so far;
+        source is 'message' (a compressed ROS image) or 'image' (a PIL image).
+        Returns the check record and the labelled images that were sent.
+        """
+        from rosbag_io import decode_image_message
+        from .prompts import cascade_verification_prompt
+        stage = current_stage(boundaries, alarm_sec)
+        stamps = [t for t, _ in frames]
+        records, images, used = [], [], set()
+        for requested, label in select_vlm_frame_times(boundaries, alarm_sec):
+            # Latest camera frame at or before the requested time; never a later one, never twice.
+            position = int(np.searchsorted(stamps, requested + 1e-9, side='right')) - 1
+            if position < 0 or position in used:
+                continue
+            used.add(position)
+            frame_sec, (source, payload) = frames[position]
+            image = decode_image_message(*payload) if source == 'message' else payload
+            images.append((f'Frame {len(images) + 1}, camera {self.topic}, time {frame_sec:.3f} s '
+                           f'from this bag start ({label}):', image))
+            records.append(dict(label=label, requested_sec=requested, frame_sec=frame_sec))
+        if not images:
+            raise ValueError('No camera frames were received before the DINO alarm; cannot ask the VLM.')
+        prompt = cascade_verification_prompt(self.task, stage)
+        started = time.monotonic()
+        _, answer = self.model.generate_multiturn(
+            [self.reference_turn, dict(role='user', images=images, text=prompt)], self.generation,
+            reference_response=self.reference_response)
+        check = dict(stage=stage, frames=records, camera_topic=self.topic, reference_bags=self.reference_bags,
+                     reference_frames=len(self.reference_turn['images']), prompt=prompt, answer=answer,
+                     verdict=parse_verdict(answer), vlm_sec=time.monotonic() - started)
+        return check, images
 
 
 class CascadeDetector:
@@ -73,50 +176,22 @@ class CascadeDetector:
 
     def __init__(self, config, progress):
         from .dino_cameras import DinoCameraReplay
-        from pathlib import Path
-        from .model import RynnBrainModel
-        from .prompts import task_context_prompt
-        from .run import _raw_inputs
-        from .temporal_lora import timestamped_images
         from time_series_gmr_scripts.online_gmr import GmrOnlineDetector
         self.config = config
         self.dino = DinoCameraReplay(config, progress)
         self.gmr = GmrOnlineDetector(config, progress)
         self.cameras = self.dino.cameras
         self.sample_fps = self.dino.sample_fps
-        self.excluded = self.dino.excluded | self.gmr.excluded
         self.path = self.gmr.path.parent / 'cascade'
-        vlm = config['rynnbrain']
-        self.task = vlm.get('task_description', 'Robot manipulation task')
-        self.generation = vlm.get('generation', {})
-        self.vlm_topic = (config.get('camera_topics') or vlm['camera_topics'])[0]
-        progress('Loading the base VLM (no LoRA) for alarm checks')
-        self.vlm = RynnBrainModel({**vlm['model'], 'lora_adapter_path': None})
-        # Turn 1 exactly as the main online VLM builds it: a complete nominal execution.
-        progress('Reading the nominal reference execution for the VLM')
-        topics = vlm.get('memory_camera_topics') or [self.vlm_topic]
-        frame_count = int(vlm.get('num_frames', 8))
-        self.reference_bags = list(vlm.get('reference_bags', []))
-        reference = []
-        for bag in self.reference_bags:
-            images, metadata = _raw_inputs(Path(bag), topics, frame_count)
-            reference.extend(timestamped_images(images, metadata, topics, frame_count))
-        if not reference:
-            raise ValueError('The VLM check needs rynnbrain.reference_bags (a complete nominal execution).')
-        self.reference_turn = dict(role='user', images=reference, text=task_context_prompt(
-            self.task, temporal=True, variant=vlm.get('prompt_variant', 'A')))
-        progress('Generating the VLM response to the nominal reference')
-        self.reference_response = self.vlm.generate_nominal(self.reference_turn, self.generation)
-        self.excluded |= {Path(bag).name for bag in self.reference_bags}
+        self.checker = VlmChecker(config, progress)
+        self.vlm_topic = self.checker.topic
+        self.excluded = self.dino.excluded | self.gmr.excluded | self.checker.reference_names
         self.signal_mode = self.gmr.signal_mode
         self.signature = dict(protocol='dino_gmr_vlm_check_v1', dino=self.dino.signature,
-                              vlm_model=vlm['model']['model_id'], vlm_camera=self.vlm_topic,
-                              reference_bags=self.reference_bags, reference_response=self.reference_response,
-                              alarm_run=ALARM_RUN, context_sec=CONTEXT_SEC,
-                              min_frame_spacing_sec=MIN_FRAME_SPACING_SEC, max_vlm_frames=MAX_VLM_FRAMES)
+                              dino_trigger_score='pooled', **self.checker.signature)
         self.note = (f'DINO and GMR score the execution together. {ALARM_RUN} consecutive DINO frames above '
-                     'threshold stop it and ask the base VLM: turn 1 shows a complete nominal execution, turn 2 '
-                     'frames of this execution up to the alarm. A safe answer resumes the replay. '
+                     'threshold (pooled 3x3 score) stop it and ask the base VLM: turn 1 shows a complete nominal '
+                     'execution, turn 2 frames of this execution up to the alarm. A safe answer resumes the replay. '
                      'GMR does not trigger checks yet.')
 
     # The replay app reads the GMR stage clock and release result through these.
@@ -136,8 +211,7 @@ class CascadeDetector:
         self.gmr.signal_mode = self.signal_mode
         self.gmr.reset(bag)
         self.bag = bag
-        self.streaks = {topic: 0 for topic in self.cameras}
-        self.armed = {topic: True for topic in self.cameras}
+        self.episodes = AlarmEpisodes()
         self.queries, self.vlm_frame_jpegs, self.frames = [], {}, []
         self.halted, self.termination_reason, self.output_dir = False, None, None
 
@@ -165,62 +239,32 @@ class CascadeDetector:
             return self.gmr.append(image, timestamp, verify)
         topic = payload
         row, vector, baseline = self.cameras[topic].append(image, timestamp, verify)
-        above = row['above_threshold']
         row['vlm_check'] = None  # Same columns in every DINO row; filled when this frame triggers a check.
-        self.streaks[topic] = self.streaks[topic] + 1 if above else 0
-        if not above:
-            self.armed[topic] = True  # A new alarm episode may trigger another check.
-        if self.streaks[topic] >= ALARM_RUN and self.armed[topic]:
-            self.armed[topic] = False
+        # The pooled (3x3) score decides, as in the DINO benchmark.
+        if self.episodes.update(topic, bool(row['alarm_pooled'])):
             row['vlm_check'] = self.check_with_vlm(topic, timestamp, row)
         return row, vector, baseline
 
     def check_with_vlm(self, topic, timestamp, row):
-        from rosbag_io import decode_image_message
-        from .prompts import cascade_verification_prompt
         paused = time.monotonic()
         boundaries = dict(self.sampler.clock.boundaries)
-        stage = max((s for s, start in boundaries.items() if start <= timestamp), default=0)
         index = len(self.queries)
-        trigger = dict(time_sec=timestamp, camera_topic=topic, stage=stage, dino_score=row['anomaly_score'],
-                       dino_threshold=row['threshold'], consecutive_frames=self.streaks[topic])
+        trigger = dict(time_sec=timestamp, camera_topic=topic, stage=current_stage(boundaries, timestamp),
+                       dino_score=row['score_pooled'], dino_threshold=row['threshold_pooled'],
+                       consecutive_frames=self.episodes.streaks[topic])
         self.update(vlm_status=dict(state='asking', **trigger))
-        frames, images = [], []
-        for requested, label in select_vlm_frame_times(boundaries, timestamp):
-            # Latest camera frame at or before the requested time; never a later one.
-            stamps = [t for t, _ in self.frames]
-            position = int(np.searchsorted(stamps, requested + 1e-9, side='right')) - 1
-            if position < 0:
-                continue
-            if frames and frames[-1]['buffer_index'] == position:
-                continue  # Never show the VLM the same frame twice.
-            frame_sec, (source, payload) = self.frames[position]
-            image = decode_image_message(*payload) if source == 'message' else payload
-            images.append((f'Frame {len(images) + 1}, camera {self.vlm_topic}, time {frame_sec:.3f} s '
-                           f'from this bag start ({label}):', image))
-            frames.append(dict(label=label, requested_sec=requested, frame_sec=frame_sec, buffer_index=position))
+        check, images = self.checker.ask(self.frames, boundaries, timestamp)
+        for k, (_, image) in enumerate(images):
             preview = image.copy()
             preview.thumbnail((480, 360))
             buffer = io.BytesIO()
             preview.save(buffer, format='JPEG', quality=85)
-            self.vlm_frame_jpegs[index, len(frames) - 1] = buffer.getvalue()
+            self.vlm_frame_jpegs[index, k] = buffer.getvalue()
             if self.output_dir is not None:
-                image.save(self.output_dir / f'vlm_check_{index + 1}_frame_{len(frames)}.jpg')
-        if not images:
-            raise ValueError('No camera frames were received before the DINO alarm; cannot ask the VLM.')
-        prompt = cascade_verification_prompt(self.task, stage)
-        started = time.monotonic()
-        _, answer = self.vlm.generate_multiturn(
-            [self.reference_turn, dict(role='user', images=images, text=prompt)], self.generation,
-            reference_response=self.reference_response)
-        verdict = parse_verdict(answer)
-        for frame in frames:
-            del frame['buffer_index']
-        query = dict(index=index, trigger=trigger, frames=frames, camera_topic=self.vlm_topic,
-                     reference_bags=self.reference_bags, reference_frames=len(self.reference_turn['images']), prompt=prompt,
-                     answer=answer, verdict=verdict, vlm_sec=time.monotonic() - started)
+                image.save(self.output_dir / f'vlm_check_{index + 1}_frame_{k + 1}.jpg')
+        query = dict(index=index, trigger=trigger, **check)
         self.queries.append(query)
-        if verdict == 'failure':
+        if query['verdict'] == 'failure':
             self.halted, self.termination_reason = True, 'vlm_confirmed_failure'
         self.update(vlm_status=dict(state='answered', **trigger), vlm_queries=self.queries)
         # Replay time stood still while the VLM answered.
@@ -285,7 +329,8 @@ class CascadeFeed:
                 if topic == detector.vlm_topic and (not detector.frames or detector.frames[-1][0] < timestamp - .25):
                     # The 15 fps camera stream has ended with the GMR stream; keep DINO's frame instead.
                     preview = image.copy()
-                    preview.thumbnail((detector.vlm.max_image_size, detector.vlm.max_image_size))
+                    size = detector.checker.model.max_image_size
+                    preview.thumbnail((size, size))
                     detector.frames.append((timestamp, ('image', preview)))
                 detector.pending = ('dino', topic)
                 return (topic, frame_id), timestamp, image

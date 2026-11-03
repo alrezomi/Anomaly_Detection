@@ -1888,6 +1888,29 @@ Use the **Detector** selector before starting an execution:
   trigger checks yet. Checks are saved as `vlm_checks` in
   `online_results.json`, with the frames as `vlm_check_<n>_frame_<k>.jpg`.
   Settings are the constants at the top of `rynnbrain_vlm/cascade.py`.
+  The trigger uses DINO's pooled (3x3) score, the score the DINO benchmark
+  decides on, so the live replay and its benchmark apply the same rule.
+
+  **Benchmark of the VLM check** (`run_vlm_check_benchmark.py`): rescoring a
+  saved DINO benchmark run without running DINO again. The saved pooled-score
+  crossings are replayed with the live rule (3 in a row, until stage 3 +
+  `POST_STAGE3_SEC`, causal stage clock); every new alarm episode asks the VLM
+  exactly as the live replay does, with the camera frames the replay would
+  have buffered. Three setups are scored on the same bags (the VLM reference
+  execution is left out of all of them): the saved DINO decision, DINO 3 in a
+  row alone, and DINO 3 in a row + VLM check. Results go to
+  `<dino run>/vlm_check/`: `SUMMARY.md`, `metrics.csv`, `metrics_<metric>.png`,
+  `bag_results.csv`, and `checks.jsonl` + `frames/` with every question,
+  answer and input frame. Answers are cached, so an interrupted run resumes,
+  both DINO metrics share identical checks, and a fully cached run regenerates
+  the reports without loading the VLM.
+
+  ```bash
+  docker compose run --rm vlm-check-benchmark --config /config/pipeline_config.json \
+    --dino-run /outputs/experiments/<experiment>/dino_benchmark/<run>
+  ```
+  `--metric euclidean` limits it to one DINO metric; `--limit N` to the first N
+  bags. Each VLM check takes about 15-30 s on a free GPU.
 
 The signal readers prefer `/tcp_pose_broadcaster/pose`, `/joint_states`, and
 `/Robotiq2FGripperRobotInputMsg`. The same typed topics must exist in all nominal

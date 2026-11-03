@@ -6,22 +6,25 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from rynnbrain_vlm.cascade import CascadeDetector, parse_verdict, select_vlm_frame_times
+from rynnbrain_vlm.cascade import AlarmEpisodes, CascadeDetector, VlmChecker, parse_verdict, select_vlm_frame_times
 
 
-def cascade(above, verdict='Decision: failure\nReason: two instruments lifted.'):
-    """Detector with one fake DINO camera whose frames are above threshold as listed."""
+def cascade(above, verdict='Decision: failure\nReason: two instruments lifted.', unpooled=None):
+    """Detector with one fake DINO camera whose pooled scores are above threshold as listed."""
     detector = CascadeDetector.__new__(CascadeDetector)
-    rows = iter(dict(anomaly_score=2. if a else .5, threshold=1., above_threshold=a) for a in above)
+    unpooled = above if unpooled is None else unpooled
+    rows = iter(dict(anomaly_score=2. if u else .5, threshold=1., above_threshold=u,
+                     score_pooled=2. if a else .5, threshold_pooled=1., alarm_pooled=a) for a, u in zip(above, unpooled))
     detector.cameras = {'top': SimpleNamespace(append=lambda *_: (next(rows), None, None))}
-    detector.task = 'Pick the scissor and place it in the basket.'
-    detector.generation, detector.vlm_topic = {}, 'top'
-    detector.vlm = SimpleNamespace(generate_multiturn=Mock(return_value=('reference', verdict)))
-    detector.reference_turn = dict(role='user', images=[('Frame 1, camera top, time 0.500 s', None)] * 8, text='turn 1')
-    detector.reference_response, detector.reference_bags = 'The robot picks the scissor.', ['nominal_1.1']
+    checker = detector.checker = VlmChecker.__new__(VlmChecker)
+    checker.task, checker.generation, checker.topic = 'Pick the scissor and place it in the basket.', {}, 'top'
+    checker.model = SimpleNamespace(generate_multiturn=Mock(return_value=('reference', verdict)), max_image_size=640)
+    checker.reference_turn = dict(role='user', images=[('Frame 1, camera top, time 0.500 s', None)] * 8, text='turn 1')
+    checker.reference_response, checker.reference_bags = 'The robot picks the scissor.', ['nominal_1.1']
+    detector.vlm_topic = 'top'
     detector.gmr = SimpleNamespace(sampler=SimpleNamespace(clock=SimpleNamespace(boundaries={1: 0., 2: 15.})))
     detector.update, detector.feed = Mock(), SimpleNamespace(origin=0.)
-    detector.streaks, detector.armed = {'top': 0}, {'top': True}
+    detector.episodes = AlarmEpisodes()
     detector.queries, detector.vlm_frame_jpegs = [], {}
     detector.halted, detector.termination_reason, detector.output_dir = False, None, None
     detector.frames = [(t / 10, ('message', ('message', t / 10))) for t in range(0, 400, 2)]  # 5 fps camera
@@ -61,6 +64,14 @@ class CascadeTests(unittest.TestCase):
         self.assertEqual(len({tuple(row) for row in rows}), 1)
         self.assertEqual([row['vlm_check'] is not None for row in rows], [False, False, True, False, False, False, False, True])
 
+    def test_trigger_follows_the_pooled_score_like_the_dino_benchmark(self):
+        detector = cascade([False, False, False], unpooled=[True, True, True])
+        with patch.object(CascadeDetector, 'check_with_vlm') as check:
+            for t in range(3):
+                detector.pending = ('dino', 'top')
+                detector.append(None, 20. + t * .5)
+        check.assert_not_called()
+
     def test_vlm_failure_stops_execution_with_causal_frames(self):
         detector = cascade([True] * 3)
         with tempfile.TemporaryDirectory() as directory, \
@@ -76,10 +87,11 @@ class CascadeTests(unittest.TestCase):
         self.assertEqual(detector.termination_reason, 'vlm_confirmed_failure')
         self.assertTrue(all(f['frame_sec'] <= 21. for f in check['frames']))
         self.assertEqual(len(check['frames']), len(saved))
-        (reference, turn), _generation = detector.vlm.generate_multiturn.call_args.args
+        model = detector.checker.model
+        (reference, turn), _generation = model.generate_multiturn.call_args.args
         # Multi-turn: a complete nominal execution first, then this execution up to the alarm.
-        self.assertIs(reference, detector.reference_turn)
-        self.assertEqual(detector.vlm.generate_multiturn.call_args.kwargs['reference_response'], detector.reference_response)
+        self.assertIs(reference, detector.checker.reference_turn)
+        self.assertEqual(model.generate_multiturn.call_args.kwargs['reference_response'], detector.checker.reference_response)
         self.assertIn('stopped in the middle of the task', turn['text'])
         # The alarm is in stage 2 (after the grasp): the prompt says the object should already be held.
         self.assertIn('stopped in stage 2, so the grasp is already complete', turn['text'])

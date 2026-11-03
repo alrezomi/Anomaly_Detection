@@ -111,6 +111,13 @@ services:
     entrypoint: ["python", "-u", "run_dino_benchmark.py"]
     command: ["--config", "/config/pipeline_config.json"]
 
+  # Ask the VLM at the DINO alarms of a saved DINO benchmark run (DINO is not rerun).
+  # docker compose run --rm vlm-check-benchmark --config /config/pipeline_config.json --dino-run <run dir>
+  vlm-check-benchmark:
+    <<: *rynnbrain-common
+    entrypoint: ["python", "-u", "run_vlm_check_benchmark.py"]
+    command: ["--help"]
+
   # Prepare selected CoP vectors and fit nominal kNN or supervised logistic regression.
   cop-classifier-train:
     <<: *rynnbrain-common
