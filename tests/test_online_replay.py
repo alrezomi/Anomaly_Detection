@@ -148,8 +148,11 @@ class OnlineReplayTests(unittest.TestCase):
                 reference_turn = cache_factory.call_args.args[1]
                 self.assertEqual(reference_turn["images"][0][0],
                                  "Frame 1, camera top, time 2.375 s from this bag start:")
-                self.assertIn("actual frame times", reference_turn["text"])
-                self.assertIn("Only a prefix", cache_factory.call_args.args[3])
+                from rynnbrain_vlm.prompts import task_context_prompt, evaluation_prompt_multiturn
+                self.assertEqual(reference_turn["text"],
+                                 task_context_prompt("Robot manipulation task", temporal=True, variant="A"))
+                self.assertEqual(cache_factory.call_args.args[3],
+                                 evaluation_prompt_multiturn("Robot manipulation task", "raw", temporal=True, variant="A"))
                 detector.reset("heldout")
                 with patch("builtins.print") as terminal:
                     row, _, _ = detector.append(Image.new("RGB", (2, 2)), 1.)
