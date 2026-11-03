@@ -8,11 +8,9 @@ episode asks the VLM exactly as the live replay does (VlmChecker), with the
 camera frames the live replay would have buffered. A failure answer is the
 bag's alarm; a safe answer lets the execution continue.
 
-Three setups are reported on the same bags; the VLM's reference executions
-are left out of all of them:
-- the saved DINO decision (the saved run's own rule, e.g. two in a row before stage 3),
-- DINO three in a row (the trigger alone),
-- DINO three in a row + VLM check.
+Two setups are reported on the same bags; the VLM's reference executions
+are left out of both: DINO alone (the saved run's own decision) and DINO with
+the VLM check.
 
 Results go to <dino run>/vlm_check/. VLM answers are cached in checks.jsonl,
 keyed by bag, alarm and the exact question, so a rerun resumes where it
@@ -31,13 +29,10 @@ import pandas as pd
 from .cascade import (ALARM_RUN, CONTEXT_SEC, MAX_VLM_FRAMES, MIN_FRAME_SPACING_SEC,
                       AlarmEpisodes, VlmChecker, current_stage)
 
-SAVED, TRIGGER, CHECKED = 'saved_dino', 'dino_3_in_a_row', 'dino_3_in_a_row_vlm'
-COLORS = {SAVED: '#2878b5', TRIGGER: '#9aa7b6', CHECKED: '#c87925'}
-
-
-def setup_labels(saved_rule):
-    return {SAVED: f'DINO alone (saved run: {saved_rule})', TRIGGER: f'DINO {ALARM_RUN} in a row (trigger only)',
-            CHECKED: f'DINO {ALARM_RUN} in a row + VLM check'}
+SAVED, CHECKED = 'dino_alone', 'dino_vlm_check'
+SETUPS = (SAVED, CHECKED)
+COLORS = {SAVED: '#2878b5', CHECKED: '#c87925'}
+LABELS = {SAVED: 'DINO alone', CHECKED: 'DINO + VLM check'}
 
 
 def stage_boundaries(bag, stage_topic):
@@ -212,28 +207,25 @@ def run(config, dino_run, metrics=None, limit=None, progress=print):
         status = statuses.get(bag, item['status'])
         rows.append(dict(item, operating_point=SAVED, status=status))
         outcome = outcomes.get((item['metric'], bag))
-        for setup in (TRIGGER, CHECKED):
-            row = dict(item, operating_point=setup, status=status, alarm_policy=setup, predicted_decision=None,
-                       correct=None, first_alarm_time_sec=None, timing_status='not_scored', failure_time_error_sec=None,
-                       alarm_episodes=None, vlm_checks=None)
-            if status == 'ok' and outcome is not None:
-                episodes = outcome['episodes']
-                first = (episodes[0]['time_sec'] if episodes else None) if setup == TRIGGER else outcome['alarm']
-                predicted = 'failure' if first is not None else 'success'
-                row.update(predicted_decision=predicted, first_alarm_time_sec=first,
-                           correct=(predicted == 'failure') == (item['ground_truth_label'] == 'fail'),
-                           alarm_episodes=json.dumps([round(e['time_sec'], 2) for e in episodes]),
-                           vlm_checks=json.dumps(outcome['checks']) if setup == CHECKED else None)
-                row['timing_status'], row['failure_time_error_sec'] = timing(item, first)
-            rows.append(row)
+        row = dict(item, operating_point=CHECKED, status=status, alarm_policy=CHECKED, predicted_decision=None,
+                   correct=None, first_alarm_time_sec=None, timing_status='not_scored', failure_time_error_sec=None,
+                   alarm_episodes=None, vlm_checks=None)
+        if status == 'ok' and outcome is not None:
+            first = outcome['alarm']
+            predicted = 'failure' if first is not None else 'success'
+            row.update(predicted_decision=predicted, first_alarm_time_sec=first,
+                       correct=(predicted == 'failure') == (item['ground_truth_label'] == 'fail'),
+                       alarm_episodes=json.dumps([round(e['time_sec'], 2) for e in outcome['episodes']]),
+                       vlm_checks=json.dumps(outcome['checks']))
+            row['timing_status'], row['failure_time_error_sec'] = timing(item, first)
+        rows.append(row)
     results = pd.DataFrame(rows)
     results.to_csv(output / 'bag_results.csv', index=False)
-    labels = setup_labels(saved_rule)
     table = metrics_table(results, folders)
-    table.insert(2, 'setup', table.operating_point.map(labels))
+    table.insert(2, 'setup', table.operating_point.map(LABELS))
     table.to_csv(output / 'metrics.csv', index=False)
     for metric in metrics:
-        plot_metrics(table[table.metric.eq(metric)], output / f'metrics_{metric}.png', metric, scale, labels)
+        plot_metrics(table[table.metric.eq(metric)], output / f'metrics_{metric}.png', metric, scale)
     asked = [r for r in cache.records.values() if r['bag'] in statuses]
     summary = dict(dino_run=str(dino_run), metrics=metrics, configured_scale=scale, dino_trigger_score='pooled',
                    saved_rule=saved_rule, execution_window=f'until stage 3 + {settings.POST_STAGE3_SEC:g} s',
@@ -246,12 +238,12 @@ def run(config, dino_run, metrics=None, limit=None, progress=print):
                    limit=limit, elapsed_sec=time.monotonic() - started,
                    finished_utc=datetime.now(timezone.utc).isoformat())
     (output / 'run.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
-    write_summary(output, table, summary, labels)
+    write_summary(output, table, summary)
     progress(f'Results: {output}')
     return output
 
 
-def plot_metrics(table, path, metric, scale, labels):
+def plot_metrics(table, path, metric, scale):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -268,11 +260,11 @@ def plot_metrics(table, path, metric, scale, labels):
     figure, axes = plt.subplots(len(panels) // columns, columns, figsize=(max(13, len(folders) * 2.6), 6 if columns == 2 else 9),
                                 squeeze=False)
     for axis, (column, title) in zip(axes.ravel(), panels):
-        for offset, setup in zip((-.27, 0., .27), (SAVED, TRIGGER, CHECKED)):
+        for offset, setup in zip((-.18, .18), SETUPS):
             rows = table[table.operating_point.eq(setup)].set_index('folder').reindex(folders)
             values = rows[column].to_numpy(dtype=float)
             positions = np.arange(len(folders)) + offset
-            axis.bar(positions, np.nan_to_num(values) * 100, width=.26, color=COLORS[setup], label=labels[setup])
+            axis.bar(positions, np.nan_to_num(values) * 100, width=.34, color=COLORS[setup], label=LABELS[setup])
             for position, value in zip(positions, values):
                 axis.annotate('N/A' if not np.isfinite(value) else f'{100 * value:.0f}%',
                               (position, 2 if not np.isfinite(value) else 100 * value + 2),
@@ -284,21 +276,20 @@ def plot_metrics(table, path, metric, scale, labels):
                         rotation=30, ha='right', fontsize=8)
         axis.grid(axis='y', alpha=.2)
     handles, names = axes.ravel()[0].get_legend_handles_labels()
-    figure.legend(handles, names, loc='upper center', bbox_to_anchor=(.5, .965), ncol=3, fontsize=9)
+    figure.legend(handles, names, loc='upper center', bbox_to_anchor=(.5, .965), ncol=2, fontsize=9)
     figure.suptitle(f'{metric.title()} DINO, configured scale {scale:g} | DINO alone vs DINO + VLM check')
     figure.tight_layout(rect=(0, 0, 1, .92))
     figure.savefig(path, dpi=160)
     plt.close(figure)
 
 
-def write_summary(output, table, summary, labels):
+def write_summary(output, table, summary):
     lines = ['# DINO + VLM check on a saved DINO benchmark', '',
              f"Saved DINO run: `{summary['dino_run']}` (DINO was not rerun; its saved pooled-score crossings at "
              f"scale {summary['configured_scale']:g} were replayed).", '',
-             f"- **{labels[SAVED]}**: the saved run's own decision.",
-             f"- **{labels[TRIGGER]}**: {ALARM_RUN} consecutive crossings in one camera, {summary['execution_window']} "
-             '(the live replay rule), without asking the VLM.',
-             f"- **{labels[CHECKED]}**: every new alarm episode asks the base VLM (turn 1: complete nominal execution "
+             f"- **{LABELS[SAVED]}**: the saved run's own decision ({summary['saved_rule']}).",
+             f"- **{LABELS[CHECKED]}**: {ALARM_RUN} consecutive DINO crossings in one camera, "
+             f"{summary['execution_window']}, ask the base VLM (turn 1: complete nominal execution "
              f"{', '.join(summary['question']['reference_bags'])}; turn 2: up to {MAX_VLM_FRAMES} frames up to the "
              'alarm, stage-aware question). A failure (or unclear) answer is the bag alarm; a safe answer continues.', '',
              f"Evaluated bags: {summary['evaluated_bags']}. VLM reference execution(s) left out of every setup: "
@@ -309,11 +300,11 @@ def write_summary(output, table, summary, labels):
     for metric in summary['metrics']:
         rows = table[table.metric.eq(metric)]
         lines += [f'## {metric.title()}', '', f'![metrics](metrics_{metric}.png)', '',
-                  '| Folder | Bags | ' + ' | '.join(labels[s] for s in (SAVED, TRIGGER, CHECKED)) + ' |',
-                  '|---|---|---|---|---|']
+                  '| Folder | Bags | ' + ' | '.join(LABELS[s] for s in SETUPS) + ' |',
+                  '|---|---|---|---|']
         for folder in dict.fromkeys(rows.folder):
             cells = []
-            for setup in (SAVED, TRIGGER, CHECKED):
+            for setup in SETUPS:
                 row = rows[rows.folder.eq(folder) & rows.operating_point.eq(setup)].iloc[0]
                 text = f"{int(row.alarm_bags)}/{int(row.evaluated_bags)} alarmed"
                 if row.failure_count:

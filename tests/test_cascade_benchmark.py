@@ -73,8 +73,9 @@ class CascadeBenchmarkTests(unittest.TestCase):
             results = pd.read_csv(output / 'bag_results.csv')
             row = lambda setup, bag: results[(results.metric == 'euclidean') & (results.operating_point == setup)
                                              & (results.bag_path == bag)].iloc[0]
-            self.assertEqual(row(benchmark.TRIGGER, '/data/Nominal/a/n1').first_alarm_time_sec, 3.)
-            self.assertEqual(row(benchmark.CHECKED, '/data/Nominal/a/n1').predicted_decision, 'success')
+            normal = row(benchmark.CHECKED, '/data/Nominal/a/n1')
+            self.assertEqual((normal.predicted_decision, json.loads(normal.alarm_episodes)), ('success', [3., 7.]))
+            self.assertEqual(set(results.operating_point), {benchmark.SAVED, benchmark.CHECKED})
             failure = row(benchmark.CHECKED, '/data/Fail/b/f1')
             self.assertEqual((failure.predicted_decision, failure.timing_status, failure.failure_time_error_sec),
                              ('failure', 'compared', 1.5))
