@@ -1812,15 +1812,32 @@ Use the **Detector** selector before starting an execution:
   11-sample median (past/current data only), followed by the existing 6-of-8
   majority vote. These filters introduce detection delay.
 
-  **One GMR per sensor.** Position, force (and gripper/joints in those modes)
-  each get their own GMR, held-out calibration, adaptive threshold, smoothing
-  and vote, so one sensor's nominal variation (e.g. contact-force spikes) does
-  not loosen another sensor's limit. The alarm fires when **any** sensor's
-  filtered alarm fires, and the GUI names it, e.g. "Filtered GMR alarm (force)".
+  **One GMR per sensor.** Position (and gripper/joints in those modes) gets
+  its own GMR, held-out calibration, adaptive threshold, smoothing and vote.
+  **Force has only a safety limit**: an alarm when the force magnitude (change
+  since stage 1) exceeds `THRESHOLD_MARGIN` x the largest force magnitude in
+  any nominal run (about 58 N with the current 22 nominals, above the ~36 N of
+  normal grasp pressing). This is meant to stop the robot when it pushes hard,
+  e.g. an object stuck in the basket tray. Subtle force changes are not
+  scored: lifting a second instrument (ft7) changes force by ~1-2 N, which
+  overlaps nominal runs completely and only produced false alarms. The alarm
+  fires when **any** check fires, and the GUI names it, e.g. "Filtered GMR
+  alarm (force)".
   The main graph shows the **largest distance / threshold ratio across
   sensors**, so the threshold line is 1. Rows save each sensor's result under
   `sensors`, plus `alarm_sources` and `score_sensor` (the sensor plotted).
-  Red points mark instantaneous threshold crossings.
+  Red points mark instantaneous threshold crossings. Next to the camera, the score panel shows
+  one small chart per sensor: its distance and its own phase-adaptive nominal
+  threshold, stage 2/3 markers, and shading while that sensor's filtered alarm
+  is active; the chart title shows the latest values and FILTERED ALARM. In *TCP position + force + gripper*, the gripper reading is also
+  plotted under Individual signals as a measured-only channel with the release
+  time marked; it is not a GMR channel.
+
+  **After stage 3** scoring continues for `POST_STAGE3_SEC` (5 s, in
+  `run_time_series_test.py`), so the release and retreat are scored live.
+  Nominal training uses the same window as a third progress interval, so the
+  phase runs over stage 1->2, 2->3 and the window after 3. Every recording has
+  more than 25 s after stage 3. Set it to 0 to stop at stage 3 again.
   CSV/JSON save both forms: `anomaly_score`/`raw_distance`,
   `threshold`/`adaptive_threshold`, `epsilon_raw`, `epsilon_smooth`,
   `alarm_filtered`, current stage and estimated phase. **Scoring time**
@@ -1842,6 +1859,35 @@ Use the **Detector** selector before starting an execution:
   covariance matter. No channel weights are changed by these plots. Each saved
   row's `channels` dictionary contains `observed`, `expected`, `lower`, `upper`
   and `standardized_deviation`; no additional config fields are needed.
+
+- **DINO + GMR → VLM check** runs DINO and GMR (with the selected TS signal)
+  on the same execution, in bag time. When one DINO camera scores 3
+  consecutive frames above its threshold, the replay pauses and the **base**
+  RynnBrain model (no LoRA; the online VLM classifier is unchanged) is asked
+  in the main VLM's multi-turn form. Turn 1 is a complete nominal execution
+  (`rynnbrain.reference_bags`, `num_frames` frames, the main VLM's reference
+  prompt); the model's answer to it is generated once when the detector loads.
+  Turn 2 is raw frames of this execution and asks whether a failure happened
+  or the robot can safely continue (`cascade_verification_prompt` in
+  `prompts.py`). It explains the recorded stages (1: approach and grasp;
+  2: grasp complete, carrying; 3: released at the destination) and states what
+  should be true at the alarm's stage, e.g. in stage 2 the object should
+  already be in the gripper. Without this, the model read an object left on
+  the table after a slip as "not picked up yet". The GUI shows one compact row per camera: camera replay,
+  DINO heatmap, DINO scores and the GMR time series (no matched nominal
+  frame). DINO and GMR rows are saved to `online_scores_dino.csv` and
+  `online_scores_gmr.csv`.
+  Frames (top camera, at or before the alarm): one 2.5 s after stage 1
+  starts, one 2.5 s before each later stage starts, and the rest spread evenly
+  from the start of the current stage to the alarm, at least 1 s apart, up to 8
+  in total (about 4 when the alarm comes right after a stage starts). A
+  failure answer (or an unclear one) ends the execution; a safe answer resumes
+  the replay, and that camera must drop below its threshold before it can
+  trigger again. The run ends at stage 3 + `POST_STAGE3_SEC`, like GMR, so the
+  robot returning home cannot trigger a check. GMR is displayed but does not
+  trigger checks yet. Checks are saved as `vlm_checks` in
+  `online_results.json`, with the frames as `vlm_check_<n>_frame_<k>.jpg`.
+  Settings are the constants at the top of `rynnbrain_vlm/cascade.py`.
 
 The signal readers prefer `/tcp_pose_broadcaster/pose`, `/joint_states`, and
 `/Robotiq2FGripperRobotInputMsg`. The same typed topics must exist in all nominal

@@ -115,3 +115,44 @@ def task_context_prompt(task_description: str, *, temporal: bool = False, varian
 
 def evaluation_prompt_multiturn(task_description: str, input_mode: str, *, temporal: bool = False, variant='A') -> str:
     return _prompt_pair(variant)[1](task_description, input_mode, temporal=temporal)
+
+
+# Recording protocol: stage 1 starts the task, stage 2 is marked once the
+# object is grasped, stage 3 once it is released at the destination.
+CASCADE_STAGE_EXPECTATIONS = {
+    1: ("The execution was stopped in stage 1, so the robot may still be approaching or grasping the target object. "
+        "It is normal that the object has not been picked up yet."),
+    2: ("The execution was stopped in stage 2, so the grasp is already complete. At the last frame the target object "
+        "should be held between the gripper fingers and move together with the gripper toward the destination. "
+        "If the object is not in the gripper, for example it is still at its initial location or lies elsewhere, "
+        "that is a failure."),
+    3: ("The execution was stopped in stage 3, so the target object should already have been released at the destination. "
+        "At the last frame it should lie at the destination. If it lies somewhere else, that is a failure."),
+}
+
+
+def cascade_verification_prompt(task_description: str, stage: int) -> str:
+    """Second turn after DINO stopped the execution; the first turn is the nominal reference."""
+    expectation = CASCADE_STAGE_EXPECTATIONS.get(stage, "")
+    return f"""You previously saw the nominal demonstration for: {task_description}
+
+        Now the robot execution was stopped in the middle of the task because an anomaly detector flagged it as a possible failure.
+        The images are frames from the current execution in time order, each labeled with its time and task stage. The last frame is the moment the execution was stopped.
+
+        Task stages in the frame labels:
+        - Stage 1: the robot approaches the target object and grasps it.
+        - Stage 2: the grasp is complete; the robot lifts the target object and carries it to the destination.
+        - Stage 3: the robot has released the target object at the destination and moves away.
+
+        {expectation}
+
+        Compare the current execution with the nominal behavior you saw earlier and with what should have happened by now:
+        - Where is the target object in the last frame: at its initial location, held in the gripper, at the destination, or somewhere else?
+        - Does that match the expected progress described above?
+        - The background and surrounding objects may differ, but the robot's manipulation of the target object should match the nominal reference.
+
+        Do you think a failure happened, or can the robot safely continue the task?
+
+        Return exactly this format:
+        Decision: failure / safe to continue
+        Reason: one or two sentences describing what you see."""

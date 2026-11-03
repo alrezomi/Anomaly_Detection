@@ -6,6 +6,7 @@ image at its native sampling rate; GMR replays every prepared signal sample.
 """
 
 import argparse
+from contextlib import ExitStack
 import csv
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -588,8 +589,8 @@ class ReplayApplication:
             if self.state["status"] not in {"ready", "completed", "stopped", "error"}:
                 raise ValueError("Wait for initialization or stop the current execution first.")
             detector_type = detector_type or self.state['detector_type']
-            if detector_type not in {'vlm', 'dino', 'gmr'}:
-                raise ValueError('Choose VLM, DINO or GMR online TS.')
+            if detector_type not in {'vlm', 'dino', 'gmr', 'cascade'}:
+                raise ValueError('Choose VLM, DINO, GMR online TS, or DINO + GMR with VLM check.')
             gmr_signal = self.state['gmr_signal'] if gmr_signal is None else gmr_signal
             if not isinstance(gmr_signal, str) or gmr_signal not in {'pose_force', 'pose', 'joints', 'gripper', 'pose_gripper', 'force'}:
                 raise ValueError('Select TCP position (+ force), joint positions, gripper, position + gripper, or force.')
@@ -693,19 +694,20 @@ class ReplayApplication:
         if kind == 'vlm':
             detector = OnlineDetector(self.config, progress=progress)
         else:
+            from .cascade import CascadeDetector
             from .dino_cameras import DinoCameraReplay
             from time_series_gmr_scripts.online_gmr import GmrOnlineDetector
-            detector = (DinoCameraReplay if kind == 'dino' else GmrOnlineDetector)(self.config, progress)
+            detector = dict(dino=DinoCameraReplay, gmr=GmrOnlineDetector, cascade=CascadeDetector)[kind](self.config, progress)
         self.detector = detector
         self.update(note=getattr(detector, 'note', SAMPLING_NOTE), score_source=detector.score_source,
-                    dino_cameras=detector.catalogue() if kind == 'dino' else [],
+                    dino_cameras=detector.catalogue() if kind in ('dino', 'cascade') else [],
                     score_kind=getattr(detector, 'score_kind', 'knn_distance' if detector.knn else 'failure_probability'),
                     max_frames=getattr(detector, "observation_limit", detector.frame_count),
                     excluded_bag_indices=[i for i, bag in enumerate(self.bags) if Path(bag).name in detector.excluded])
 
     def run_bag(self, bag):
         from rosbag_io import RosbagImageSource, iter_rosbag_image_frames
-        if self.state['detector_type'] == 'gmr':
+        if self.state['detector_type'] in ('gmr', 'cascade'):
             self.detector.signal_mode = self.state['gmr_signal']
         self.detector.reset(bag)
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid4().hex[:8]
@@ -713,9 +715,11 @@ class ReplayApplication:
         output.mkdir(parents=True, exist_ok=False)
         vlm = self.config["rynnbrain"]
         kind = self.state['detector_type']
-        causal_gmr = kind == 'gmr' and hasattr(self.detector, 'create_feed')
+        causal_gmr = kind in ('gmr', 'cascade') and hasattr(self.detector, 'create_feed')
         if causal_gmr:
-            self.update(gmr_stage=0, gmr_release=None)
+            self.update(gmr_stage=0, gmr_release=None, vlm_status=None, vlm_queries=[])
+        if kind == 'cascade':
+            self.detector.output_dir = output
         preparation_metadata = {}
         if hasattr(self.detector, 'prepare_replay'):
             def preparation_progress(message):
@@ -760,7 +764,8 @@ class ReplayApplication:
                 print(f"Stage preview unavailable; classifier replay continues: {failure}", flush=True)
         else:
             self.update(matching_status='DINO uses its native nearest-frame matching for scoring.' if kind == 'dino'
-                        else 'GMR nominal model ready; no image matching.' if kind == 'gmr' else 'Disabled')
+                        else 'GMR nominal model ready; no image matching.' if kind == 'gmr'
+                        else 'DINO and GMR ready; a DINO alarm pauses the replay for a VLM check.' if kind == 'cascade' else 'Disabled')
         # Annotation is saved only for evaluation, never passed into matching/scoring.
         from .visual_matching import read_corrected_failure_annotation
         failure_annotation = (None if causal_gmr else
@@ -768,7 +773,7 @@ class ReplayApplication:
         start_sec = (float(vlm.get('sampling_start_sec') or 0.) if kind == 'vlm'
                      else getattr(self.detector, 'start_sec', 0.))
         end_sec = vlm.get('sampling_end_sec') if kind == 'vlm' else getattr(self.detector, 'end_sec', None)
-        sample_fps = self.detector.sample_fps if kind == 'dino' else 15.
+        sample_fps = self.detector.sample_fps if kind in ('dino', 'cascade') else 15.
         if causal_gmr:
             feed = self.detector.create_feed(self.publish, self.stop, self.update)
         elif kind == 'dino' and hasattr(self.detector, 'iter_frames'):
@@ -818,6 +823,8 @@ class ReplayApplication:
                 metadata['stage_boundaries_sec'] = dict(stage_clock.boundaries)
                 metadata['recorded_failure_annotation'] = list(stage_clock.failures)
                 metadata['release_check'] = self.detector.release_result
+                if kind == 'cascade':
+                    metadata.update(vlm_checks=self.detector.queries, termination_reason=self.detector.termination_reason)
             data = {**metadata, "status": status, "error": error, "rows": rows,
                     "cache_verification_status": verification_status(),
                     "elapsed_sec": time.monotonic() - feed.origin}
@@ -828,26 +835,29 @@ class ReplayApplication:
         persist()
         producer.start()
         try:
-            with (output / "online_scores.csv").open("w", newline="", encoding="utf-8") as stream:
-                writer = None
+            with ExitStack() as score_files:
+                writers = {}  # The cascade writes DINO and GMR rows, which have different columns, separately.
                 earliest = start_sec
                 while max_frames is None or len(rows) < max_frames:
                     packet = feed.next_frame(earliest)
                     if packet is None:
                         break
                     frame_id, timestamp, image = packet
+                    # The cascade interleaves DINO frames (camera, frame) with GMR samples.
+                    item = ('dino' if isinstance(frame_id, tuple) else 'gmr') if kind == 'cascade' else kind
                     active_detector = self.detector
                     camera_topic = None
-                    if kind == 'dino' and hasattr(self.detector, 'cameras'):
+                    if item == 'dino' and hasattr(self.detector, 'cameras'):
                         camera_topic, frame_id = frame_id
                         active_detector = self.detector.cameras[camera_topic]
                     self.update(status="scoring", scoring_time_sec=timestamp)
-                    row, vector, baseline = active_detector.append(image, timestamp, self.verify)
-                    if kind == 'dino':
+                    row, vector, baseline = (self.detector if kind == 'cascade' else active_detector).append(
+                        image, timestamp, self.verify)
+                    if item == 'dino':
                         row['camera_topic'] = camera_topic or getattr(active_detector, 'topic', None)
                     check = row.get("verification")
                     failed = bool(check and not check["within_tolerance"])
-                    row["score_computation"] = 'cached' if kind == 'vlm' else 'single_image' if kind == 'dino' else 'causal_ts' if causal_gmr else 'offline_lookup'
+                    row["score_computation"] = 'cached' if kind == 'vlm' else 'single_image' if item == 'dino' else 'causal_ts' if causal_gmr else 'offline_lookup'
                     # Diagnostics may continue, but a rejected cached score is
                     # never used as the displayed/recorded detector result.
                     if failed and self.diagnose:
@@ -869,8 +879,8 @@ class ReplayApplication:
                         alarm_stop = self.replay_policy["stop_on_alarm"] and row.get("above_threshold") is True
                         row["next_interval_sec"] = (None if alarm_stop else
                             observation_interval(self.replay_policy, row["anomaly_score"], self.interval))
-                    row["vector_file"] = f"frame_{len(rows) + 1:02d}.npy" if kind != 'gmr' else None
-                    if kind != 'gmr':
+                    row["vector_file"] = f"frame_{len(rows) + 1:02d}.npy" if item != 'gmr' else None
+                    if item != 'gmr':
                         np.save(output / row["vector_file"], vector)
                         image.save(output / f"frame_{len(rows) + 1:02d}.jpg")
                     match = row.get("visual_matching", {})
@@ -891,7 +901,7 @@ class ReplayApplication:
                         matched_bytes = None
                     observed = getattr(active_detector, 'preview_image', None)
                     observed = observed.copy() if observed is not None else image.copy() if image is not None else None
-                    if kind == 'dino':
+                    if item == 'dino':
                         observed.save(output / f'frame_{len(rows) + 1:02d}_heatmap.jpg')
                     additional_previews = {}
                     if camera_topic:
@@ -915,7 +925,7 @@ class ReplayApplication:
                             preview.save(extra_buffer, format='JPEG', quality=85)
                             additional_previews['diag_' + name] = extra_buffer.getvalue()
                     buffer = io.BytesIO()
-                    if observed is not None and kind != 'gmr':
+                    if observed is not None and item != 'gmr':
                         observed.thumbnail((640, 480))
                         observed.save(buffer, format="JPEG", quality=85)
                     if getattr(self.detector, "capture_visual", False) and self.detector.cache.last_visual_descriptor is not None:
@@ -923,9 +933,12 @@ class ReplayApplication:
                     if baseline is not None:
                         np.save(output / f"frame_{len(rows) + 1:02d}_uncached.npy", baseline)
                     rows.append(row)
-                    if writer is None:
-                        writer = csv.DictWriter(stream, fieldnames=list(row))
-                        writer.writeheader()
+                    if item not in writers:
+                        name = f"online_scores_{item}.csv" if kind == 'cascade' else "online_scores.csv"
+                        stream = score_files.enter_context((output / name).open("w", newline="", encoding="utf-8"))
+                        writers[item] = stream, csv.DictWriter(stream, fieldnames=list(row))
+                        writers[item][1].writeheader()
+                    stream, writer = writers[item]
                     writer.writerow({key: json.dumps(value) if isinstance(value, (dict, list)) else value
                                      for key, value in row.items()})
                     stream.flush()
@@ -972,11 +985,13 @@ class ReplayApplication:
                 feed.close()
             persist()
             try:
-                if kind == 'dino' and hasattr(self.detector, 'cameras'):
+                if kind in ('dino', 'cascade') and hasattr(self.detector, 'cameras'):
                     from .run import _slug
                     for topic in self.detector.cameras:
                         save_plot([row for row in rows if row.get('camera_topic') == topic],
                                   output / f'{_slug(topic)}_timeline.png', False)
+                    if kind == 'cascade' and any('sensors' in row for row in rows):
+                        save_plot([row for row in rows if 'sensors' in row], output / 'gmr_timeline.png', False)
                 else:
                     save_plot(rows, output / "online_timeline.png", not self.detector.knn)
             except Exception as failure:
@@ -1016,6 +1031,15 @@ def make_handler(app):
                 with app.lock:
                     jpeg = app.camera_jpegs.get(topic, {}).get(view) if view in {'frame', 'observed', 'matched', 'scored', 'attention', 'diagnostics', 'diag_raw', 'diag_excess', 'diag_standardized', 'diag_weighted', 'diag_pooled', 'diag_multiplier'} else None
                 self.send(200 if jpeg else 204, jpeg or b'', 'application/json' if view == 'diagnostics' else 'image/jpeg')
+            elif path == '/vlm-frame':
+                from urllib.parse import urlsplit, parse_qs
+                query = parse_qs(urlsplit(self.path).query)
+                try:
+                    key = int(query.get('check', ['-1'])[0]), int(query.get('frame', ['-1'])[0])
+                except ValueError:
+                    key = None
+                jpeg = getattr(getattr(app, 'detector', None), 'vlm_frame_jpegs', {}).get(key)
+                self.send(200 if jpeg else 204, jpeg or b'', 'image/jpeg')
             elif path in {"/frame", "/observed-frame", "/matched-frame"}:
                 with app.lock:
                     jpeg = getattr(app, {"/frame": "jpeg", "/observed-frame": "observed_jpeg",
