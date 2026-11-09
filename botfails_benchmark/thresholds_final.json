@@ -1,0 +1,29 @@
+{
+ "domotic_dishTidyUp": {
+  "dish_beside_rack": 0.5806,
+  "plate_flat": 0.5409
+ },
+ "domotic_groceriesSorting": {
+  "produce_in_right": 0.592,
+  "sweet_in_left": 0.611
+ },
+ "domotic_makingCoffee": {
+  "powder": 0.6006
+ },
+ "domotic_pouringCoffee": {
+  "spill": 0.7758
+ },
+ "domotic_setTheTable": {
+  "cutlery": 0.8638
+ },
+ "domotic_vegetablesAndFruitsSorting": {
+  "fruit_in_right": 0.5417,
+  "veg_in_left": 0.4294
+ },
+ "industrial_soldering": {
+  "iron": 0.9527
+ },
+ "industrial_screws_sorting": {
+  "plates_type": 0.4601
+ }
+}

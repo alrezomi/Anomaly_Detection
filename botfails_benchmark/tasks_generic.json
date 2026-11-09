@@ -1,0 +1,213 @@
+{
+ "_about": "Ablation: the same cascade, but one generic question that only uses the task instruction (no per-task objects), asked in every phase after the first grasp. Generated from tasks.json.",
+ "domotic_dishTidyUp": {
+  "instruction": "store dishes in a dish rack",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"store dishes in a dish rack\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "domotic_groceriesSorting": {
+  "instruction": "sorting groceries, vegetables in the box with a pink sign and sweets in the box with the yellow sign",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"sorting groceries, vegetables in the box with a pink sign and sweets in the box with the yellow sign\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "domotic_makingCoffee": {
+  "instruction": "making coffee: take some coffee powder with the spoon and pour it into the filter of the coffee machine",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"making coffee: take some coffee powder with the spoon and pour it into the filter of the coffee machine\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "domotic_pouringCoffee": {
+  "instruction": "pouring coffee in a cup",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"pouring coffee in a cup\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "domotic_setTheTable": {
+  "instruction": "Set the table: one glass, one plate, one fork and one knife. Fork on the left of the plate and knife on the right",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"Set the table: one glass, one plate, one fork and one knife. Fork on the left of the plate and knife on the right\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "domotic_vegetablesAndFruitsSorting": {
+  "instruction": "sorting fruits and vegetables, put vegetables in the box with a yellow mark and fruits in the box with a pink mark",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"sorting fruits and vegetables, put vegetables in the box with a yellow mark and fruits in the box with a pink mark\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "industrial_robothon_buttons": {
+  "instruction": "push the red button then move the slider to the top and push the blue button",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"push the red button then move the slider to the top and push the blue button\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "industrial_robothon_hatchAndProbe": {
+  "instruction": "open the hatch, grab the probe, measure tension, place the probe in the black plug, close the hatch",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"open the hatch, grab the probe, measure tension, place the probe in the black plug, close the hatch\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "industrial_screws_sorting": {
+  "instruction": "sorting 2 types of screws",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"sorting 2 types of screws\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ },
+ "industrial_soldering": {
+  "instruction": "soldering a part on an electronic board",
+  "checks": [
+   {
+    "name": "generic",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
+    "lead": "The robot's task is: \"soldering a part on an electronic board\". Which describes the image?",
+    "A": "Every object is where it should be at this point of the task",
+    "B": "An object was dropped, spilled, or put in a wrong place",
+    "C": "The image does not show the task",
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
+  ]
+ }
+}

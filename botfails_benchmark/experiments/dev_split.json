@@ -1,0 +1,191 @@
+{
+ "rule": "episode index % 5 in {0,1} = development; the rest is held out and is never used to choose a setting",
+ "dev": {
+  "domotic_dishTidyUp": [
+   0,
+   1,
+   5,
+   6,
+   10,
+   11
+  ],
+  "domotic_groceriesSorting": [
+   0,
+   1,
+   5,
+   6
+  ],
+  "domotic_makingCoffee": [
+   0,
+   1,
+   5,
+   6,
+   10,
+   11
+  ],
+  "domotic_pouringCoffee": [
+   0,
+   1,
+   5,
+   6,
+   10,
+   11,
+   15,
+   16
+  ],
+  "domotic_setTheTable": [
+   0,
+   1,
+   5,
+   6,
+   10,
+   11
+  ],
+  "domotic_vegetablesAndFruitsSorting": [
+   0,
+   1,
+   5,
+   6,
+   10,
+   11,
+   15,
+   16
+  ],
+  "industrial_robothon_buttons": [
+   0,
+   1,
+   5,
+   6
+  ],
+  "industrial_robothon_hatchAndProbe": [
+   0,
+   1,
+   5,
+   6,
+   10,
+   11
+  ],
+  "industrial_screws_sorting": [
+   0,
+   1,
+   5,
+   6
+  ],
+  "industrial_soldering": [
+   0,
+   1,
+   5,
+   6,
+   10,
+   11
+  ]
+ },
+ "heldout": {
+  "domotic_dishTidyUp": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9,
+   12,
+   13,
+   14
+  ],
+  "domotic_groceriesSorting": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9
+  ],
+  "domotic_makingCoffee": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9,
+   12,
+   13,
+   14
+  ],
+  "domotic_pouringCoffee": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9,
+   12,
+   13,
+   14,
+   17,
+   18,
+   19
+  ],
+  "domotic_setTheTable": [
+   2,
+   3,
+   4,
+   8,
+   9,
+   12,
+   13,
+   14
+  ],
+  "domotic_vegetablesAndFruitsSorting": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9,
+   12,
+   13,
+   14,
+   17,
+   18,
+   19
+  ],
+  "industrial_robothon_buttons": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9
+  ],
+  "industrial_robothon_hatchAndProbe": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9,
+   12,
+   13,
+   14
+  ],
+  "industrial_screws_sorting": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9
+  ],
+  "industrial_soldering": [
+   2,
+   3,
+   4,
+   7,
+   8,
+   9,
+   12,
+   13,
+   14
+  ]
+ }
+}
