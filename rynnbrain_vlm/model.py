@@ -158,6 +158,29 @@ class RynnBrainModel:
             )
         return self.processor.decode(output[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
+    def answer_probability(self, turn: dict[str, Any], options: tuple[str, ...]) -> float:
+        """Probability of the first option, normalized over the options, for the first answer token.
+
+        Options are answer words or letters, e.g. ('yes', 'no') or ('A', 'B', 'C').
+        One forward pass on the base model; no answer is generated.
+        """
+        return self.answer_distribution(turn, options)[0]
+
+    def answer_distribution(self, turn: dict[str, Any], options: tuple[str, ...]) -> list[float]:
+        """Probability of every option (summing to 1) for the first answer token."""
+        inputs = self.tokenize_conversation([self.conversation_message(turn)], {}).to(self.input_device)
+        context = self.model.disable_adapter() if self.adapter_identity else nullcontext()
+        with context, torch.inference_mode():
+            logits = self.model(**inputs, use_cache=False, logits_to_keep=1).logits[0, -1].float()
+        tokenizer = self.processor.tokenizer
+
+        def score(word: str) -> torch.Tensor:
+            spellings = (word, " " + word, word.capitalize(), " " + word.capitalize())
+            ids = sorted({tokenizer.encode(text, add_special_tokens=False)[0] for text in spellings})
+            return torch.logsumexp(logits[ids], 0)
+
+        return torch.softmax(torch.stack([score(option) for option in options]), 0).tolist()
+
     def generate_visual_evidence(
         self, turns: list[dict[str, Any]], nominal_response: str,
         evidence_prompt: str, generation: dict[str, Any],

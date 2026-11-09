@@ -2,20 +2,20 @@
 
 DINO is not run again. Its saved per-frame crossings (pooled score above the
 configured threshold, the DINO benchmark's decision score) are replayed with
-the live rule: ALARM_RUN consecutive crossings in one camera, until
-POST_STAGE3_SEC after stage 3 on the causal stage clock. Each new alarm
-episode asks the VLM exactly as the live replay does (VlmChecker), with the
-camera frames the live replay would have buffered. A failure answer is the
-bag's alarm; a safe answer lets the execution continue.
+the live rule: ALARM_RUN consecutive crossings in one camera, again after a
+stage change, until POST_STAGE3_SEC after stage 3 on the causal stage clock.
+Each new alarm episode asks the VLM exactly as the live replay does
+(VlmChecker), with the gripper-camera frames the live replay would have
+buffered. A failure answer is the bag's alarm; a safe answer lets the
+execution continue.
 
-Two setups are reported on the same bags; the VLM's reference executions
-are left out of both: DINO alone (the saved run's own decision) and DINO with
-the VLM check.
+Two setups are reported on the same bags: DINO alone (the saved run's own
+decision) and DINO with the VLM check.
 
-Results go to <dino run>/vlm_check/. VLM answers are cached in checks.jsonl,
-keyed by bag, alarm and the exact question, so a rerun resumes where it
-stopped, both DINO metrics share identical checks, and reports can be
-regenerated without loading the VLM.
+Results go to <dino run>/vlm_check/ unless another output directory is given.
+VLM answers are cached in checks.jsonl, keyed by bag, alarm and the exact
+questions, so a rerun resumes where it stopped, both DINO metrics share
+identical checks, and reports can be regenerated without loading the VLM.
 """
 import hashlib
 import json
@@ -26,8 +26,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .cascade import (ALARM_RUN, CONTEXT_SEC, MAX_VLM_FRAMES, MIN_FRAME_SPACING_SEC,
-                      AlarmEpisodes, VlmChecker, current_stage)
+from .cascade import ALARM_RUN, CHECK_OFFSETS_SEC, SUBGOAL_THRESHOLD, AlarmEpisodes, VlmChecker, current_stage
 
 SAVED, CHECKED = 'dino_alone', 'dino_vlm_check'
 SETUPS = (SAVED, CHECKED)
@@ -53,9 +52,9 @@ def alarm_episodes(timeline, boundaries, scale, post_sec):
         t = float(row.timestamp_sec)
         if t > end:
             break
-        threshold = float(row.base_threshold) * scale
-        if rule.update(row.camera_topic, bool(row.pooled_score > threshold)):
-            episodes.append(dict(time_sec=t, camera_topic=row.camera_topic, stage=current_stage(boundaries, t),
+        threshold, stage = float(row.base_threshold) * scale, current_stage(boundaries, t)
+        if rule.update(row.camera_topic, bool(row.pooled_score > threshold), stage):
+            episodes.append(dict(time_sec=t, camera_topic=row.camera_topic, stage=stage,
                                  dino_score=float(row.pooled_score), dino_threshold=threshold))
     return episodes
 
@@ -79,19 +78,18 @@ def question_identity(config):
     """Everything that determines the VLM's answer, without loading the model."""
     from time_series_gmr_scripts import run_time_series_test as settings
     vlm = config['rynnbrain']
-    return dict(model=vlm['model']['model_id'], reference_bags=list(vlm.get('reference_bags', [])),
-                num_frames=int(vlm.get('num_frames', 8)), prompt_variant=vlm.get('prompt_variant', 'A'),
-                task=vlm.get('task_description', 'Robot manipulation task'), generation=vlm.get('generation', {}),
-                camera=(config.get('camera_topics') or vlm['camera_topics'])[0], alarm_run=ALARM_RUN,
-                context_sec=CONTEXT_SEC, min_frame_spacing_sec=MIN_FRAME_SPACING_SEC,
-                max_vlm_frames=MAX_VLM_FRAMES, post_stage3_sec=settings.POST_STAGE3_SEC)
+    check = vlm.get('vlm_check') or {}
+    return dict(check='subgoal_v2', model=vlm['model']['model_id'], camera=check.get('camera_topic'),
+                item=check.get('item'), destination=check.get('destination'), alarm_run=ALARM_RUN,
+                check_offsets_sec=list(CHECK_OFFSETS_SEC), subgoal_threshold=SUBGOAL_THRESHOLD,
+                post_stage3_sec=settings.POST_STAGE3_SEC)
 
 
 def check_key(identity, bag, episode, boundaries):
-    from .prompts import cascade_verification_prompt
+    from .prompts import subgoal_questions
     payload = dict(identity=identity, bag=bag, time_sec=round(episode['time_sec'], 6),
                    camera=episode['camera_topic'], boundaries={str(k): round(v, 6) for k, v in boundaries.items()},
-                   prompt=cascade_verification_prompt(identity['task'], episode['stage']))
+                   questions=subgoal_questions(episode['stage'], identity['item'], identity['destination']))
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -122,7 +120,7 @@ class CheckCache:
         self.new += 1
 
 
-def run(config, dino_run, metrics=None, limit=None, progress=print):
+def run(config, dino_run, metrics=None, limit=None, progress=print, output=None, per_folder=None):
     from .run import _slug
     from time_series_gmr_scripts import run_time_series_test as settings
     from vision_dinov2.benchmark_report import metrics_table
@@ -138,24 +136,22 @@ def run(config, dino_run, metrics=None, limit=None, progress=print):
     saved_results = saved_results[saved_results.operating_point.eq('configured')]
     frames = pd.read_csv(dino_run / 'frame_results.csv')
     metrics = list(metrics or sorted(frames.metric.unique()))
-    output = dino_run / 'vlm_check'
+    output = Path(output) if output else dino_run / 'vlm_check'
     (output / 'frames').mkdir(parents=True, exist_ok=True)
     identity = question_identity(config)
-    reference_names = {Path(bag).name for bag in identity['reference_bags']}
     cache = CheckCache(output / 'checks.jsonl')
     checker = None  # Loaded only when an answer is not cached.
     timelines = {key: group for key, group in frames.groupby(['metric', 'bag_path'])}
     manifest = saved_results[saved_results.metric.eq(metrics[0])]
     evaluated = [row for row in manifest.to_dict('records') if row['status'] == 'ok']
+    if per_folder:
+        evaluated = [row for _, rows in pd.DataFrame(evaluated).groupby('folder', sort=False)
+                     for row in rows.head(per_folder).to_dict('records')]
     if limit:
         evaluated = evaluated[:limit]
     outcomes, statuses = {}, {}
     for number, item in enumerate(evaluated, 1):
         bag, name = item['bag_path'], f"{item['folder']}/{item['bag_name']}"
-        if Path(bag).name in reference_names:
-            statuses[bag] = 'excluded_vlm_reference'
-            progress(f'[{number}/{len(evaluated)}] {name}: VLM reference execution, left out of every setup')
-            continue
         try:
             boundaries = stage_boundaries(bag, stage_topic)
         except Exception as error:
@@ -186,8 +182,7 @@ def run(config, dino_run, metrics=None, limit=None, progress=print):
                         files.append(str((directory / f"t{episode['time_sec']:07.2f}_frame_{k}.jpg").relative_to(output)))
                         image.save(output / files[-1], quality=85)
                     cache.add(dict(key=key, bag=bag, folder=item['folder'], alarm=episode, boundaries=boundaries,
-                                   reference_response=checker.reference_response, frame_files=files,
-                                   created_utc=datetime.now(timezone.utc).isoformat(), **check))
+                                   frame_files=files, created_utc=datetime.now(timezone.utc).isoformat(), **check))
                 record = cache.records[key]
                 checks.append(dict(time_sec=episode['time_sec'], verdict=record['verdict']))
                 if record['verdict'] == 'failure':
@@ -203,7 +198,7 @@ def run(config, dino_run, metrics=None, limit=None, progress=print):
     for item in saved_results[saved_results.metric.isin(metrics)].to_dict('records'):
         bag = item['bag_path']
         if item['status'] == 'ok' and bag not in statuses:
-            continue  # Outside --limit.
+            continue  # Outside --limit or --per-folder.
         status = statuses.get(bag, item['status'])
         rows.append(dict(item, operating_point=SAVED, status=status))
         outcome = outcomes.get((item['metric'], bag))
@@ -226,16 +221,16 @@ def run(config, dino_run, metrics=None, limit=None, progress=print):
     table.to_csv(output / 'metrics.csv', index=False)
     for metric in metrics:
         plot_metrics(table[table.metric.eq(metric)], output / f'metrics_{metric}.png', metric, scale)
-    asked = [r for r in cache.records.values() if r['bag'] in statuses]
+    checked = [r for r in cache.records.values() if r['bag'] in statuses]
+    asked = [r for r in checked if r.get('questions')]  # Stage 1 alarms are answered without the VLM.
     summary = dict(dino_run=str(dino_run), metrics=metrics, configured_scale=scale, dino_trigger_score='pooled',
                    saved_rule=saved_rule, execution_window=f'until stage 3 + {settings.POST_STAGE3_SEC:g} s',
                    question=identity, evaluated_bags=sum(s == 'ok' for s in statuses.values()),
-                   excluded_vlm_reference=sorted(b for b, s in statuses.items() if s == 'excluded_vlm_reference'),
                    unreadable_bags=sorted(b for b, s in statuses.items() if s == 'error'),
-                   vlm_checks=len(asked), vlm_checks_new=cache.new,
-                   vlm_verdicts={v: sum(r['verdict'] == v for r in asked) for v in ('safe', 'failure')},
+                   vlm_checks=len(checked), vlm_checks_asked=len(asked), vlm_checks_new=cache.new,
+                   vlm_verdicts={v: sum(r['verdict'] == v for r in checked) for v in ('safe', 'failure')},
                    vlm_sec_median=float(np.median([r['vlm_sec'] for r in asked])) if asked else None,
-                   limit=limit, elapsed_sec=time.monotonic() - started,
+                   limit=limit, per_folder=per_folder, elapsed_sec=time.monotonic() - started,
                    finished_utc=datetime.now(timezone.utc).isoformat())
     (output / 'run.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
     write_summary(output, table, summary)
@@ -254,11 +249,10 @@ def plot_metrics(table, path, metric, scale):
     elif table.normal_count.sum() == 0:
         panels = [('recall', 'Recall'), ('accuracy', 'Accuracy')]
     else:
-        panels = [('recall', 'Recall'), ('false_positive_rate', 'False-positive rate'), ('precision', 'Precision'),
-                  ('accuracy', 'Accuracy'), ('f1', 'F1'), ('alarm_rate', 'Confirmed alarm rate')]
-    columns = 2 if len(panels) == 2 else 3
-    figure, axes = plt.subplots(len(panels) // columns, columns, figsize=(max(13, len(folders) * 2.6), 6 if columns == 2 else 9),
-                                squeeze=False)
+        panels = [('recall', 'Recall: failures alarmed'), ('false_positive_rate', 'False-positive rate: normal runs alarmed'),
+                  ('accuracy', 'Accuracy')]
+    # One panel per row keeps many folders readable.
+    figure, axes = plt.subplots(len(panels), 1, figsize=(max(13, len(folders) * 1.3), 4.6 * len(panels)), squeeze=False)
     for axis, (column, title) in zip(axes.ravel(), panels):
         for offset, setup in zip((-.18, .18), SETUPS):
             rows = table[table.operating_point.eq(setup)].set_index('folder').reindex(folders)
@@ -288,15 +282,19 @@ def write_summary(output, table, summary):
              f"Saved DINO run: `{summary['dino_run']}` (DINO was not rerun; its saved pooled-score crossings at "
              f"scale {summary['configured_scale']:g} were replayed).", '',
              f"- **{LABELS[SAVED]}**: the saved run's own decision ({summary['saved_rule']}).",
-             f"- **{LABELS[CHECKED]}**: {ALARM_RUN} consecutive DINO crossings in one camera, "
-             f"{summary['execution_window']}, ask the base VLM (turn 1: complete nominal execution "
-             f"{', '.join(summary['question']['reference_bags'])}; turn 2: up to {MAX_VLM_FRAMES} frames up to the "
-             'alarm, stage-aware question). A failure (or unclear) answer is the bag alarm; a safe answer continues.', '',
-             f"Evaluated bags: {summary['evaluated_bags']}. VLM reference execution(s) left out of every setup: "
-             f"{', '.join(Path(b).name for b in summary['excluded_vlm_reference']) or 'none'}."
+             f"- **{LABELS[CHECKED]}**: {ALARM_RUN} consecutive DINO crossings in one camera (again after a stage "
+             f"change), {summary['execution_window']}, ask the base VLM about the gripper camera "
+             f"(`{summary['question']['camera']}`) whether the sub-goal of the current stage holds: after the grasp "
+             f"(stage 2) {summary['question']['item']} is held between the fingers, after the release (stage 3) it "
+             f"lies on {summary['question']['destination']} below the gripper (`subgoal_questions` in "
+             f"`prompts.py`). Each gripper frame {', '.join(f'{o:g}' for o in CHECK_OFFSETS_SEC)} s before the alarm "
+             f"is asked alone; a mean probability below {SUBGOAL_THRESHOLD:g} that the sub-goal holds is the bag "
+             'alarm, otherwise the execution continues. Stage 1 alarms have no reached sub-goal and continue.', '',
+             f"Evaluated bags: {summary['evaluated_bags']}."
              + (f" Unreadable: {', '.join(summary['unreadable_bags'])}." if summary['unreadable_bags'] else ''),
-             f"VLM checks: {summary['vlm_checks']} ({summary['vlm_checks_new']} new in this run); verdicts "
-             f"{summary['vlm_verdicts']}; median {summary['vlm_sec_median'] or 0:.1f} s per check.", '']
+             f"Checks: {summary['vlm_checks']} ({summary['vlm_checks_new']} new in this run), "
+             f"{summary['vlm_checks_asked']} asked the VLM (stage 2 or 3); verdicts {summary['vlm_verdicts']}; "
+             f"median {summary['vlm_sec_median'] or 0:.1f} s per VLM check.", '']
     for metric in summary['metrics']:
         rows = table[table.metric.eq(metric)]
         lines += [f'## {metric.title()}', '', f'![metrics](metrics_{metric}.png)', '',
@@ -309,6 +307,8 @@ def write_summary(output, table, summary):
                 text = f"{int(row.alarm_bags)}/{int(row.evaluated_bags)} alarmed"
                 if row.failure_count:
                     text += f", recall {100 * row.recall:.0f}%"
+                    if row.timing_compared:
+                        text += f", median delay {row.timing_median_sec:+.1f} s"
                 if row.normal_count:
                     text += f", FPR {100 * row.false_positive_rate:.0f}%"
                 cells.append(text)
@@ -317,5 +317,6 @@ def write_summary(output, table, summary):
         lines.append('')
     lines += ['Per-bag outcomes: `bag_results.csv` (setup in `operating_point`). Every VLM question, answer and '
               'its input frames: `checks.jsonl` and `frames/`. Metrics: `metrics.csv`.',
-              'Recall needs failure-labelled bags; when every bag is labelled normal, only false alarms can be measured.']
+              'Recall needs failure-labelled bags; when every bag is labelled normal, only false alarms can be measured. '
+              'Delay is first alarm minus the recorded failure marker (negative: alarm before the marker).']
     (output / 'SUMMARY.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')

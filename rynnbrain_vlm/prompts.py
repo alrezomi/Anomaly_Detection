@@ -117,42 +117,33 @@ def evaluation_prompt_multiturn(task_description: str, input_mode: str, *, tempo
     return _prompt_pair(variant)[1](task_description, input_mode, temporal=temporal)
 
 
-# Recording protocol: stage 1 starts the task, stage 2 is marked once the
-# object is grasped, stage 3 once it is released at the destination.
-CASCADE_STAGE_EXPECTATIONS = {
-    1: ("The execution was stopped in stage 1, so the robot may still be approaching or grasping the target object. "
-        "It is normal that the object has not been picked up yet."),
-    2: ("The execution was stopped in stage 2, so the grasp is already complete. At the last frame the target object "
-        "should be held between the gripper fingers and move together with the gripper toward the destination. "
-        "If the object is not in the gripper, for example it is still at its initial location or lies elsewhere, "
-        "that is a failure."),
-    3: ("The execution was stopped in stage 3, so the target object should already have been released at the destination. "
-        "At the last frame it should lie at the destination. If it lies somewhere else, that is a failure."),
-}
+# DINO -> VLM check. Recording protocol: stage 1 starts the task, stage 2 is
+# marked once the robot has grasped the object, stage 3 once it has released it
+# at the destination. The check asks the gripper camera whether the sub-goal of
+# the current stage really holds. The questions only ask what is visible: a
+# prompt stating what should be true was answered by repeating it back.
+GRIPPER_CAMERA = ('This image comes from a camera mounted on a robot gripper. It looks down past the two white '
+                  'gripper fingers at what is below the gripper.')
 
 
-def cascade_verification_prompt(task_description: str, stage: int) -> str:
-    """Second turn after DINO stopped the execution; the first turn is the nominal reference."""
-    expectation = CASCADE_STAGE_EXPECTATIONS.get(stage, "")
-    return f"""You previously saw the nominal demonstration for: {task_description}
+def subgoal_questions(stage: int, item: str, destination: str) -> list[tuple[str, tuple[str, ...]]] | None:
+    """(question, answer options) for the sub-goal of `stage`; the first option means it holds.
 
-        Now the robot execution was stopped in the middle of the task because an anomaly detector flagged it as a possible failure.
-        The images are frames from the current execution in time order, each labeled with its time and task stage. The last frame is the moment the execution was stopped.
-
-        Task stages in the frame labels:
-        - Stage 1: the robot approaches the target object and grasps it.
-        - Stage 2: the grasp is complete; the robot lifts the target object and carries it to the destination.
-        - Stage 3: the robot has released the target object at the destination and moves away.
-
-        {expectation}
-
-        Compare the current execution with the nominal behavior you saw earlier and with what should have happened by now:
-        - Where is the target object in the last frame: at its initial location, held in the gripper, at the destination, or somewhere else?
-        - Does that match the expected progress described above?
-        - The background and surrounding objects may differ, but the robot's manipulation of the target object should match the nominal reference.
-
-        Do you think a failure happened, or can the robot safely continue the task?
-
-        Return exactly this format:
-        Decision: failure / safe to continue
-        Reason: one or two sentences describing what you see."""
+    None before the grasp. item: the object as the gripper camera sees it, e.g.
+    'a metal surgical instrument'. destination: the surface the object lies on
+    at the destination, e.g. 'a blue surface'. After the release the object
+    may lie next to the destination, with both surfaces in view, so that
+    question asks which surface it lies on. A two-option form of the grasp
+    question ("held" or "nothing held") leaned towards "nothing" and flagged
+    nominal grasps, so the grasp is asked as yes/no.
+    """
+    item_start = item[:1].upper() + item[1:]
+    noun = item.split(' ', 1)[1] if item.split(' ', 1)[0].lower() in ('a', 'an', 'the') else item
+    if stage == 2:
+        return [(f'{GRIPPER_CAMERA} Is {item} held between the two white fingers?\n'
+                 'Answer with one word: yes or no.', ('yes', 'no'))]
+    if stage == 3:
+        return [(f'{GRIPPER_CAMERA} Which describes the image?\nA) {item_start} lies on {destination}.\n'
+                 f'B) {item_start} lies on a surface of another color.\nC) No {noun} is visible.\n'
+                 'Answer with one letter: A, B or C.', ('A', 'B', 'C'))]
+    return None

@@ -1863,54 +1863,79 @@ Use the **Detector** selector before starting an execution:
 - **DINO + GMR → VLM check** runs DINO and GMR (with the selected TS signal)
   on the same execution, in bag time. When one DINO camera scores 3
   consecutive frames above its threshold, the replay pauses and the **base**
-  RynnBrain model (no LoRA; the online VLM classifier is unchanged) is asked
-  in the main VLM's multi-turn form. Turn 1 is a complete nominal execution
-  (`rynnbrain.reference_bags`, `num_frames` frames, the main VLM's reference
-  prompt); the model's answer to it is generated once when the detector loads.
-  Turn 2 is raw frames of this execution and asks whether a failure happened
-  or the robot can safely continue (`cascade_verification_prompt` in
-  `prompts.py`). It explains the recorded stages (1: approach and grasp;
-  2: grasp complete, carrying; 3: released at the destination) and states what
-  should be true at the alarm's stage, e.g. in stage 2 the object should
-  already be in the gripper. Without this, the model read an object left on
-  the table after a slip as "not picked up yet". The GUI shows one compact row per camera: camera replay,
-  DINO heatmap, DINO scores and the GMR time series (no matched nominal
-  frame). DINO and GMR rows are saved to `online_scores_dino.csv` and
-  `online_scores_gmr.csv`.
-  Frames (top camera, at or before the alarm): one 2.5 s after stage 1
-  starts, one 2.5 s before each later stage starts, and the rest spread evenly
-  from the start of the current stage to the alarm, at least 1 s apart, up to 8
-  in total (about 4 when the alarm comes right after a stage starts). A
-  failure answer (or an unclear one) ends the execution; a safe answer resumes
-  the replay, and that camera must drop below its threshold before it can
-  trigger again. The run ends at stage 3 + `POST_STAGE3_SEC`, like GMR, so the
-  robot returning home cannot trigger a check. GMR is displayed but does not
-  trigger checks yet. Checks are saved as `vlm_checks` in
-  `online_results.json`, with the frames as `vlm_check_<n>_frame_<k>.jpg`.
-  Settings are the constants at the top of `rynnbrain_vlm/cascade.py`.
-  The trigger uses DINO's pooled (3x3) score, the score the DINO benchmark
-  decides on, so the live replay and its benchmark apply the same rule.
+  RynnBrain model (no LoRA; the online VLM classifier is unchanged) checks, on
+  the gripper camera (`rynnbrain.vlm_check.camera_topic`), the sub-goal the
+  robot has reported as reached:
+  - stage 2 (grasp reported complete): is the object held between the gripper
+    fingers?
+  - stage 3 (release reported at the destination): does the object lie on the
+    destination surface, on a surface of another color, or is it not visible?
+  - stage 1 (before the grasp): no sub-goal is reached yet, so the alarm is
+    answered safe without asking the VLM.
+
+  The questions (`subgoal_questions` in `prompts.py`) only ask what is
+  visible (the grasp as yes/no, the placement as three options), using
+  `vlm_check.item` (how the object looks from the gripper camera, e.g. "a
+  metal surgical instrument") and `vlm_check.destination` (the surface it lies
+  on at the destination, e.g. "a blue surface"). The question is asked about
+  the gripper-camera frames at, 0.5 s and 1 s before the alarm, one image at a
+  time. The answer probabilities come from the first answer token (one forward
+  pass per image, about 1 s per check on Thor); their mean for the answer
+  meaning "the sub-goal holds" decides: below 0.5 the check answers failure
+  and the execution ends, otherwise the replay resumes. An earlier version
+  showed top-camera frames after a nominal reference execution and stated
+  what should be true at the stage; the model repeated the expectation and
+  answered "safe to continue" in 634 of 640 benchmark checks.
+
+  After a safe answer, that camera must drop below its threshold, or the stage
+  must change, before it can trigger again. An alarm that persists into a new
+  stage is checked again 3 frames into it, because what should be true has
+  changed: DINO often stays above threshold through the release, and without
+  this re-check no check came after a misplaced release. The run ends at
+  stage 3 + `POST_STAGE3_SEC`, like GMR, so the robot returning home cannot
+  trigger a check. GMR is displayed but does not trigger checks yet.
+  `vlm_check.model` overrides model settings for the check: on Jetson Thor
+  `device_map: "auto"` sees only free, not reclaimable, memory and offloads
+  layers to the CPU, so the config pins the check model to `cuda:0`.
+
+  The GUI shows the VLM check (trigger, gripper frames, probabilities) and one
+  compact row per camera: camera replay, DINO heatmap, DINO scores and the GMR
+  time series (no matched nominal frame). DINO and GMR rows are saved to
+  `online_scores_dino.csv` and `online_scores_gmr.csv`. Checks are saved as
+  `vlm_checks` in `online_results.json`, with the frames as
+  `vlm_check_<n>_frame_<k>.jpg`. Settings are the constants at the top of
+  `rynnbrain_vlm/cascade.py`. The trigger uses DINO's pooled (3x3) score, the
+  score the DINO benchmark decides on, so the live replay and its benchmark
+  apply the same rule.
 
   **Benchmark of the VLM check** (`run_vlm_check_benchmark.py`): rescoring a
   saved DINO benchmark run without running DINO again. The saved pooled-score
-  crossings are replayed with the live rule (3 in a row, until stage 3 +
-  `POST_STAGE3_SEC`, causal stage clock); every new alarm episode asks the VLM
-  exactly as the live replay does, with the camera frames the replay would
-  have buffered. Three setups are scored on the same bags (the VLM reference
-  execution is left out of all of them): the saved DINO decision, DINO 3 in a
-  row alone, and DINO 3 in a row + VLM check. Results go to
-  `<dino run>/vlm_check/`: `SUMMARY.md`, `metrics.csv`, `metrics_<metric>.png`,
-  `bag_results.csv`, and `checks.jsonl` + `frames/` with every question,
-  answer and input frame. Answers are cached, so an interrupted run resumes,
-  both DINO metrics share identical checks, and a fully cached run regenerates
-  the reports without loading the VLM.
+  crossings are replayed with the live rule (3 in a row, again after a stage
+  change, until stage 3 + `POST_STAGE3_SEC`, causal stage clock); every new
+  alarm episode asks the VLM exactly as the live replay does, with the
+  gripper-camera frames the replay would have buffered. Two setups are scored
+  on the same bags: the saved DINO decision and DINO + VLM check. Results go
+  to `<dino run>/vlm_check/` or `--output`: `SUMMARY.md`, `metrics.csv`,
+  `metrics_<metric>.png`, `bag_results.csv`, and `checks.jsonl` + `frames/`
+  with every question, answer and input frame. Answers are cached, so an
+  interrupted run resumes, both DINO metrics share identical checks, and a
+  fully cached run regenerates the reports without loading the VLM.
 
   ```bash
   docker compose run --rm vlm-check-benchmark --config /config/pipeline_config.json \
-    --dino-run /outputs/experiments/<experiment>/dino_benchmark/<run>
+    --dino-run /outputs/experiments/<experiment>/dino_benchmark/<run> \
+    --output /outputs/experiments/<experiment>/vlm_check_benchmark
   ```
   `--metric euclidean` limits it to one DINO metric; `--limit N` to the first N
-  bags. Each VLM check takes about 15-30 s on a free GPU.
+  bags; `--per-folder N` to the first N bags of each folder (a quick check
+  across categories whose answers the full run reuses from the cache).
+  On the saved `pick_place_dino832_v141.2/dino_benchmark/all_folders` run (144
+  bags; results in `pick_place_dino832_v157/vlm_check_benchmark`) DINO alone
+  alarms on 99% of failures and 79% of normal runs; with the check, 90% of
+  failures (Euclidean; 88% Mahalanobis) and 2% of normal runs. The earlier
+  prompt kept 5% of failures. Misses: an instrument stuck against the basket
+  side (it looks like a release into the basket from the gripper camera) and
+  ft3 runs where DINO never triggers after the release.
 
 The signal readers prefer `/tcp_pose_broadcaster/pose`, `/joint_states`, and
 `/Robotiq2FGripperRobotInputMsg`. The same typed topics must exist in all nominal
