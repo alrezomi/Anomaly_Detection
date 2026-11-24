@@ -103,4 +103,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit('Archived hybrid experiment: per-task DINO-only rule selection was removed. Use final.sh for the strict DINO -> VLM cascade.')

@@ -1,4 +1,6 @@
 #!/bin/bash
+echo 'Archived hybrid experiment. Use final.sh for the strict DINO -> VLM cascade.' >&2
+exit 1
 S=/tmp/claude-1000/-home-steribot-projects/f0e2de92-2e5a-401c-8559-5de8ed21cbd2/scratchpad
 I=/evaluation/improvement; E=/evaluation
 for spec in "cv_vlm|" "cv_vlm_rel|--release-delay 1.5"; do

@@ -1,96 +1,263 @@
 {
  "_about": "Per-task fields for botfails_benchmark/prompts.py, written from the normal_train instruction (meta/tasks.jsonl) and normal training frames of camera logitech_1 only. checks: scene questions asked at a DINO alarm in the listed phases; holds = answers meaning the sub-goal holds. Left/right are as seen in the image (the camera faces the robot).",
- "_selection": "A check is used only if it falsely fails at most 1 of 12 random normal training frames per phase (prompt checks v1-v3, see botfails_benchmark/README.md and evaluation/FIDeL/README.md). No VLM hold question: the gripper signal already says that an object is held, and every hold wording failed on 1-12 of 12 normal frames from this far camera. Tasks without an accepted check (buttons: top of the box not visible; screws: screws too small) have checks [] and fallback 'dino'.",
+ "_selection": "Every three-frame DINO alarm requires VLM verification. Explicit task-context questions cover tasks without a specific check; uncovered phases use the same context template. New context questions use the 0.5 default, with limited normal-alarm validation; existing calibrated checks retain their historical cutoffs. No DINO-only fallback.",
  "domotic_dishTidyUp": {
   "instruction": "store dishes in a dish rack",
   "checks": [
-   {"name": "plate_flat", "kind": "yesno", "phases": ["holding", "released"],
+   {
+    "name": "plate_flat",
+    "kind": "yesno",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "question": "Look at the metal dish rack. Does a plate lie flat in it instead of standing upright?",
-    "holds": ["no"]},
-   {"name": "dish_beside_rack", "kind": "yesno", "phases": ["holding", "released"],
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "dish_beside_rack",
+    "kind": "yesno",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "question": "Does a dish lie on its side next to the dish rack?",
-    "holds": ["no"]}
+    "holds": [
+     "no"
+    ]
+   }
   ]
  },
  "domotic_groceriesSorting": {
   "instruction": "sorting groceries, vegetables in the box with a pink sign and sweets in the box with the yellow sign",
   "checks": [
-   {"name": "sweet_in_pink", "kind": "yesno", "phases": ["holding", "released"],
+   {
+    "name": "sweet_in_pink",
+    "kind": "yesno",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "question": "Is there a sweet, such as chocolate, a biscuit or a donut, in the clear box with the pink sign?",
-    "holds": ["no"]},
-   {"name": "produce_in_yellow", "kind": "yesno", "phases": ["holding", "released"],
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "produce_in_yellow",
+    "kind": "yesno",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "question": "Is there a fruit or a vegetable in the clear box with the yellow-green sign?",
-    "holds": ["no"]}
+    "holds": [
+     "no"
+    ]
+   }
   ]
  },
  "domotic_makingCoffee": {
   "instruction": "making coffee: take some coffee powder with the spoon and pour it into the filter of the coffee machine",
   "checks": [
-   {"name": "powder", "kind": "yesno", "phases": ["holding", "released"],
+   {
+    "name": "powder",
+    "kind": "yesno",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "question": "Is there coffee powder on the table or on the outside of the coffee machine?",
-    "holds": ["no"]}
+    "holds": [
+     "no"
+    ]
+   }
   ]
  },
  "domotic_pouringCoffee": {
   "instruction": "pouring coffee in a cup",
   "checks": [
-   {"name": "spill", "kind": "yesno", "phases": ["holding", "released"],
+   {
+    "name": "spill",
+    "kind": "yesno",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "question": "Is there coffee on the table outside the glasses and the jug?",
-    "holds": ["no"]}
+    "holds": [
+     "no"
+    ]
+   }
   ]
  },
  "domotic_setTheTable": {
   "instruction": "Set the table: one glass, one plate, one fork and one knife. Fork on the left of the plate and knife on the right",
   "checks": [
-   {"name": "cutlery", "kind": "choice", "phases": ["holding", "released"],
+   {
+    "name": "cutlery",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "lead": "Look at the green plate in the middle of the table, as seen in this image. Which describes it?",
     "A": "The pink fork lies to the right of the plate or is not next to it yet, and the orange knife lies to the left of the plate or is not next to it yet",
     "B": "The pink fork lies to the left of the plate, or the orange knife lies to the right of the plate",
     "C": "No green plate is in the middle of the table",
-    "holds": ["A", "C"]}
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
   ]
  },
  "domotic_vegetablesAndFruitsSorting": {
   "instruction": "sorting fruits and vegetables, put vegetables in the box with a yellow mark and fruits in the box with a pink mark",
   "checks": [
-   {"name": "fruit_in_yellow", "kind": "yesno", "phases": ["holding", "released"],
+   {
+    "name": "fruit_in_yellow",
+    "kind": "yesno",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "question": "Is a banana, grapes, an apple, a lemon, an orange or a strawberry in the clear box with the yellow-green mark?",
-    "holds": ["no"]},
-   {"name": "vegetable_in_pink", "kind": "yesno", "phases": ["holding", "released"],
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "vegetable_in_pink",
+    "kind": "yesno",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "question": "Is corn, broccoli, a pepper, a cucumber or lettuce in the clear box with the pink mark?",
-    "holds": ["no"]}
+    "holds": [
+     "no"
+    ]
+   }
   ]
  },
  "industrial_robothon_buttons": {
   "instruction": "push the red button then move the slider to the top and push the blue button",
-  "checks": [],
-  "fallback": "dino"
+  "checks": [
+   {
+    "name": "task_context_start",
+    "kind": "yesno",
+    "phases": [
+     "start"
+    ],
+    "question": "The task is: \"push the red button then move the slider to the top and push the blue button\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "task_context_holding",
+    "kind": "yesno",
+    "phases": [
+     "holding"
+    ],
+    "question": "The task is: \"push the red button then move the slider to the top and push the blue button\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "task_context_released",
+    "kind": "yesno",
+    "phases": [
+     "released"
+    ],
+    "question": "The task is: \"push the red button then move the slider to the top and push the blue button\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   }
+  ]
  },
  "industrial_robothon_hatchAndProbe": {
   "instruction": "open the hatch, grab the probe, measure tension, place the probe in the black plug, close the hatch",
   "checks": [
-   {"name": "probe", "kind": "choice", "phases": ["released"],
+   {
+    "name": "probe",
+    "kind": "choice",
+    "phases": [
+     "released"
+    ],
     "lead": "Look at the red probe on its red cable. Which describes it?",
     "A": "Its tip is in the black socket on the black box",
     "B": "Its tip is in a red socket or in another hole of the black box",
     "C": "It hangs from its stand or is not in any socket",
-    "holds": ["A", "C"]}
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
   ]
  },
  "industrial_screws_sorting": {
   "instruction": "sorting 2 types of screws",
-  "checks": [],
-  "fallback": "dino"
+  "checks": [
+   {
+    "name": "task_context_start",
+    "kind": "yesno",
+    "phases": [
+     "start"
+    ],
+    "question": "The task is: \"sorting 2 types of screws\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "task_context_holding",
+    "kind": "yesno",
+    "phases": [
+     "holding"
+    ],
+    "question": "The task is: \"sorting 2 types of screws\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "task_context_released",
+    "kind": "yesno",
+    "phases": [
+     "released"
+    ],
+    "question": "The task is: \"sorting 2 types of screws\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   }
+  ]
  },
  "industrial_soldering": {
   "instruction": "soldering a part on an electronic board",
   "checks": [
-   {"name": "iron", "kind": "choice", "phases": ["holding", "released"],
+   {
+    "name": "iron",
+    "kind": "choice",
+    "phases": [
+     "holding",
+     "released"
+    ],
     "lead": "Where is the soldering iron?",
     "A": "In its spiral holder",
     "B": "Lying somewhere else",
     "C": "Held by the red robot gripper",
-    "holds": ["A", "C"]}
+    "holds": [
+     "A",
+     "C"
+    ]
+   }
   ]
  }
 }

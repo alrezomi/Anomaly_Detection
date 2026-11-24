@@ -54,7 +54,7 @@ def main():
     cascade.add_argument('--subset', choices=['dev', 'heldout'], help='Only this part of --split-file.')
     cascade.add_argument('--threshold-scale', type=float, help='DINO threshold scale (default: pipeline_config).')
     cascade.add_argument('--recheck-sec', type=float, help='Ask the VLM again every N s while an alarm persists.')
-    cascade.add_argument('--release-delay', type=float, help='Also check this long after every release.')
+    cascade.add_argument('--release-delay', type=float, help=argparse.SUPPRESS)  # Reject legacy hybrid commands.
     cascade.add_argument('--confirm-sec', type=float, help='A failing check must fail again this much later.')
     cascade.add_argument('--vlm-thresholds', type=Path, help='{task: {question: threshold}} from normal data.')
     cascade.add_argument('--vlm-cache', type=Path, help='Shared answer cache (default: inside --output).')
@@ -68,6 +68,9 @@ def main():
     report.add_argument('--split-file', type=Path, help='JSON with "dev" and "heldout" test episode indices per task.')
     report.add_argument('--subset', choices=['dev', 'heldout'], help='Only this part of --split-file.')
     report.add_argument('--no-timelines', action='store_true', help='Skip the per-episode plots.')
+    report.add_argument('--label-type', choices=['failure', 'anomaly'], default='failure',
+                        help='End-to-end ground truth (default: derived failure labels). Raw detector diagnostics retain anomaly labels.')
+    report.add_argument('--labels-dir', type=Path, help='Failure CSV root; default: <evaluation>/failure_labels. No fallback to anomaly labels.')
     arguments = parser.parse_args()
 
     if arguments.command == 'dino':

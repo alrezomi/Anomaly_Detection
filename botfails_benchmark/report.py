@@ -8,8 +8,8 @@ FIDeL (Rolland et al., ICRA 2026, Sec. IV-C), per task then averaged over tasks:
 We evaluate at the frames our system scores (2 fps; labels taken at those frames).
 Our cascade stops the robot at a confirmed failure, so from the stop on every
 frame is predicted 'failure' (latched); before it 'normal'.
-FIDeL's end-to-end labels relabel benign anomalies as normal; those failure
-labels are not public, so the end-to-end metrics here use the anomaly labels.
+End-to-end evaluation defaults to separate derived failure labels. Unknown
+episodes are excluded explicitly; raw detector diagnostics retain anomaly labels.
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def rates(labels, predictions):
     tpr = (predictions & labels).sum() / positives if positives else np.nan
     tnr = (~predictions & ~labels).sum() / negatives if negatives else np.nan
     beta = negatives / len(labels)
-    return dict(TPR=100 * tpr, TNR=100 * tnr, Acc=100 * np.nanmean([tpr, tnr]),
+    return dict(TPR=100 * tpr, TNR=100 * tnr, FPR=100 * (1 - tnr), Acc=100 * np.nanmean([tpr, tnr]),
                 WAcc=100 * (beta * tnr + (1 - beta) * tpr), beta=beta, frames=len(labels),
                 anomalous_frames=int(positives))
 
@@ -110,10 +110,11 @@ def run(args, log):
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     scale = float(args.threshold_scale)
-    fallback_tasks = set()
-    if args.cascade_run and (Path(args.cascade_run) / 'run.json').is_file():
-        tasks_config = json.loads((Path(args.cascade_run) / 'run.json').read_text())['tasks_config']
-        fallback_tasks = {task for task, cfg in tasks_config.items() if cfg.get('fallback') == 'dino'}
+    label_type = getattr(args, 'label_type', 'failure')
+    labels_dir = (getattr(args, 'labels_dir', None) or Path(args.dataset).parents[1] / 'failure_labels') if label_type == 'failure' else Path(args.dataset) / 'labels'
+    if not labels_dir.is_dir():
+        raise FileNotFoundError(f'{label_type} label directory missing: {labels_dir}. Build failure labels first; labels are never substituted silently.')
+    coverage = []
     split = json.loads(Path(args.split_file).read_text()) if getattr(args, 'split_file', None) and args.subset else None
     ad_rows, threshold_rows, e2e_rows, episode_rows, check_rows = [], [], [], [], []
     for task in TASKS:
@@ -128,12 +129,25 @@ def run(args, log):
         labels = scores.label.astype(int)
         ad_rows.append(dict(task=task, **{f'{k}_raw': v for k, v in threshold_free(labels, scores.pooled_score).items()},
                             **{f'{k}_ratio': v for k, v in threshold_free(labels, scores.ratio).items()}))
+        evaluation_labels, excluded = {}, []
+        for episode, part in scores.groupby('episode'):
+            full = np.loadtxt(labels_dir / f'{task}_anomaly' / f'{episode}_labels.csv', ndmin=1).astype(int)
+            if not set(np.unique(full)) <= {-1, 0, 1}:
+                raise ValueError(f'Invalid evaluation labels for {task}/{episode}')
+            unresolved = bool((full < 0).any())
+            coverage.append(dict(task=task, episode=episode, included=not unresolved, label_type=label_type))
+            if unresolved:
+                excluded.append(episode)
+                continue
+            evaluation_labels[episode] = full
+            scores.loc[part.index, 'label'] = full[part.frame_index.to_numpy(dtype=int)]
+        scores = scores[~scores.episode.isin(excluded)].copy()
+        labels = scores.label.astype(int)
         threshold_rows.append(dict(task=task, **rates(labels, scores.ratio > scale)))
         cascade = {}
         if args.cascade_run and (Path(args.cascade_run) / f'{task}.json').is_file():
             cascade = {r['episode']: r for r in json.loads((Path(args.cascade_run) / f'{task}.json').read_text())}
         dino_pred, cascade_pred = pd.Series(False, index=scores.index), pd.Series(False, index=scores.index)
-        fallback_pred = pd.Series(False, index=scores.index)
         for episode, frame in scores.groupby('episode'):
             dino_stop = first_alarm(frame, scale)
             dino_pred[frame.index] = latched(frame, dino_stop)
@@ -141,9 +155,7 @@ def run(args, log):
             cascade_stop = result['stop_sec'] if result else None
             if result:
                 cascade_pred[frame.index] = latched(frame, cascade_stop)
-                fallback_stop = dino_stop if task in fallback_tasks else cascade_stop
-                fallback_pred[frame.index] = latched(frame, fallback_stop)
-            full = np.loadtxt(Path(args.dataset) / 'labels' / f'{task}_anomaly' / f'{episode}_labels.csv', ndmin=1).astype(int)
+            full = evaluation_labels[episode]
             anomalous = bool(full.any())
             onset = float(np.argmax(full) / FPS) if anomalous else None
             # The labels decide: coffee episode 5 lies in the text's 'poured on the table' range but has no anomaly label.
@@ -157,8 +169,6 @@ def run(args, log):
                 asked = [a for a in result['alarms'] if a['subgoal_probability'] is not None]
                 row.update(cascade_stop_sec=cascade_stop, cascade_outcome=episode_outcome(anomalous, onset, cascade_stop),
                            cascade_delay_sec=(cascade_stop - onset) if anomalous and cascade_stop is not None and cascade_stop >= onset else None,
-                           fallback_stop_sec=fallback_stop, fallback_outcome=episode_outcome(anomalous, onset, fallback_stop),
-                           fallback_delay_sec=(fallback_stop - onset) if anomalous and fallback_stop is not None and fallback_stop >= onset else None,
                            alarms=len(result['alarms']), checks_asked=len(asked),
                            hold_events=sum(e['event'] == 'hold' for e in result['phases']))
                 for alarm in result['alarms']:
@@ -170,22 +180,25 @@ def run(args, log):
         e2e_rows.append(dict(task=task, system='DINO alone (first alarm stops)', **rates(labels, dino_pred)))
         if cascade:
             e2e_rows.append(dict(task=task, system='DINO + VLM check (cascade)', **rates(labels, cascade_pred)))
-            e2e_rows.append(dict(task=task, system='DINO + VLM check, DINO alone where no check', **rates(labels, fallback_pred)))
-    metric_columns = ['TPR', 'TNR', 'Acc', 'WAcc']
+    metric_columns = ['TPR', 'TNR', 'FPR', 'Acc', 'WAcc']
     ad = summarize(pd.DataFrame(ad_rows), ['AUROC_raw', 'F1_opt_raw', 'AUROC_ratio', 'F1_opt_ratio'])
     threshold = summarize(pd.DataFrame(threshold_rows), metric_columns)
     e2e = pd.concat([summarize(part, metric_columns).assign(system=system)
                      for system, part in pd.DataFrame(e2e_rows).groupby('system', sort=False)], ignore_index=True)
     episodes_table = pd.DataFrame(episode_rows)
+    pd.DataFrame(coverage).to_csv(output / 'label_coverage.csv', index=False)
     for name, table in [('ad_metrics', ad), ('dino_threshold_metrics', threshold), ('end_to_end_metrics', e2e),
                         ('episodes', episodes_table), ('vlm_checks', pd.DataFrame(check_rows))]:
         table.to_csv(output / f'{name}.csv', index=False, float_format='%.4f')
     summary = dict(fidel_reference=FIDEL, ad=ad.round(2).to_dict('records'), threshold=threshold.round(2).to_dict('records'),
-                   end_to_end=e2e.round(2).to_dict('records'), episode_outcomes=episode_counts(episodes_table))
+                   end_to_end=e2e.round(2).to_dict('records'), episode_outcomes=episode_counts(episodes_table),
+                   label_type=label_type, labels_dir=str(labels_dir),
+                   cascade_run=str(args.cascade_run), directly_comparable_to_published_fidel=False,
+                   included_episodes=sum(r['included'] for r in coverage), excluded_episodes=sum(not r['included'] for r in coverage))
     (output / 'summary.json').write_text(json.dumps(summary, indent=1, default=str))
-    write_markdown(output / 'summary.md', ad, threshold, e2e, episodes_table, scale)
-    plot_comparison(output / 'comparison_with_fidel.png', ad, e2e)
-    if args.cascade_run and not getattr(args, 'no_timelines', False):
+    write_markdown(output / 'summary.md', ad, threshold, e2e, episodes_table, scale, label_type)
+    plot_comparison(output / 'comparison_with_fidel.png', ad, e2e, label_type)
+    if label_type == 'anomaly' and args.cascade_run and not getattr(args, 'no_timelines', False):
         plot_timelines(output / 'timelines', Path(args.dino_run), Path(args.cascade_run), episodes_table, scale)
     log(f'Report written to {output}')
     return summary
@@ -200,7 +213,7 @@ def table_markdown(frame, columns, names=None):
     return '\n'.join(lines)
 
 
-def write_markdown(path, ad, threshold, e2e, episodes_table, scale):
+def write_markdown(path, ad, threshold, e2e, episodes_table, scale, label_type='anomaly'):
     mean = lambda t: t[t.task == 'mean (10 tasks)'].iloc[0]  # noqa: E731
     lines = ['# BotFails: our DINO -> VLM cascade vs FIDeL', '',
              'Per-task values, then the mean over the 10 tasks (FIDeL averages per task the same way).', '',
@@ -210,13 +223,13 @@ def write_markdown(path, ad, threshold, e2e, episodes_table, scale):
              f"Ours, raw pooled DINO score: AUROC {mean(ad).AUROC_raw:.2f}, F1@Opt {mean(ad).F1_opt_raw:.2f}. "
              f"Score / progress threshold: AUROC {mean(ad).AUROC_ratio:.2f}, F1@Opt {mean(ad).F1_opt_ratio:.2f}.", '',
              table_markdown(ad, ['task', 'AUROC_raw', 'F1_opt_raw', 'AUROC_ratio', 'F1_opt_ratio']), '',
-             f'## 2. DINO threshold decision per frame (score > {scale:g} x threshold, anomaly labels)', '',
-             table_markdown(threshold, ['task', 'TPR', 'TNR', 'Acc', 'WAcc']), '',
+             f'## 2. DINO threshold decision per frame (score > {scale:g} x threshold, {label_type} labels)', '',
+             table_markdown(threshold, ['task', 'TPR', 'TNR', 'FPR', 'Acc', 'WAcc']), '',
              '## 3. End to end (latched stop: every frame from the stop on counts as failure)', '',
              f"FIDeL (Fig. 6, failure labels): Acc ~{FIDEL['e2e_acc_mean_approx']:.1f}, W.Acc {FIDEL['e2e_wacc_mean']:.2f}. "
-             'Ours use the anomaly labels (FIDeL\'s failure labels are not public).', '']
+             f'Ours use {label_type} labels. Derived failure labels are not the authors\' annotations; unresolved episodes are excluded. Original anomaly timings are onset proxies. See label_coverage.csv and the label manifest.', '']
     for system, part in e2e.groupby('system', sort=False):
-        lines += [f'### {system}', '', table_markdown(part, ['task', 'TPR', 'TNR', 'Acc', 'WAcc']), '']
+        lines += [f'### {system}', '', table_markdown(part, ['task', 'TPR', 'TNR', 'FPR', 'Acc', 'WAcc']), '']
     lines += ['## 4. Episodes', '', '### Per anomaly type (episodes stopped after the onset / all)', '']
     columns = [c for c in ('dino', 'cascade', 'fallback') if f'{c}_outcome' in episodes_table]
     per_type = []
@@ -241,10 +254,16 @@ def write_markdown(path, ad, threshold, e2e, episodes_table, scale):
             counts = counts.reset_index()
             counts.columns = [str(c) for c in counts.columns]
             lines += [f'### {system}', '', table_markdown(counts, list(counts.columns)), '']
+    lines += ['', '## Episode false-stop rate', '',
+              'False stops / complete episodes with no failure (separate from frame FPR).', '']
+    for system, stats in episode_counts(episodes_table).items():
+        fpr = stats['episode_FPR']
+        lines.append(f"- {system}: {stats['counts'].get('false_stop', 0)}/{stats['normal_episodes']}; "
+                     + (f'{fpr:.2f}%' if fpr is not None else 'undefined: no normal episodes'))
     path.write_text('\n'.join(lines))
 
 
-def plot_comparison(path, ad, e2e):
+def plot_comparison(path, ad, e2e, label_type='anomaly'):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -260,7 +279,7 @@ def plot_comparison(path, ad, e2e):
         row = mean(part).iloc[0]
         names.append(f'Ours: {system}')
         values.append((row.Acc, row.WAcc))
-    bars(right, names, values, ('Acc', 'W.Acc'), 'End to end (FIDeL: failure labels; ours: anomaly labels)')
+    bars(right, names, values, ('Acc', 'W.Acc'), f'End to end (ours: {label_type}; reference uses different annotations/coverage)')
     figure.tight_layout()
     figure.savefig(path, dpi=110)
     plt.close(figure)
@@ -327,5 +346,10 @@ def episode_counts(table):
             continue
         counts = table[column].value_counts().to_dict()
         delays = table[f'{system}_delay_sec'].dropna()
-        result[system] = dict(counts=counts, median_delay_sec=float(delays.median()) if len(delays) else None)
+        normal = counts.get('false_stop', 0) + counts.get('correct_continue', 0)
+        failures = counts.get('detected', 0) + counts.get('stopped_before_onset', 0) + counts.get('missed', 0)
+        result[system] = dict(counts=counts, median_delay_sec=float(delays.median()) if len(delays) else None,
+                              normal_episodes=normal, failure_episodes=failures,
+                              episode_FPR=100 * counts.get('false_stop', 0) / normal if normal else None,
+                              post_onset_detection_rate=100 * counts.get('detected', 0) / failures if failures else None)
     return result

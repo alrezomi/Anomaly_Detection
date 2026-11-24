@@ -1,6 +1,6 @@
 {
- "_about": "Final BotFails configuration, chosen on the development episodes only (improvement/dev_split.json): per-task camera, regions, questions and decision rule. Left/right are as seen in the image.",
- "_selection": "A check is used only if it falsely fails at most 1 of 12 random normal training frames per phase (prompt checks v1-v3, see botfails_benchmark/README.md and evaluation/FIDeL/README.md). No VLM hold question: the gripper signal already says that an object is held, and every hold wording failed on 1-12 of 12 normal frames from this far camera. Tasks without an accepted check (buttons: top of the box not visible; screws: screws too small) have checks [] and fallback 'dino'.",
+ "_about": "Strict DINO -> VLM configuration: per-task cameras, crops and questions from development. No task-specific DINO bypass or release-only check. Historical hybrid settings remain in saved run.json files.",
+ "_selection": "Every three-frame DINO alarm requires VLM verification. Explicit task-context questions cover tasks without a specific check; uncovered phases use the same context template. New context questions use the 0.5 default, with limited normal-alarm validation; existing calibrated checks retain their historical cutoffs. No DINO-only fallback.",
  "domotic_dishTidyUp": {
   "instruction": "store dishes in a dish rack",
   "checks": [
@@ -28,8 +28,7 @@
      "no"
     ]
    }
-  ],
-  "decision": "dino"
+  ]
  },
  "domotic_groceriesSorting": {
   "instruction": "sorting groceries, vegetables in the box with a pink sign and sweets in the box with the yellow sign",
@@ -54,8 +53,7 @@
      0.8
     ],
     "triggers": [
-     "dino",
-     "release"
+     "dino"
     ]
    },
    {
@@ -78,8 +76,7 @@
      0.72
     ],
     "triggers": [
-     "dino",
-     "release"
+     "dino"
     ]
    }
   ]
@@ -137,8 +134,7 @@
      "C"
     ],
     "triggers": [
-     "dino",
-     "release"
+     "dino"
     ]
    }
   ]
@@ -166,8 +162,7 @@
      0.85
     ],
     "triggers": [
-     "dino",
-     "release"
+     "dino"
     ]
    },
    {
@@ -190,16 +185,48 @@
      0.7
     ],
     "triggers": [
-     "dino",
-     "release"
+     "dino"
     ]
    }
   ]
  },
  "industrial_robothon_buttons": {
   "instruction": "push the red button then move the slider to the top and push the blue button",
-  "checks": [],
-  "fallback": "dino",
+  "checks": [
+   {
+    "name": "task_context_start",
+    "kind": "yesno",
+    "phases": [
+     "start"
+    ],
+    "question": "The task is: \"push the red button then move the slider to the top and push the blue button\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "task_context_holding",
+    "kind": "yesno",
+    "phases": [
+     "holding"
+    ],
+    "question": "The task is: \"push the red button then move the slider to the top and push the blue button\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   },
+   {
+    "name": "task_context_released",
+    "kind": "yesno",
+    "phases": [
+     "released"
+    ],
+    "question": "The task is: \"push the red button then move the slider to the top and push the blue button\". Allow normal work in progress; the task need not be finished yet. Is a task-threatening error or an obstruction of the robot or its tool visible in this image?",
+    "holds": [
+     "no"
+    ]
+   }
+  ],
   "camera": "logitech_2"
  },
  "industrial_robothon_hatchAndProbe": {
@@ -221,8 +248,7 @@
     ]
    }
   ],
-  "camera": "logitech_2",
-  "decision": "dino"
+  "camera": "logitech_2"
  },
  "industrial_screws_sorting": {
   "instruction": "sorting 2 types of screws",
@@ -237,8 +263,7 @@
      "released"
     ],
     "triggers": [
-     "dino",
-     "release"
+     "dino"
     ],
     "lead": "Look at the two white plates at the top of the image. Which describes the screws on them?",
     "A": "The left plate holds only long screws or nothing, and the right plate holds only short screws or nothing",
@@ -270,7 +295,6 @@
      "C"
     ]
    }
-  ],
-  "decision": "vlm"
+  ]
  }
 }

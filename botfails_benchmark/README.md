@@ -28,19 +28,38 @@ The hold question was dropped: the gripper already reports that it holds an
 object, and every hold wording failed on 1-12 of 12 normal frames from the far
 camera. Checks are accepted only if they falsely fail at most 1 of 12 random
 normal training frames per phase (no test data used). Buttons (top of the box
-not visible) and screws (screws too small) have no accepted check: the strict
-cascade never stops there; the `fallback` variant uses DINO alone for them.
+not visible) and screws (screws too small) originally had no accepted check.
+Empty task tables now contain an explicit task-context question, and uncovered phases use
+the same instruction-based template. A task with neither a question nor an instruction raises
+an error. There is no DINO-only fallback. New context questions use the existing 0.5 default,
+with distinct names so old calibrated cutoffs are not reused for different questions.
+Their limited normal-alarm check and the legacy 0.9527 soldering cutoff audit are documented
+in `evaluation/FIDeL/improvement/threshold_review/REVIEW.md`.
 
 ## Improved configuration
 
 `tasks_final.json` and `thresholds_final.json` (chosen on development episodes; see
 `evaluation/FIDeL/improvement/README.md`) add a camera per task, region crops (`crop`), per-question thresholds
-from normal frames (`--vlm-thresholds`), a re-check while an alarm persists (`--recheck-sec`), checks after each
-gripper release (`--release-delay`, per-check `triggers`) and a per-task `decision` (`dino`: the alarm stops
-without asking). `--split-file` / `--subset` restrict DINO, the cascade and the report to development or held-out
+from normal frames (`--vlm-thresholds`) and a re-check while a three-frame DINO alarm persists (`--recheck-sec`).
+Every stop requires VLM confirmation. Task-specific DINO decisions and checks triggered only by release
+were removed on 2026-11-12 at the user's request. Old release-only commands are rejected.
+`--split-file` / `--subset` restrict DINO, the cascade and the report to development or held-out
 episodes, and `dino --cache` keeps features for re-scoring.
 
+Historical hybrid results remain in `evaluation/FIDeL/improvement/final/cascade_test`;
+they do not measure the strict cascade. The saved strict candidate is `final/cv_vlm`.
+`experiments/final.sh` now runs the strict cascade and writes separate `strict_*` outputs.
+The archived rule-selection scripts are not part of the current evaluation.
+
 ## Run
+
+Reports now default to derived **failure** labels for threshold and full-cascade evaluation.
+Build them once with `python -m botfails_benchmark.failure_labels --dataset <BotFails>`.
+They live separately in `<evaluation>/failure_labels`; original anomaly labels and raw detector
+diagnostics remain unchanged. See `failure_labels/README.md` for uncertainty and timing limitations.
+Unknown episodes are excluded explicitly in `label_coverage.csv`; there is no silent label fallback.
+Use `report --label-type anomaly` only to reproduce historical anomaly-based evaluations.
+Frame FPR and episode false-stop rate are reported separately.
 
 ```sh
 # 1. frames (host, needs PyAV): 2 fps JPEGs of logitech_1

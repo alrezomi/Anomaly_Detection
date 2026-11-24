@@ -72,8 +72,7 @@ class Checker:
     def ask(self, task, phase, frames, alarm_sec, trigger='dino'):
         questions = task_questions(self.tasks[task], phase, 'release' if trigger == 'release' else 'dino')
         if not questions:
-            return dict(verdict='safe', subgoal_probability=None, frames=[], questions=[],
-                        answer=f'Phase {phase}: no sub-goal to check. Safe to continue.')
+            raise ValueError(f'{task}/{phase}: no VLM question or task instruction configured.')
         stamps = [t for _, t, _ in frames]
         chosen, used = [], set()
         for offset in self.offsets:
@@ -98,34 +97,24 @@ class Checker:
 
 
 def replay_episode(task, episode, scores, checker, camera, scale, recheck_sec=None, release_delay=None, confirm_sec=None):
-    """recheck_sec: ask again every so often while an alarm persists. release_delay: also check
-    this long after every release, whether DINO alarms or not (failures DINO cannot see).
+    """Only a three-frame DINO alarm can initiate a VLM check.
+
+    recheck_sec: ask again every so often while an alarm persists.
+    release_delay is retained only to reject old hybrid commands explicitly.
     confirm_sec: a failing check must fail again this much later before the execution stops."""
+    if release_delay is not None:
+        raise ValueError('Release-only checks were removed: VLM checks require three consecutive DINO alarms.')
     from rynnbrain_vlm.cascade import ALARM_RUN, AlarmEpisodes
     phases = episode_phases(episode)
     frames = episode.frame_table(camera)
     tracker, alarms, stop, last_ask, confirm_due = AlarmEpisodes(), [], None, float('-inf'), None
-    config = checker.tasks[task]
-    has_release_check = any('release' in check.get('triggers', ('dino',)) for check in config.get('checks', []))
-    releases = ([t + release_delay for t, kind in phases.events if kind == 'release']
-                if release_delay is not None and has_release_check else [])
-    dino_decides = config.get('decision') == 'dino'
     for row in scores.sort_values('timestamp_sec').itertuples(index=False):
         t = float(row.timestamp_sec)
         index, kind = phases.at(t)
         above = float(row.pooled_score) > float(row.base_threshold) * scale
         trigger = 'dino' if tracker.update('dino', above, index) else None
-        if trigger == 'dino' and dino_decides:
-            alarms.append(dict(time_sec=t, frame_index=int(row.frame_index), phase=kind, phase_index=index, trigger=trigger,
-                               verdict='failure', subgoal_probability=None, questions=[], frames=[],
-                               answer='This task trusts the DINO alarm: no VLM question covers its failure types.'))
-            stop = t
-            break
         if trigger is None and recheck_sec and above and tracker.streaks['dino'] >= ALARM_RUN and t - last_ask >= recheck_sec:
             trigger = 'recheck'
-        while releases and releases[0] <= t + 1e-9:
-            releases.pop(0)
-            trigger = trigger or 'release'
         if confirm_due is not None and t + 1e-9 >= confirm_due:
             trigger = 'confirm'
         if trigger:
@@ -145,7 +134,19 @@ def replay_episode(task, episode, scores, checker, camera, scale, recheck_sec=No
 
 
 def run(config, args, log):
+    if args.release_delay is not None:
+        raise ValueError('Release-only checks were removed: omit --release-delay.')
     tasks_config = {k: v for k, v in json.loads(Path(args.tasks_config).read_text()).items() if not k.startswith('_')}
+    for task, settings in tasks_config.items():
+        if settings.get('decision') == 'dino' or settings.get('fallback') == 'dino':
+            log(f'{task}: ignoring legacy DINO-only routing; VLM confirmation is required.')
+        settings.pop('decision', None)
+        settings.pop('fallback', None)
+        if not settings.get('checks') and not settings.get('held'):
+            log(f'{task}: using the task-context question; no phase-specific check is configured.')
+        for phase in ('start', 'holding', 'released'):
+            if not task_questions(settings, phase):
+                raise ValueError(f'{task}/{phase}: configure a VLM question or task instruction before running.')
     scale = float(args.threshold_scale if args.threshold_scale is not None else config.get('dino_threshold_scale', 1.))
     thresholds = json.loads(Path(args.vlm_thresholds).read_text()) if args.vlm_thresholds else None
     split = json.loads(Path(args.split_file).read_text()) if args.split_file else None

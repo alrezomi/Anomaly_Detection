@@ -1,20 +1,28 @@
 {
   "nominal_bags": [
-    "/data/Nominal/setting 1/nominal_1.1",
-    "/data/Nominal/setting 1/nominal_1.2",
-    "/data/Nominal/setting 1/nominal_1.3",
-    "/data/Nominal/setting 1/nominal_1.4",
-    "/data/Nominal/setting 1/nominal_1.5",
-    "/data/Nominal/setting 1/nominal_1.6",
-    "/data/Nominal/setting 1/nominal_1.7",
-    "/data/Nominal/setting 1/nominal_1.8",
-    "/data/Nominal/setting 1/nominal_1.9",
-    "/data/Nominal/setting 1/nominal_1.10",
-    "/data/Nominal/setting 1/nominal_1.11",
-    "/data/Nominal/setting 1/nominal_1.12",
-    "/data/Nominal/setting 1/nominal_1.13",
-    "/data/Nominal/setting 1/nominal_1.14",
-    "/data/Nominal/setting 1/nominal_1.15"
+    "/data/Nominal/ft_nominal/nominal_3.1",
+    "/data/Nominal/ft_nominal/nominal_3.2",
+    "/data/Nominal/ft_nominal/nominal_3.3",
+    "/data/Nominal/ft_nominal/nominal_3.5",
+    "/data/Nominal/ft_nominal/nominal_3.6",
+    "/data/Nominal/ft_nominal/nominal_3.7",
+    "/data/Nominal/ft_nominal/nominal_3.8",
+    "/data/Nominal/ft_nominal/nominal_3.9",
+    "/data/Nominal/ft_nominal/nominal_3.10",
+    "/data/Nominal/ft_nominal/nominal_3.11",
+    "/data/Nominal/ft_nominal/nominal_3.14",
+    "/data/Nominal/ft_nominal/nominal_3.15",
+    "/data/Nominal/ft_nominal/nominal_3.16",
+    "/data/Nominal/ft_nominal/nominal_3.17",
+    "/data/Nominal/ft_nominal/nominal_3.18",
+    "/data/Nominal/ft_nominal/nominal_3.19",
+    "/data/Nominal/ft_nominal/nominal_3.20",
+    "/data/Nominal/ft_nominal/nominal_3.21",
+    "/data/Nominal/ft_nominal/nominal_3.22",
+    "/data/Nominal/ft_nominal/nominal_3.23",
+    "/data/Nominal/ft_nominal/nominal_3.24",
+    "/data/Nominal/ft_nominal/nominal_3.25"
+    
   ],
   "test_bag": "/data/Nominal/setting 1/nominal_1.31",
   "camera_topics": [
@@ -25,213 +33,257 @@
   "ignore_recorded_stages": false,
   "preview_only": false,
   "max_preview_frames": null,
-  "vision_memory_name": "pick_place_dino728_v2",
-  "dino_input_size": 728,
+  
+  "dino_model_name": "facebook/dinov3-vits16plus-pretrain-lvd1689m",
+  "vision_memory_name": "pick_place_dinov3_splus832_nominal",
+  "dino_input_size": 832,
   "nominal_cache_dir": "/outputs/nominal_cache",
-  "output_dir": "/outputs/experiments/pick_place_dino728_v132",
+  "output_dir": "/outputs/experiments/pick_place_dino832_v157",
   "rebuild_nominal_cache": false,
+  "dino_threshold_scale": 1.1,
   "stage_constrained_matching": true,
+  "dino_metric": "euclidean",
+  
+  "dino_benchmark": {
+  "folders": [
+    "Nominal/setting 1",
+    "Nominal/setting 2",
+    "Nominal/ft_nominal",
+    "Failure_8_unrelated_object"
+  ]
+  },
+  
+
+  "vlm_benchmark": {
+    "threshold_search": false,
+    "train_lora": false,
+    "decision_mode": "timeline",
+  "folders": [
+    "Nominal/setting 1",
+    "Nominal/setting 2",
+    "Nominal/ft_nominal",
+    "Failure_1_grasp_miss",
+    "Failure_2_slip_at_start",
+    "Failure_3_wrong_placement_and_container_side_contact",
+    "Failure_4_wrong_placement_no_container_side_contact",
+    "Failure_8_unrelated_object",
+    "ft2_slip_at_start",
+    "ft3_instrument_hits_container_on_drop",
+    "ft4_besides_container"
+    
+  ]
+  },
+
+
+  
+  
   "rynnbrain": {
-    "source": "rosbag",
-    "task_description": "Pick the scissor from its initial location and place it inside the blue basket.",
-    "reference_bags": [
-      "/data/Nominal/setting 1/nominal_1.1"
-    ],
-    "input_modes": [
-      "raw"
-    ],
-    "inference": {
-      "feature_only": true
-    },
-    "num_frames": 8,
-    "ground_truth_label": "fail",
-    "sampling_start_sec": 1.0,
-    "sampling_end_sec": null,
-    "model": {
-      "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",
-      "lora_adapter_path": "/outputs/experiments/pick_place_dino728_v102/rynnbrain/lora_adapter",
-      "dtype": "float16",
-      "device_map": "auto",
-      "max_image_size": 640,
-      "input_device": "cuda",
-      "trust_remote_code": true
-    },
-    "generation": {
-      "max_new_tokens": 280,
-      "do_sample": false,
-      "enable_thinking": false
-    },
-    "lora": {
-      "rank": 8,
-      "alpha": 16,
-      "dropout": 0.05,
-      "target_modules": [
-        "q_proj",
-        "v_proj"
-      ],
-      "training": {
-        "normal_bags": [
-          "/data/Nominal/setting 1/nominal_1.16",
-          "/data/Nominal/setting 1/nominal_1.17",
-          "/data/Nominal/setting 1/nominal_1.18",
-          "/data/Nominal/setting 1/nominal_1.19",
-          "/data/Nominal/setting 1/nominal_1.20",
-          "/data/Nominal/setting 1/nominal_1.21",
-          "/data/Nominal/setting 1/nominal_1.22",
-          "/data/Nominal/setting 1/nominal_1.23",
-          "/data/Nominal/setting 1/nominal_1.24",
-          "/data/Nominal/setting 1/nominal_1.25",
-          "/data/Nominal/setting 1/nominal_1.26",
-          "/data/Nominal/setting 1/nominal_1.27",
-          "/data/Nominal/setting 1/nominal_1.28",
-          "/data/Nominal/setting 1/nominal_1.29",
-          "/data/Nominal/setting 1/nominal_1.30",
-          "/data/Nominal/setting 2/nominal_2.1",
-          "/data/Nominal/setting 2/nominal_2.2",
-          "/data/Nominal/setting 2/nominal_2.3",
-          "/data/Nominal/setting 2/nominal_2.4",
-          "/data/Nominal/setting 2/nominal_2.5",
-          "/data/Nominal/setting 2/nominal_2.6",
-          "/data/Nominal/setting 2/nominal_2.7"
+
+        "online_replay": {
+        "interval_mode": "adaptive",
+        "interval_sec": 3.0,
+        "max_observations": null,
+        "stop_on_alarm": false
+         },
+
+        "vlm_check": {
+          "camera_topic": "/flange_camera/cam_230422272745/color/image_raw/compressed",
+          "item": "a metal surgical instrument",
+          "destination": "a blue surface",
+          "model": {
+            "device_map": {"": "cuda:0"}
+          }
+        },
+        "ts_check": {
+          "enabled": true
+        },
+
+        "execution_interval_sec": null,
+        "prompt_variant": "A",
+        "source": "rosbag",
+        "task_description": "Pick the scissor from its initial location and place it inside the blue basket.",
+        "reference_bags": [
+          "/data/Nominal/setting 1/nominal_1.1"
         ],
-        "failure_bags": [
-          "/data/Failure_1_grasp_miss/failure_1.1",
-          "/data/Failure_1_grasp_miss/failure_1.2",
-          "/data/Failure_1_grasp_miss/failure_1.3",
-          "/data/Failure_1_grasp_miss/failure_1.4",
-          "/data/Failure_1_grasp_miss/failure_1.5",
-          "/data/Failure_1_grasp_miss/failure_1.6",
-          "/data/Failure_1_grasp_miss/failure_1.7",
-          "/data/Failure_1_grasp_miss/failure_1.8",
-          "/data/Failure_1_grasp_miss/failure_1.9",
-          "/data/Failure_1_grasp_miss/failure_1.10",
-          "/data/Failure_2_slip_at_start/failure_2.1",
-          "/data/Failure_2_slip_at_start/failure_2.2",
-          "/data/Failure_2_slip_at_start/failure_2.3",
-          "/data/Failure_2_slip_at_start/failure_2.4",
-          "/data/Failure_2_slip_at_start/failure_2.5",
-          "/data/Failure_2_slip_at_start/failure_2.6",
-          "/data/Failure_2_slip_at_start/failure_2.7",
-          "/data/Failure_2_slip_at_start/failure_2.8",
-          "/data/Failure_2_slip_at_start/failure_2.9",
-          "/data/Failure_2_slip_at_start/failure_2.10",
-          "/data/Failure_2_slip_at_start/failure_2.11"
+        "input_modes": [
+          "raw"
         ],
-        "validation_normal_bags": [],
-        "validation_failure_bags": [],
-        "input_mode": "raw",
-        "epochs": 3,
-        "learning_rate": 0.0001,
-        "gradient_accumulation_steps": 8,
-        "precision": "bfloat16",
-        "gradient_checkpointing": true,
-        "max_tokens": 16384,
-        "class_weight": "balanced",
-        "seed": 42,
-        "temporal_supervision": true
-      }
-    },
-    "cop_vectors": {
-      "enabled": true
-    },
-    "cop_classifier": {
-      "enabled": true,
-      "method": "logistic",
-      "plot_timeline": true,
-      "knn": {
-        "n_neighbors": 3,
-        "threshold_quantile": 0.95
-      },
-      "train_on_benchmark": true,
-      "model_paths": {
-        "raw": "/outputs/experiments/pick_place_dino728_v131/cop_classifier/raw_logistic.npz"
-      },
-      "logistic_onset": {
-        "enabled": true
-      },
-      "training": {
-        "input_mode": "raw",
-        "normal_bags": [
-          "/data/Nominal/setting 1/nominal_1.16",
-          "/data/Nominal/setting 1/nominal_1.17",
-          "/data/Nominal/setting 1/nominal_1.18",
-          "/data/Nominal/setting 1/nominal_1.19",
-          "/data/Nominal/setting 1/nominal_1.20",
-          "/data/Nominal/setting 1/nominal_1.21",
-          "/data/Nominal/setting 1/nominal_1.22",
-          "/data/Nominal/setting 1/nominal_1.23",
-          "/data/Nominal/setting 1/nominal_1.24",
-          "/data/Nominal/setting 1/nominal_1.25",
-          "/data/Nominal/setting 1/nominal_1.26",
-          "/data/Nominal/setting 1/nominal_1.27",
-          "/data/Nominal/setting 1/nominal_1.28",
-          "/data/Nominal/setting 1/nominal_1.29",
-          "/data/Nominal/setting 1/nominal_1.30",
-          "/data/Nominal/setting 2/nominal_2.1",
-          "/data/Nominal/setting 2/nominal_2.2",
-          "/data/Nominal/setting 2/nominal_2.3",
-          "/data/Nominal/setting 2/nominal_2.4",
-          "/data/Nominal/setting 2/nominal_2.5",
-          "/data/Nominal/setting 2/nominal_2.6",
-          "/data/Nominal/setting 2/nominal_2.7"
-        ],
-        "failure_bags": [
-          "/data/Failure_1_grasp_miss/failure_1.1",
-          "/data/Failure_1_grasp_miss/failure_1.2",
-          "/data/Failure_1_grasp_miss/failure_1.3",
-          "/data/Failure_1_grasp_miss/failure_1.4",
-          "/data/Failure_1_grasp_miss/failure_1.5",
-          "/data/Failure_1_grasp_miss/failure_1.6",
-          "/data/Failure_1_grasp_miss/failure_1.7",
-          "/data/Failure_1_grasp_miss/failure_1.8",
-          "/data/Failure_1_grasp_miss/failure_1.9",
-          "/data/Failure_1_grasp_miss/failure_1.10",
-          "/data/Failure_2_slip_at_start/failure_2.1",
-          "/data/Failure_2_slip_at_start/failure_2.2",
-          "/data/Failure_2_slip_at_start/failure_2.3",
-          "/data/Failure_2_slip_at_start/failure_2.4",
-          "/data/Failure_2_slip_at_start/failure_2.5",
-          "/data/Failure_2_slip_at_start/failure_2.6",
-          "/data/Failure_2_slip_at_start/failure_2.7",
-          "/data/Failure_2_slip_at_start/failure_2.8",
-          "/data/Failure_2_slip_at_start/failure_2.9",
-          "/data/Failure_2_slip_at_start/failure_2.10"
-        ],
-        "class_weight": "balanced",
-        "regularization_c": 100.0,
-        "threshold": 0.5
-      }
-    }
+        "inference": {
+          "feature_only": true
+        },
+        "num_frames": 8,
+        "ground_truth_label": "fail",
+        "sampling_start_sec": 1.0,
+        "sampling_end_sec": null,
+        "model": {
+              "model_id": "Alibaba-DAMO-Academy/RynnBrain-CoP-8B",
+              "lora_adapter_path": "/outputs/experiments/pick_place_dino832_v147/rynnbrain_benchmark/pipeline_runs/20261027_171509_200140_prompt_a/lora_temporal_adapter",
+              "dtype": "float16",
+              "device_map": "auto",
+              "max_image_size": 640,
+              "input_device": "cuda",
+              "trust_remote_code": true
+               },
+        "generation": {
+          "max_new_tokens": 280,
+          "do_sample": false,
+          "enable_thinking": false
+        },
+        "lora": {
+          "rank": 8,
+          "alpha": 16,
+          "dropout": 0.05,
+          "target_modules": [
+            "q_proj",
+            "v_proj"
+          ],
+          "training": {
+            "normal_bags": [
+              "/data/Nominal/setting 1/nominal_1.16",
+              "/data/Nominal/setting 1/nominal_1.17",
+              
+              "/data/Nominal/setting 1/nominal_1.19",
+              "/data/Nominal/setting 1/nominal_1.20",
+              "/data/Nominal/setting 1/nominal_1.21",
+              "/data/Nominal/setting 1/nominal_1.22",
+              "/data/Nominal/setting 1/nominal_1.23",
+              
+              "/data/Nominal/setting 1/nominal_1.25",
+              "/data/Nominal/setting 1/nominal_1.26",
+              "/data/Nominal/setting 1/nominal_1.27",
+              "/data/Nominal/setting 1/nominal_1.28",
+              
+              "/data/Nominal/setting 1/nominal_1.30",
+              "/data/Nominal/setting 2/nominal_2.1",
+              "/data/Nominal/setting 2/nominal_2.2",
+              
+              "/data/Nominal/setting 2/nominal_2.4",
+              "/data/Nominal/setting 2/nominal_2.5",
+              
+              "/data/Nominal/setting 2/nominal_2.7"
+            ],
+            "failure_bags": [
+              "/data/Failure_1_grasp_miss/failure_1.1",
+              "/data/Failure_1_grasp_miss/failure_1.2",
+              
+              "/data/Failure_1_grasp_miss/failure_1.4",
+              "/data/Failure_1_grasp_miss/failure_1.5",
+              "/data/Failure_1_grasp_miss/failure_1.6",
+              "/data/Failure_1_grasp_miss/failure_1.7",
+              
+              "/data/Failure_1_grasp_miss/failure_1.9",
+              "/data/Failure_1_grasp_miss/failure_1.10",
+              "/data/Failure_2_slip_at_start/failure_2.1",
+              "/data/Failure_2_slip_at_start/failure_2.2",
+              "/data/Failure_2_slip_at_start/failure_2.3",
+              
+              "/data/Failure_2_slip_at_start/failure_2.5",
+              "/data/Failure_2_slip_at_start/failure_2.6",
+              "/data/Failure_2_slip_at_start/failure_2.7",
+              "/data/Failure_2_slip_at_start/failure_2.8",
+              
+              "/data/Failure_2_slip_at_start/failure_2.10",
+              "/data/Failure_2_slip_at_start/failure_2.11"
+            ],
+            "validation_normal_bags": [
+            "/data/Nominal/setting 1/nominal_1.18",
+            "/data/Nominal/setting 1/nominal_1.24",
+            "/data/Nominal/setting 1/nominal_1.29",
+            "/data/Nominal/setting 2/nominal_2.3",
+            "/data/Nominal/setting 2/nominal_2.6"
+          ],
+          "validation_failure_bags": [
+            "/data/Failure_1_grasp_miss/failure_1.3",
+            "/data/Failure_1_grasp_miss/failure_1.8",
+            "/data/Failure_2_slip_at_start/failure_2.4",
+            "/data/Failure_2_slip_at_start/failure_2.9"
+          ],
+            "input_mode": "raw",
+            "epochs": 3,
+            "learning_rate": 0.0001,
+            "gradient_accumulation_steps": 8,
+            "precision": "bfloat16",
+            "gradient_checkpointing": true,
+            "max_tokens": 16384,
+            "class_weight": "balanced",
+            "seed": 42,
+            "temporal_supervision": true
+          }
+        },
+        "cop_vectors": {
+          "enabled": true
+        },
+        "cop_classifier": {
+          "enabled": true,
+          "method": "logistic",
+          "plot_timeline": true,
+          "knn": {
+            "n_neighbors": 3,
+            "threshold_quantile": 0.95
+          },
+          "train_on_benchmark": false,
+          "model_paths": {
+            "raw": "/outputs/experiments/pick_place_dino832_v147/rynnbrain_benchmark/pipeline_runs/20261027_171509_200140_prompt_a/cop_classifier/raw_logistic.npz"
+          },
+          "logistic_onset": {
+            "enabled": true
+          },
+          "training": {
+            "input_mode": "raw",
+            "normal_bags": [
+              "/data/Nominal/setting 1/nominal_1.16",
+              "/data/Nominal/setting 1/nominal_1.17",
+              
+              "/data/Nominal/setting 1/nominal_1.19",
+              "/data/Nominal/setting 1/nominal_1.20",
+              "/data/Nominal/setting 1/nominal_1.21",
+              "/data/Nominal/setting 1/nominal_1.22",
+              "/data/Nominal/setting 1/nominal_1.23",
+              
+              "/data/Nominal/setting 1/nominal_1.25",
+              "/data/Nominal/setting 1/nominal_1.26",
+              "/data/Nominal/setting 1/nominal_1.27",
+              "/data/Nominal/setting 1/nominal_1.28",
+              
+              "/data/Nominal/setting 1/nominal_1.30",
+              "/data/Nominal/setting 2/nominal_2.1",
+              "/data/Nominal/setting 2/nominal_2.2",
+              
+              "/data/Nominal/setting 2/nominal_2.4",
+              "/data/Nominal/setting 2/nominal_2.5",
+              
+              "/data/Nominal/setting 2/nominal_2.7"
+            ],
+            "failure_bags": [
+              "/data/Failure_1_grasp_miss/failure_1.1",
+              "/data/Failure_1_grasp_miss/failure_1.2",
+              
+              "/data/Failure_1_grasp_miss/failure_1.4",
+              "/data/Failure_1_grasp_miss/failure_1.5",
+              "/data/Failure_1_grasp_miss/failure_1.6",
+              "/data/Failure_1_grasp_miss/failure_1.7",
+              
+              "/data/Failure_1_grasp_miss/failure_1.9",
+              "/data/Failure_1_grasp_miss/failure_1.10",
+              "/data/Failure_2_slip_at_start/failure_2.1",
+              "/data/Failure_2_slip_at_start/failure_2.2",
+              "/data/Failure_2_slip_at_start/failure_2.3",
+              
+              "/data/Failure_2_slip_at_start/failure_2.5",
+              "/data/Failure_2_slip_at_start/failure_2.6",
+              "/data/Failure_2_slip_at_start/failure_2.7",
+              "/data/Failure_2_slip_at_start/failure_2.8",
+              
+              "/data/Failure_2_slip_at_start/failure_2.10"
+            ],
+            "class_weight": "balanced",
+            "regularization_c": 100.0,
+            "threshold": 0.75
+          }
+        }
   },
   "dino_calibration_bags": [
-    "/data/Nominal/setting 1/nominal_1.16",
-    "/data/Nominal/setting 1/nominal_1.17",
-    "/data/Nominal/setting 1/nominal_1.18",
-    "/data/Nominal/setting 1/nominal_1.19",
-    "/data/Nominal/setting 1/nominal_1.20",
-    "/data/Nominal/setting 1/nominal_1.21",
-    "/data/Nominal/setting 1/nominal_1.22",
-    "/data/Nominal/setting 1/nominal_1.23",
-    "/data/Nominal/setting 1/nominal_1.24",
-    "/data/Nominal/setting 1/nominal_1.25",
-    "/data/Nominal/setting 1/nominal_1.26",
-    "/data/Nominal/setting 1/nominal_1.27",
-    "/data/Nominal/setting 1/nominal_1.28",
-    "/data/Nominal/setting 1/nominal_1.29",
-    "/data/Nominal/setting 1/nominal_1.30",
-    "/data/Nominal/setting 2/nominal_2.1",
-    "/data/Nominal/setting 2/nominal_2.2",
-    "/data/Nominal/setting 2/nominal_2.3",
-    "/data/Nominal/setting 2/nominal_2.4",
-    "/data/Nominal/setting 2/nominal_2.5",
-    "/data/Nominal/setting 2/nominal_2.6",
-    "/data/Nominal/setting 2/nominal_2.7",
-    "/data/Nominal/setting 2/nominal_2.8",
-    "/data/Nominal/setting 2/nominal_2.9",
-    "/data/Nominal/setting 2/nominal_2.10",
-    "/data/Nominal/setting 2/nominal_2.11"
-  ],
+  ]
 
-  "dino_score_mode": "local",
-  "dino_threshold_scale": 1.0
+  
 }

@@ -54,6 +54,14 @@ def task_questions(task_config: dict, phase: str, trigger: str = 'dino') -> list
     questions += [check_question(check) for check in task_config.get('checks', [])
                   if phase in check.get('phases', ('holding', 'released'))
                   and trigger in check.get('triggers', ('dino',))]
+    if not questions and trigger == 'dino' and task_config.get('instruction'):
+        # A missing phase-specific question must not silently bypass the VLM.
+        # The new name deliberately avoids thresholds calibrated for other questions.
+        questions.append(check_question(dict(
+            name=f'task_context_{phase}', kind='yesno', holds=['no'],
+            question=f'The task is: "{task_config["instruction"]}". '
+                     'Allow normal work in progress; the task need not be finished yet. '
+                     'Is a task-threatening error or an obstruction of the robot or its tool visible in this image?')))
     return questions
 
 

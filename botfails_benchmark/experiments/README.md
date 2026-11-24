@@ -1,5 +1,9 @@
 # BotFails experiment scripts
 
+2026-11-12: `final.sh` now runs only the requested DINO -> VLM cascade and writes `strict_*` outputs.
+The other scripts below document historical experiments. Per-task rule selection (`cv_select.py`)
+and release-only checks are no longer supported by the current cascade.
+
 The exact scripts behind the numbers in `evaluation/FIDeL/improvement/README.md`, kept as they were run. They have the
 evaluation machine's paths near the top of each file, so adapt those before reusing them. The benchmark itself is
 `run_botfails_benchmark.py`.
