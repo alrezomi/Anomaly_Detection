@@ -700,6 +700,7 @@ class ReplayApplication:
             detector = dict(dino=DinoCameraReplay, gmr=GmrOnlineDetector, cascade=CascadeDetector)[kind](self.config, progress)
         self.detector = detector
         self.update(note=getattr(detector, 'note', SAMPLING_NOTE), score_source=detector.score_source,
+                    ts_check=bool(getattr(detector, 'ts_check', False)),
                     dino_cameras=detector.catalogue() if kind in ('dino', 'cascade') else [],
                     score_kind=getattr(detector, 'score_kind', 'knn_distance' if detector.knn else 'failure_probability'),
                     max_frames=getattr(detector, "observation_limit", detector.frame_count),

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from rynnbrain_vlm.cascade import AlarmEpisodes, CascadeDetector, VlmChecker
+from rynnbrain_vlm.cascade import AlarmEpisodes, CascadeDetector, TsAlarmEpisodes, VlmChecker
 
 
 def cascade(above, probability=.2, unpooled=None, boundaries=None):
@@ -33,7 +33,69 @@ def cascade(above, probability=.2, unpooled=None, boundaries=None):
     return detector
 
 
+def ts_cascade(samples, probability=.2, boundaries=None, release=None):
+    """Cascade with TS checks on; the fake GMR returns rows whose sensors alarm as listed per sample."""
+    detector = cascade([], probability=probability, boundaries=boundaries or {1: 0., 2: 15.})
+    detector.ts_check, detector.ts_episodes = True, TsAlarmEpisodes()
+    rows = iter(dict(sensors={name: dict(alarm=on, distance=1., threshold=1.) for name, on in alarms.items()},
+                     alarm_sources=[name for name, on in alarms.items() if on]) for alarms in samples)
+    detector.gmr.append = lambda *_: (next(rows), None, None)
+    detector.gmr.release_result = release
+    return detector
+
+
 class CascadeTests(unittest.TestCase):
+    def test_ts_alarms_are_checked_at_start_and_again_while_they_last(self):
+        rule = TsAlarmEpisodes()
+        due = [rule.update({'position': {'alarm': t < 13}}, 2 if t < 12 else 3, float(t)) for t in range(30)]
+        # Start, re-checks every 2 s, a new episode on the stage change, nothing once the alarm dropped.
+        self.assertEqual({t: d for t, d in enumerate(due) if d},
+                         {0: [('position', 0)], 2: [('position', 1)], 4: [('position', 2)], 6: [('position', 3)],
+                          8: [('position', 4)], 10: [('position', 5)], 12: [('position', 0)]})
+        rule = TsAlarmEpisodes()
+        release = dict(status='released', alarm=True, time_sec=40.)
+        due = [rule.update({}, 3, t, release) for t in (40.5, 41., 41.5)]
+        self.assertEqual(due, [[], [('release', 0)], []])  # Once, 1 s after the opening.
+
+    def test_empty_grip_asks_whether_the_object_is_held_even_before_the_grasp_marker(self):
+        detector = ts_cascade([{'gripper_empty': True}], boundaries={1: 0., 2: 30.})
+        with patch('rosbag_io.decode_image_message', side_effect=lambda _m, t: Image.new('RGB', (8, 8))):
+            detector.pending = ('gmr', {})
+            row, _, _ = detector.append(None, 20.)
+        check = row['vlm_check']
+        self.assertEqual((check['trigger']['source'], check['trigger']['alarms'], check['stage'], check['goal_stage']),
+                         ('ts', ['gripper_empty'], 1, 2))
+        self.assertIn('held between the two white fingers', check['questions'][0])
+        self.assertEqual((check['verdict'], detector.halted, detector.termination_reason),
+                         ('failure', True, 'vlm_confirmed_failure'))
+
+    def test_a_ts_alarm_is_ignored_when_the_image_shows_the_sub_goal_holds(self):
+        detector = ts_cascade([{'position': True, 'force': False}] * 3, probability=.9)
+        with patch('rosbag_io.decode_image_message', side_effect=lambda _m, t: Image.new('RGB', (8, 8))):
+            for t in (20., 20.1, 20.2):
+                detector.pending = ('gmr', {})
+                row, _, _ = detector.append(None, t)
+        self.assertEqual(len(detector.queries), 1)  # Only at the start; the re-check comes 2 s later.
+        self.assertEqual((detector.queries[0]['verdict'], detector.halted), ('safe', False))
+        self.assertIsNone(row['vlm_check'])
+
+    def test_a_position_alarm_before_the_grasp_is_noted_but_not_asked(self):
+        detector = ts_cascade([{'position': True}] * 30, boundaries={1: 0., 2: 30.})
+        for t in range(30):
+            detector.pending = ('gmr', {})
+            detector.append(None, 20. + t / 10)
+        self.assertEqual(len(detector.queries), 1)
+        self.assertEqual((detector.queries[0]['verdict'], detector.queries[0]['questions']), ('safe', []))
+        detector.checker.model.answer_probability.assert_not_called()
+
+    def test_ts_checks_are_off_unless_configured(self):
+        detector = ts_cascade([{'gripper_empty': True}])
+        detector.ts_check = False
+        detector.pending = ('gmr', {})
+        row, _, _ = detector.append(None, 20.)
+        self.assertIsNone(row['vlm_check'])
+        self.assertEqual(detector.queries, [])
+
     def test_a_stage_change_rearms_a_persisting_alarm(self):
         episodes = AlarmEpisodes()
         stages = [2] * 5 + [3] * 4

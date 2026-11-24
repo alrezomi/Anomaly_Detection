@@ -1893,13 +1893,56 @@ Use the **Detector** selector before starting an execution:
   changed: DINO often stays above threshold through the release, and without
   this re-check no check came after a misplaced release. The run ends at
   stage 3 + `POST_STAGE3_SEC`, like GMR, so the robot returning home cannot
-  trigger a check. GMR is displayed but does not trigger checks yet.
+  trigger a check.
   `vlm_check.model` overrides model settings for the check: on Jetson Thor
   `device_map: "auto"` sees only free, not reclaimable, memory and offloads
   layers to the CPU, so the config pins the check model to `cuda:0`.
 
-  The GUI shows the VLM check (trigger, gripper frames, probabilities) and one
-  compact row per camera: camera replay, DINO heatmap, DINO scores and the GMR
+  **TS alarm checks** (`rynnbrain.ts_check.enabled: true`). TS alarms ask the
+  VLM too; the vision path above is unchanged. A TS alarm says *when* to look:
+  the VLM answers a question about the visible state that alarm concerns and
+  ignores the alarm unless the gripper camera shows a failure
+  (`ts_alarm_questions` in `prompts.py`):
+  - **empty grip** (new GMR alarm source `gripper_empty`, needs the gripper
+    topic): the Hand-E encoder reads its fully closed, empty value
+    (`GRIPPER_EMPTY_COUNT` = 248 of 255 in `run_time_series_test.py`; normal
+    holds read 222-238) while the object should be held, from the first closing
+    past half travel until the release or stage 3 → "is the object held
+    between the fingers?", also before the grasp marker (the fingers closed);
+  - **release position** (the existing release check) → the placement
+    question, once, `RELEASE_CHECK_DELAY_SEC` (1 s) after the opening;
+  - **position GMR, force safety limit**, other GMR sensors → the sub-goal of
+    the current stage; before the grasp nothing is asked, as for DINO.
+
+  A TS alarm is checked when it starts and again every `TS_RECHECK_SEC` (2 s)
+  while it lasts, at most `TS_MAX_RECHECKS` (5) times; it is re-armed when it
+  drops or the stage changes (`TsAlarmEpisodes` in `cascade.py`). The re-checks
+  matter: 0.4 s after an empty grasp the instrument still lies just below the
+  fingers and looks held; seconds later it is clearly left behind. Alarms that
+  start at the same sample and concern the same sub-goal share one check. No TS
+  values go into the prompt: told the sensor readings, the VLM trusted them over
+  the image. Alarm-specific wordings ("three choices: held / closed on nothing /
+  beside the fingers", "is it stuck?", "is it pressing on something?") were
+  tested and are not used: the first stopped 23-33% of correct holds, the others
+  did not separate real failures from harmless contacts. Study and numbers:
+  `evaluation/ts_vlm_fusion/README.md` (study 3). Benchmark on the saved
+  `pick_place_dino832_v141.2` run (144 bags, Euclidean): DINO + TS + VLM check
+  stops 78 of 81 failures (DINO + VLM check: 73) and 4 of 63 normal runs (1),
+  median alarm 0.6 s before the failure marker (1.0 s after). On ft_nominal the
+  false alarms stay at 1 of 15; the 3 new ones are setting-1 runs, whose GMR is
+  calibrated on this config's ft_nominal runs (about 5 TS checks per normal
+  setting-1/2 run, 0.2 on ft_nominal). With `enabled: false` (or no `ts_check`
+  block) the cascade behaves as before.
+
+  The release check now needs one confirming gripper reading (about 0.1 s):
+  single 0.0 messages in nominal runs (ft_nominal 3.28, 3.34) were taken as the
+  release. This changed the GMR cache protocol (`causal_stage_1_to_3_gmr_v7`),
+  so the nominal GMR model is recalibrated once.
+
+  The GUI shows the VLM check (trigger, gripper frames, probabilities), a table of
+  every check in the run (trigger, what was checked, probability, ignored or
+  stop; click a row to see its frames), green/red markers on the GMR charts where
+  a TS alarm asked the VLM, and one compact row per camera: camera replay, DINO heatmap, DINO scores and the GMR
   time series (no matched nominal frame). DINO and GMR rows are saved to
   `online_scores_dino.csv` and `online_scores_gmr.csv`. Checks are saved as
   `vlm_checks` in `online_results.json`, with the frames as
@@ -1914,7 +1957,11 @@ Use the **Detector** selector before starting an execution:
   change, until stage 3 + `POST_STAGE3_SEC`, causal stage clock); every new
   alarm episode asks the VLM exactly as the live replay does, with the
   gripper-camera frames the replay would have buffered. Two setups are scored
-  on the same bags: the saved DINO decision and DINO + VLM check. Results go
+  on the same bags: the saved DINO decision and DINO + VLM check; with
+  `rynnbrain.ts_check.enabled` a third, DINO + TS + VLM check, replays GMR
+  causally on each bag (prepared as the GUI prepares it, TS signal
+  `pose_force`) and asks the TS checks in time order with the DINO checks.
+  Results go
   to `<dino run>/vlm_check/` or `--output`: `SUMMARY.md`, `metrics.csv`,
   `metrics_<metric>.png`, `bag_results.csv`, and `checks.jsonl` + `frames/`
   with every question, answer and input frame. Answers are cached, so an

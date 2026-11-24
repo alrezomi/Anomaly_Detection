@@ -200,8 +200,8 @@ class OnlineGmrTests(unittest.TestCase):
             events += [(round(t, 9), 'pose', pose(t)) for t in np.arange(0., 1.6, .05)]
             events += [(.02, 'gripper', {'gripper_position': .01}), (.2, 'gripper', {'gripper_position': .9}),
                        (1.1, 'gripper', {'gripper_position': .9})]
-            if opens:
-                events += [(1.32, 'gripper', {'gripper_position': .05})]
+            if opens:  # The opening is confirmed by the next reading.
+                events += [(1.32, 'gripper', {'gripper_position': .05}), (1.42, 'gripper', {'gripper_position': .04})]
             sampler = CausalSamples(['pose'], release=True)
             packets = list(sampler.packets(iter(sorted(events, key=lambda e: e[0]))))
             return sampler, packets
@@ -213,10 +213,44 @@ class OnlineGmrTests(unittest.TestCase):
         self.assertEqual(samples[-1]['gripper_position'], .9)
         self.assertEqual([k for _, k, _ in packets][-1], 'release')
         self.assertEqual(sampler.release['stage'], 3)
-        self.assertAlmostEqual(sampler.release['position_x'], 1.3)
+        self.assertAlmostEqual(sampler.release['time'], 1.42)
+        self.assertAlmostEqual(sampler.release['position_x'], 1.4)
         sampler, packets = run(False)
         self.assertIsNone(sampler.release)
         self.assertEqual(sampler.clock.stage, 3)
+
+    def test_a_single_low_gripper_reading_is_not_a_release(self):
+        pose = lambda t: dict(position_x=t, position_y=0., position_z=0., pose_frame='base')
+        events = [(0., 'stage', '1'), (.5, 'stage', '2'), (1., 'stage', '3')]
+        events += [(round(t, 9), 'pose', pose(t)) for t in np.arange(0., 1.6, .05)]
+        # Nominal runs contain lone 0.0 gripper messages while the gripper holds the object.
+        events += [(.02, 'gripper', {'gripper_position': .01}), (.2, 'gripper', {'gripper_position': .9}),
+                   (.62, 'gripper', {'gripper_position': 0.}),
+                   (.72, 'gripper', {'gripper_position': .9}), (1.3, 'gripper', {'gripper_position': .05}),
+                   (1.4, 'gripper', {'gripper_position': .05})]
+        sampler = CausalSamples(['pose'], release=True)
+        packets = list(sampler.packets(iter(sorted(events, key=lambda e: e[0]))))
+        releases = [p for _, k, p in packets if k == 'release']
+        self.assertEqual(len(releases), 1)
+        self.assertAlmostEqual(releases[0]['time'], 1.4)
+        samples = [p for _, k, p in packets if k == 'sample']
+        # The object should be held from the first closing until the release.
+        self.assertEqual([r['gripper_holding'] for r in samples if round(r['time'], 6) in (.1, .3, .7)], [False, True, True])
+
+    def test_empty_grip_alarms_only_while_the_object_should_be_held(self):
+        from time_series_gmr_scripts import run_time_series_test as settings
+        detector = GmrOnlineDetector.__new__(GmrOnlineDetector)
+        detector.sensors, detector.models, detector.thresholds, detector.alarms = {}, {}, {}, {}
+        detector.durations, detector.force_limit, detector.step, detector.signal_mode = [1., 1., 1.], 10., 0, 'pose_force'
+        empty = settings.GRIPPER_EMPTY_COUNT / 255
+        results = []
+        for reading, holding, stage in ((empty, True, 2), (230 / 255, True, 2), (empty, False, 2), (empty, True, 3)):
+            detector.pending = dict(time=.5, stage=stage, stage_elapsed=.1, force_x=0., force_y=0., force_z=1.,
+                                    gripper_position=reading, gripper_holding=holding)
+            row, _, _ = detector.append(None, .5)
+            results.append((row['sensors']['gripper_empty']['alarm'], row['alarm_sources'], row['score_sensor']))
+        self.assertEqual(results[0], (True, ['gripper_empty'], 'force'))  # A rule: never the displayed GMR score.
+        self.assertEqual([r[0] for r in results[1:]], [False, False, False])
 
     def test_scoring_continues_for_the_window_after_stage_three(self):
         pose = lambda t: dict(position_x=t, position_y=0., position_z=0., pose_frame='base')

@@ -85,6 +85,13 @@ MAJORITY_VOTES = 6
 # marker. Nominal training uses the same window as a third progress interval.
 POST_STAGE3_SEC = 5.0
 
+# Empty-grip check (online GMR, when the gripper is recorded): the Robotiq Hand-E encoder reads 248 of 255
+# when its fingers are fully closed with nothing between them (seen at the end of nominal_2.1; while carrying,
+# the normal runs read 222-238). Reaching it while the object should be held (from the first
+# closing past half travel until the release or the stage-3 marker) raises the 'gripper_empty' alarm.
+# Another gripper needs its own empty-closed reading here.
+GRIPPER_EMPTY_COUNT = 248
+
 
 # ============================================================
 # 5. OUTPUT PATHS

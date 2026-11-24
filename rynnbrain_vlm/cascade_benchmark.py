@@ -10,7 +10,12 @@ buffered. A failure answer is the bag's alarm; a safe answer lets the
 execution continue.
 
 Two setups are reported on the same bags: DINO alone (the saved run's own
-decision) and DINO with the VLM check.
+decision) and DINO with the VLM check. With rynnbrain.ts_check.enabled a third
+one, DINO + TS with the VLM check, adds the TS alarm checks of the live
+cascade: GMR is replayed causally on each bag (prepared exactly as the GUI
+prepares it, default signal mode TCP position + force), TsAlarmEpisodes decides
+when a TS alarm asks the VLM, and DINO and TS checks are asked in time order
+until the first failure answer.
 
 Results go to <dino run>/vlm_check/ unless another output directory is given.
 VLM answers are cached in checks.jsonl, keyed by bag, alarm and the exact
@@ -26,12 +31,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .cascade import ALARM_RUN, CHECK_OFFSETS_SEC, SUBGOAL_THRESHOLD, AlarmEpisodes, VlmChecker, current_stage
+from .cascade import (ALARM_RUN, CHECK_OFFSETS_SEC, RELEASE_CHECK_DELAY_SEC, SUBGOAL_THRESHOLD, TS_MAX_RECHECKS,
+                      TS_RECHECK_SEC, AlarmEpisodes, TsAlarmEpisodes, VlmChecker, current_stage, group_ts_alarms,
+                      ts_trigger)
 
-SAVED, CHECKED = 'dino_alone', 'dino_vlm_check'
+SAVED, CHECKED, TS_CHECKED = 'dino_alone', 'dino_vlm_check', 'dino_ts_vlm_check'
 SETUPS = (SAVED, CHECKED)
-COLORS = {SAVED: '#2878b5', CHECKED: '#c87925'}
-LABELS = {SAVED: 'DINO alone', CHECKED: 'DINO + VLM check'}
+COLORS = {SAVED: '#2878b5', CHECKED: '#c87925', TS_CHECKED: '#3a8f5c'}
+LABELS = {SAVED: 'DINO alone', CHECKED: 'DINO + VLM check', TS_CHECKED: 'DINO + TS + VLM check'}
 
 
 def stage_boundaries(bag, stage_topic):
@@ -93,6 +100,42 @@ def check_key(identity, bag, episode, boundaries):
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+def ts_check_key(identity, bag, event, boundaries):
+    from .prompts import ts_alarm_questions
+    payload = dict(identity=identity, bag=bag, time_sec=round(event['time_sec'], 6), alarms=event['alarms'],
+                   rechecks=event['rechecks'], boundaries={str(k): round(v, 6) for k, v in boundaries.items()},
+                   questions=ts_alarm_questions(event['alarms'][0], event['stage'], identity['item'],
+                                                identity['destination'])[1],
+                   ts_rule=dict(recheck_sec=TS_RECHECK_SEC, max_rechecks=TS_MAX_RECHECKS,
+                                release_delay_sec=RELEASE_CHECK_DELAY_SEC))
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def ts_alarm_events(gmr, bag, item, destination, progress, stop):
+    """The TS alarm checks the live cascade asks in this bag: a causal GMR replay (prepared as in the GUI) and
+    TsAlarmEpisodes. Each event is one check (alarms about the same sub-goal at one sample share it)."""
+    from rosbag_io import iter_ts_replay_events
+    from time_series_gmr_scripts.online_gmr import CausalSamples
+    from time_series_gmr_scripts import run_time_series_test as settings
+    gmr.reset(bag)
+    gmr.prepare_replay(progress, stop)
+    sampler = CausalSamples(gmr.sample_kinds, stop, release=gmr.release_check, post_sec=settings.POST_STAGE3_SEC)
+    sampler.columns, sampler.sensors, sampler.pose_frame = gmr.columns, gmr.sensors, gmr.pose_frame
+    gmr.sampler = sampler
+    rule, events = TsAlarmEpisodes(), []
+    for timestamp, kind, payload in sampler.packets(iter_ts_replay_events(bag, gmr.topics, gmr.stage_topic, None)):
+        if kind == 'release':
+            gmr.check_release(payload)
+        elif kind == 'sample':
+            gmr.pending = payload
+            row, _, _ = gmr.append(None, timestamp)
+            stage = current_stage(sampler.clock.boundaries, timestamp)
+            for alarms in group_ts_alarms(rule.update(row['sensors'], stage, timestamp, gmr.release_result),
+                                          stage, item, destination):
+                events.append(ts_trigger(alarms, timestamp, stage))
+    return events
+
+
 def timing(item, first):
     """Same timing categories as the DINO benchmark."""
     onset = item.get('recorded_failure_time_sec')
@@ -120,7 +163,8 @@ class CheckCache:
         self.new += 1
 
 
-def run(config, dino_run, metrics=None, limit=None, progress=print, output=None, per_folder=None):
+def run(config, dino_run, metrics=None, limit=None, progress=print, output=None, per_folder=None,
+        ts_signal='pose_force'):
     from .run import _slug
     from time_series_gmr_scripts import run_time_series_test as settings
     from vision_dinov2.benchmark_report import metrics_table
@@ -149,6 +193,13 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
                      for row in rows.head(per_folder).to_dict('records')]
     if limit:
         evaluated = evaluated[:limit]
+    ts_check = bool((config['rynnbrain'].get('ts_check') or {}).get('enabled', False))
+    setups = (SAVED, CHECKED, TS_CHECKED) if ts_check else SETUPS
+    gmr, ts_notes, stop = None, {}, __import__('threading').Event()
+    if ts_check:
+        from time_series_gmr_scripts.online_gmr import GmrOnlineDetector
+        gmr = GmrOnlineDetector(config, progress)
+        gmr.signal_mode = ts_signal
     outcomes, statuses = {}, {}
     for number, item in enumerate(evaluated, 1):
         bag, name = item['bag_path'], f"{item['folder']}/{item['bag_name']}"
@@ -161,36 +212,57 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
         statuses[bag], buffer, lines = 'ok', None, []
         episodes_by_metric = {metric: alarm_episodes(timelines[metric, bag], boundaries, scale, settings.POST_STAGE3_SEC)
                               if (metric, bag) in timelines else [] for metric in metrics}
+        ts_events = []
+        if gmr is not None:
+            try:
+                # GMR preparation messages (training, missing topics) are shown for the first bag only.
+                ts_events = ts_alarm_events(gmr, bag, identity['item'], identity['destination'],
+                                            progress if number == 1 else (lambda _message: None), stop)
+            except Exception as error:
+                ts_notes[bag] = str(error)
+                progress(f'[{number}/{len(evaluated)}] {name}: no TS replay ({error})')
         for metric, episodes in episodes_by_metric.items():
-            checks, alarm = [], None
-            for episode in episodes:
-                key = check_key(identity, bag, episode, boundaries)
-                if key not in cache.records:
-                    if checker is None:
-                        checker = VlmChecker(config, progress)
-                    if buffer is None:  # Read once per bag, up to its last possible check.
-                        until = max(e['time_sec'] for found in episodes_by_metric.values() for e in found)
-                        buffer = camera_frames(bag, stage_topic, checker.topic, until)
-                    check, images = checker.ask([f for f in buffer if f[0] <= episode['time_sec'] + 1e-9],
-                                                boundaries, episode['time_sec'])
-                    directory = output / 'frames' / _slug(name)
-                    directory.mkdir(parents=True, exist_ok=True)
-                    files = []
-                    for k, (_, image) in enumerate(images, 1):
-                        image = image.copy()
-                        image.thumbnail((checker.model.max_image_size, checker.model.max_image_size))
-                        files.append(str((directory / f"t{episode['time_sec']:07.2f}_frame_{k}.jpg").relative_to(output)))
-                        image.save(output / files[-1], quality=85)
-                    cache.add(dict(key=key, bag=bag, folder=item['folder'], alarm=episode, boundaries=boundaries,
-                                   frame_files=files, created_utc=datetime.now(timezone.utc).isoformat(), **check))
-                record = cache.records[key]
-                checks.append(dict(time_sec=episode['time_sec'], verdict=record['verdict']))
-                if record['verdict'] == 'failure':
-                    alarm = episode['time_sec']
-                    break
-            outcomes[metric, bag] = dict(episodes=episodes, checks=checks, alarm=alarm)
-            lines.append(f"{metric}: {len(episodes)} episode(s), VLM "
-                         + (', '.join(f"{c['verdict']}@{c['time_sec']:.1f}s" for c in checks) or 'not asked'))
+            for setup in setups[1:]:
+                events = [dict(e, source='dino') for e in episodes]
+                if setup == TS_CHECKED:
+                    events = sorted(events + ts_events, key=lambda e: (e['time_sec'], e['source']))
+                checks, alarm = [], None
+                for event in events:
+                    dino = event['source'] == 'dino'
+                    key = (check_key(identity, bag, event, boundaries) if dino else
+                           ts_check_key(identity, bag, event, boundaries))
+                    if key not in cache.records:
+                        if checker is None:
+                            checker = VlmChecker(config, progress)
+                        if buffer is None:  # Read once per bag, up to its last possible check.
+                            until = max(e['time_sec'] for e in [*ts_events, *[x for found in episodes_by_metric.values()
+                                                                              for x in found]])
+                            buffer = camera_frames(bag, stage_topic, checker.topic, until)
+                        frames = [f for f in buffer if f[0] <= event['time_sec'] + 1e-9]
+                        check, images = (checker.ask(frames, boundaries, event['time_sec']) if dino else
+                                         checker.ask(frames, boundaries, event['time_sec'], alarm=event['alarms'][0]))
+                        directory = output / 'frames' / _slug(name)
+                        directory.mkdir(parents=True, exist_ok=True)
+                        files = []
+                        prefix = 'dino' if dino else 'ts_' + '_'.join(event['alarms'])
+                        for k, (_, image) in enumerate(images, 1):
+                            image = image.copy()
+                            image.thumbnail((checker.model.max_image_size, checker.model.max_image_size))
+                            files.append(str((directory / f"t{event['time_sec']:07.2f}_{prefix}_frame_{k}.jpg").relative_to(output)))
+                            image.save(output / files[-1], quality=85)
+                        cache.add(dict(key=key, bag=bag, folder=item['folder'], alarm=event, boundaries=boundaries,
+                                       frame_files=files, created_utc=datetime.now(timezone.utc).isoformat(), **check))
+                    record = cache.records[key]
+                    checks.append(dict(time_sec=event['time_sec'], source=event['source'],
+                                       alarms=event.get('alarms'), verdict=record['verdict']))
+                    if record['verdict'] == 'failure':
+                        alarm = event['time_sec']
+                        break
+                outcomes[metric, bag, setup] = dict(episodes=events, checks=checks, alarm=alarm)
+                asked = [c for c in checks if c['source'] == ('dino' if setup == CHECKED else 'ts')]
+                lines.append(f"{metric} {LABELS[setup]}: " + (', '.join(
+                    f"{c['verdict']}@{c['time_sec']:.1f}s" + ('' if c['source'] == 'dino' else '(' + '+'.join(c['alarms']) + ')')
+                    for c in (checks if setup == CHECKED else asked)) or 'no checks'))
         progress(f'[{number}/{len(evaluated)}] {name}: ' + ' | '.join(lines))
 
     # One row per metric, setup and bag; every setup is scored on the same bags.
@@ -201,26 +273,27 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
             continue  # Outside --limit or --per-folder.
         status = statuses.get(bag, item['status'])
         rows.append(dict(item, operating_point=SAVED, status=status))
-        outcome = outcomes.get((item['metric'], bag))
-        row = dict(item, operating_point=CHECKED, status=status, alarm_policy=CHECKED, predicted_decision=None,
-                   correct=None, first_alarm_time_sec=None, timing_status='not_scored', failure_time_error_sec=None,
-                   alarm_episodes=None, vlm_checks=None)
-        if status == 'ok' and outcome is not None:
-            first = outcome['alarm']
-            predicted = 'failure' if first is not None else 'success'
-            row.update(predicted_decision=predicted, first_alarm_time_sec=first,
-                       correct=(predicted == 'failure') == (item['ground_truth_label'] == 'fail'),
-                       alarm_episodes=json.dumps([round(e['time_sec'], 2) for e in outcome['episodes']]),
-                       vlm_checks=json.dumps(outcome['checks']))
-            row['timing_status'], row['failure_time_error_sec'] = timing(item, first)
-        rows.append(row)
+        for setup in setups[1:]:
+            outcome = outcomes.get((item['metric'], bag, setup))
+            row = dict(item, operating_point=setup, status=status, alarm_policy=setup, predicted_decision=None,
+                       correct=None, first_alarm_time_sec=None, timing_status='not_scored', failure_time_error_sec=None,
+                       alarm_episodes=None, vlm_checks=None)
+            if status == 'ok' and outcome is not None:
+                first = outcome['alarm']
+                predicted = 'failure' if first is not None else 'success'
+                row.update(predicted_decision=predicted, first_alarm_time_sec=first,
+                           correct=(predicted == 'failure') == (item['ground_truth_label'] == 'fail'),
+                           alarm_episodes=json.dumps([round(e['time_sec'], 2) for e in outcome['episodes']]),
+                           vlm_checks=json.dumps(outcome['checks']))
+                row['timing_status'], row['failure_time_error_sec'] = timing(item, first)
+            rows.append(row)
     results = pd.DataFrame(rows)
     results.to_csv(output / 'bag_results.csv', index=False)
     table = metrics_table(results, folders)
     table.insert(2, 'setup', table.operating_point.map(LABELS))
     table.to_csv(output / 'metrics.csv', index=False)
     for metric in metrics:
-        plot_metrics(table[table.metric.eq(metric)], output / f'metrics_{metric}.png', metric, scale)
+        plot_metrics(table[table.metric.eq(metric)], output / f'metrics_{metric}.png', metric, scale, setups)
     checked = [r for r in cache.records.values() if r['bag'] in statuses]
     asked = [r for r in checked if r.get('questions')]  # Stage 1 alarms are answered without the VLM.
     summary = dict(dino_run=str(dino_run), metrics=metrics, configured_scale=scale, dino_trigger_score='pooled',
@@ -230,6 +303,9 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
                    vlm_checks=len(checked), vlm_checks_asked=len(asked), vlm_checks_new=cache.new,
                    vlm_verdicts={v: sum(r['verdict'] == v for r in checked) for v in ('safe', 'failure')},
                    vlm_sec_median=float(np.median([r['vlm_sec'] for r in asked])) if asked else None,
+                   setups=list(setups), ts_check=ts_check, ts_signal=ts_signal if ts_check else None,
+                   ts_checks=sum(r['alarm'].get('source') == 'ts' for r in checked),
+                   ts_not_replayed=ts_notes,
                    limit=limit, per_folder=per_folder, elapsed_sec=time.monotonic() - started,
                    finished_utc=datetime.now(timezone.utc).isoformat())
     (output / 'run.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
@@ -238,7 +314,7 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
     return output
 
 
-def plot_metrics(table, path, metric, scale):
+def plot_metrics(table, path, metric, scale, setups=SETUPS):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -254,11 +330,12 @@ def plot_metrics(table, path, metric, scale):
     # One panel per row keeps many folders readable.
     figure, axes = plt.subplots(len(panels), 1, figsize=(max(13, len(folders) * 1.3), 4.6 * len(panels)), squeeze=False)
     for axis, (column, title) in zip(axes.ravel(), panels):
-        for offset, setup in zip((-.18, .18), SETUPS):
+        width = .68 / len(setups)
+        for offset, setup in zip(np.linspace(-.34 + width / 2, .34 - width / 2, len(setups)), setups):
             rows = table[table.operating_point.eq(setup)].set_index('folder').reindex(folders)
             values = rows[column].to_numpy(dtype=float)
             positions = np.arange(len(folders)) + offset
-            axis.bar(positions, np.nan_to_num(values) * 100, width=.34, color=COLORS[setup], label=LABELS[setup])
+            axis.bar(positions, np.nan_to_num(values) * 100, width=width, color=COLORS[setup], label=LABELS[setup])
             for position, value in zip(positions, values):
                 axis.annotate('N/A' if not np.isfinite(value) else f'{100 * value:.0f}%',
                               (position, 2 if not np.isfinite(value) else 100 * value + 2),
@@ -270,8 +347,8 @@ def plot_metrics(table, path, metric, scale):
                         rotation=30, ha='right', fontsize=8)
         axis.grid(axis='y', alpha=.2)
     handles, names = axes.ravel()[0].get_legend_handles_labels()
-    figure.legend(handles, names, loc='upper center', bbox_to_anchor=(.5, .965), ncol=2, fontsize=9)
-    figure.suptitle(f'{metric.title()} DINO, configured scale {scale:g} | DINO alone vs DINO + VLM check')
+    figure.legend(handles, names, loc='upper center', bbox_to_anchor=(.5, .965), ncol=len(setups), fontsize=9)
+    figure.suptitle(f'{metric.title()} DINO, configured scale {scale:g} | ' + ' vs '.join(LABELS[s] for s in setups))
     figure.tight_layout(rect=(0, 0, 1, .92))
     figure.savefig(path, dpi=160)
     plt.close(figure)
@@ -290,19 +367,31 @@ def write_summary(output, table, summary):
              f"`prompts.py`). Each gripper frame {', '.join(f'{o:g}' for o in CHECK_OFFSETS_SEC)} s before the alarm "
              f"is asked alone; a mean probability below {SUBGOAL_THRESHOLD:g} that the sub-goal holds is the bag "
              'alarm, otherwise the execution continues. Stage 1 alarms have no reached sub-goal and continue.', '',
+             *([f"- **{LABELS[TS_CHECKED]}**: as above, and every TS alarm of the live cascade (GMR signal "
+                f"`{summary['ts_signal']}`: position GMR, force safety limit, empty grip; release position "
+                f"{RELEASE_CHECK_DELAY_SEC:g} s after the opening) asks the VLM when it starts and every "
+                f"{TS_RECHECK_SEC:g} s while it lasts (at most {TS_MAX_RECHECKS}), about the state it concerns "
+                "(`ts_alarm_questions` in `prompts.py`: empty grip: held between the fingers; release position: "
+                "where the object lies; other alarms: the current stage's sub-goal, nothing before the grasp). "
+                "DINO and TS checks are asked in time order; the first failure answer is the bag alarm.", '']
+               if summary.get('ts_check') else []),
              f"Evaluated bags: {summary['evaluated_bags']}."
              + (f" Unreadable: {', '.join(summary['unreadable_bags'])}." if summary['unreadable_bags'] else ''),
              f"Checks: {summary['vlm_checks']} ({summary['vlm_checks_new']} new in this run), "
              f"{summary['vlm_checks_asked']} asked the VLM (stage 2 or 3); verdicts {summary['vlm_verdicts']}; "
-             f"median {summary['vlm_sec_median'] or 0:.1f} s per VLM check.", '']
+             f"median {summary['vlm_sec_median'] or 0:.1f} s per VLM check."
+             + (f" TS checks: {summary['ts_checks']}." if summary.get('ts_check') else '')
+             + (f" Bags without a TS replay: {len(summary['ts_not_replayed'])}." if summary.get('ts_not_replayed') else ''),
+             '']
+    setups = summary.get('setups') or list(SETUPS)
     for metric in summary['metrics']:
         rows = table[table.metric.eq(metric)]
         lines += [f'## {metric.title()}', '', f'![metrics](metrics_{metric}.png)', '',
-                  '| Folder | Bags | ' + ' | '.join(LABELS[s] for s in SETUPS) + ' |',
-                  '|---|---|---|---|']
+                  '| Folder | Bags | ' + ' | '.join(LABELS[s] for s in setups) + ' |',
+                  '|---|---|' + '---|' * len(setups)]
         for folder in dict.fromkeys(rows.folder):
             cells = []
-            for setup in SETUPS:
+            for setup in setups:
                 row = rows[rows.folder.eq(folder) & rows.operating_point.eq(setup)].iloc[0]
                 text = f"{int(row.alarm_bags)}/{int(row.evaluated_bags)} alarmed"
                 if row.failure_count:

@@ -18,7 +18,7 @@ from .anomaly_detection import GMRAnomalyDetector
 from .threshold import build_phase_threshold_from_scores
 
 SAMPLE_SEC = .1
-PROTOCOL = 'causal_stage_1_to_3_gmr_v6'
+PROTOCOL = 'causal_stage_1_to_3_gmr_v7'  # v7: debounced release (one gripper reading must confirm the opening)
 # Each sensor gets its own GMR and threshold, so one sensor's nominal variation
 # (e.g. contact force spikes) cannot loosen another sensor's limit. Force is not
 # a GMR sensor: subtle force changes (e.g. lifting a second instrument) overlap
@@ -90,9 +90,12 @@ class CausalSamples:
     so the release and the retreat are scored too. With release=True the
     gripper is watched even when it is not a GMR sensor: its latest reading is
     added to each sample for display, and one 'release' packet gives the TCP
-    position where it first opens after a grasp. Reading ends once the
-    post-stage-3 window has passed and the release was seen, or at the end of
-    the recording.
+    position where it first opens after a grasp. An opening must be confirmed
+    by the next gripper reading (about 0.1 s later): single 0.0 readings occur
+    in nominal runs and were taken as releases. Each sample also says whether
+    the gripper should be holding the object (gripper_holding: closed past half
+    travel, not yet released). Reading ends once the post-stage-3 window has
+    passed and the release was seen, or at the end of the recording.
     """
     def __init__(self, kinds, stop=None, release=False, post_sec=0.):
         self.kinds = set(kinds)
@@ -107,6 +110,7 @@ class CausalSamples:
         self.release = None
         self.gripper = None
         self.gripper_peak = 0.
+        self.opening = False  # A reading below half of the grip waits for the next reading to confirm it.
 
     def packets(self, events):
         latest, stamps = {}, {}
@@ -137,6 +141,8 @@ class CausalSamples:
                        stage_elapsed=timestamp - self.clock.boundaries[stage], **values)
             if self.gripper is not None and 'gripper' not in self.kinds:
                 row['gripper_position'] = self.gripper  # Display only; not a GMR channel.
+            if self.gripper is not None and self.track_release:
+                row['gripper_holding'] = bool(self.gripper_peak > .5 and self.release is None)
             return row
 
         def tick():
@@ -208,13 +214,18 @@ class CausalSamples:
                     if kind == 'gripper':
                         self.gripper = values['gripper_position']
                     if kind == 'gripper' and self.track_release and self.release is None:
-                        self.gripper_peak = max(self.gripper_peak, self.gripper)
-                        # Closed past half travel, then opened below half of that grip.
+                        # Closed past half travel, then opened below half of that grip, confirmed by the
+                        # next reading; the release is reported at the confirming reading.
                         if self.gripper_peak > .5 and self.gripper < self.gripper_peak / 2 and 'pose' in latest:
-                            self.release = dict(time=timestamp, stage=self.clock.stage, **latest['pose'])
-                            yield timestamp, 'release', self.release
-                            if finished():
-                                return
+                            if self.opening:
+                                self.release = dict(time=timestamp, stage=self.clock.stage, **latest['pose'])
+                                yield timestamp, 'release', self.release
+                                if finished():
+                                    return
+                            self.opening = True
+                        else:
+                            self.opening = False
+                            self.gripper_peak = max(self.gripper_peak, self.gripper)
                 if next_tick is not None and next_tick <= timestamp + 1e-9:
                     packet = tick()
                     if packet is not None:
@@ -309,7 +320,9 @@ class GmrOnlineDetector:
             'THRESHOLD_MARGIN times the largest force magnitude in any nominal run. Any check can raise the alarm. '
             'Scoring continues for a short window after stage 3 so the release and retreat are checked. '
             'When the gripper is recorded, the TCP position where it first opens after the grasp '
-            'is also compared with the nominal release positions. Validate detection on held-out runs.')
+            'is also compared with the nominal release positions, and a gripper that closes to its '
+            'empty value while it should hold the object raises the empty-grip alarm. '
+            'Validate detection on held-out runs.')
     knn = True
     capture_visual = False
     frame_count = None
@@ -572,12 +585,22 @@ class GmrOnlineDetector:
             for column in FORCE_COLUMNS:
                 channels[column] = dict(observed=float(sample[column]), expected=None,
                                         lower=None, upper=None, standardized_deviation=None)
+        if 'gripper_holding' in sample:
+            # Empty grip: a rule, not a GMR. Alarm while the object should be held and the fingers read
+            # their fully closed, empty value (encoder counts: readings are multiples of 1/255).
+            reading, empty = float(sample['gripper_position']), settings.GRIPPER_EMPTY_COUNT / 255
+            holding = bool(sample['gripper_holding'] and sample['stage'] < 3)
+            sensors['gripper_empty'] = dict(kind='gripper_empty', distance=reading, threshold=empty,
+                                            epsilon_raw=reading / empty, epsilon_smooth=reading / empty,
+                                            alarm=holding and reading >= empty - .5 / 255, holding=holding,
+                                            component=None)
         if 'gripper_position' in sample and 'gripper_position' not in channels:
             # Watched for the release check; shown, but not scored by a GMR.
             channels['gripper_position'] = dict(observed=float(sample['gripper_position']), expected=None,
                                                 lower=None, upper=None, standardized_deviation=None)
-        # The displayed score is the sensor furthest outside its own limit.
-        worst = max(sensors, key=lambda name: sensors[name]['epsilon_raw'])
+        # The displayed score is the sensor furthest outside its own limit; the empty-grip rule is not a
+        # distance and only raises its alarm.
+        worst = max((name for name in sensors if name != 'gripper_empty'), key=lambda name: sensors[name]['epsilon_raw'])
         sources = [name for name, result in sensors.items() if result['alarm']]
         row = dict(sample_index=self.step, timestamp_sec=timestamp, signal_time_sec=timestamp,
                    anomaly_score=sensors[worst]['epsilon_raw'], threshold=1.,
@@ -585,7 +608,8 @@ class GmrOnlineDetector:
                    alarm_filtered=bool(sources), alarm_sources=sources, score_sensor=worst, sensors=sensors,
                    raw_distance=sensors[worst]['distance'], adaptive_threshold=sensors[worst]['threshold'],
                    epsilon_raw=sensors[worst]['epsilon_raw'],
-                   epsilon_smooth=max(result['epsilon_smooth'] for result in sensors.values()), channels=channels,
+                   epsilon_smooth=max(result['epsilon_smooth'] for name, result in sensors.items() if name != 'gripper_empty'),
+                   channels=channels,
                    phase=phase, stage=sample['stage'], component=sensors[worst]['component'],
                    signal_mode=self.signal_mode, cached_feature_sec=time.monotonic() - started,
                    classifier_sec=0., verification=None, score_kind=self.score_kind,

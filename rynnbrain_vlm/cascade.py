@@ -10,11 +10,19 @@ gripper fingers, after the release (stage 3) it must lie at the destination
 below the gripper. Before the grasp (stage 1) no sub-goal is reached yet, so
 the check answers safe without asking. A failure answer ends the execution; a
 safe answer resumes it, and that camera must drop below its threshold, or the
-stage must change, before it can trigger another check. GMR is shown but does
-not trigger checks yet. The execution, and with it the replay, ends
-POST_STAGE3_SEC after stage 3, as for GMR, so the robot returning home cannot
-trigger a check. The trigger rule (AlarmEpisodes) and the check (VlmChecker)
-are shared with the offline benchmark in cascade_benchmark.py.
+stage must change, before it can trigger another check. The execution, and with
+it the replay, ends POST_STAGE3_SEC after stage 3, as for GMR, so the robot
+returning home cannot trigger a check.
+
+With rynnbrain.ts_check.enabled, TS alarms ask the VLM too (TsAlarmEpisodes):
+each GMR alarm source (position GMR, force safety limit, empty grip, other GMR
+sensors) when its alarm starts and again every TS_RECHECK_SEC while it lasts,
+and the release-position check RELEASE_CHECK_DELAY_SEC after the gripper opened.
+The VLM answers a question about the visible state that alarm concerns
+(prompts.ts_alarm_questions) and the execution stops only if the image shows a
+failure; otherwise the alarm is ignored. The trigger rules (AlarmEpisodes,
+TsAlarmEpisodes) and the check (VlmChecker) are shared with the offline
+benchmark in cascade_benchmark.py.
 """
 from collections import defaultdict, deque
 import heapq
@@ -29,6 +37,11 @@ SUBGOAL_THRESHOLD = .5  # Below this mean probability that the sub-goal holds, t
 FRAME_BUFFER = 150  # Gripper-camera frames kept for the check (10 s at 15 fps).
 SUBGOALS = {2: 'the object is held between the gripper fingers',
             3: 'the object lies at the destination below the gripper'}
+TS_RECHECK_SEC = 2.  # A TS alarm that lasts is checked again this often...
+TS_MAX_RECHECKS = 5  # ...at most this many times per alarm episode.
+RELEASE_CHECK_DELAY_SEC = 1.  # A release-position alarm is checked once the object has had time to settle.
+TS_ALARM_NAMES = {'position': 'TCP position (GMR)', 'force': 'force safety limit', 'gripper_empty': 'empty grip',
+                  'release': 'release position', 'gripper': 'gripper (GMR)', 'joints': 'joint positions (GMR)'}
 
 
 def current_stage(boundaries, timestamp):
@@ -58,6 +71,68 @@ class AlarmEpisodes:
         return False
 
 
+class TsAlarmEpisodes:
+    """When TS alarms ask the VLM.
+
+    A source's (filtered) alarm starts an episode and is checked; while it lasts
+    it is checked again every TS_RECHECK_SEC, at most TS_MAX_RECHECKS times; it
+    is re-armed when it drops or the stage changes. Re-checks matter: 0.4 s after
+    an empty grasp the missed instrument still lies just below the fingers and
+    looks held; seconds later it is clearly left behind. A release-position alarm
+    is checked once, RELEASE_CHECK_DELAY_SEC after the opening was confirmed.
+    """
+    def __init__(self):
+        self.active = {}
+        self.release_at, self.release_done = None, False
+
+    def update(self, sensors, stage, timestamp, release=None):
+        """[(source, recheck number)] due at this GMR sample.
+
+        sensors: the GMR row's per-source results (each with 'alarm'); release:
+        the release check result (GmrOnlineDetector.release_result) or None.
+        """
+        due = []
+        for name, result in sensors.items():
+            state = self.active.get(name)
+            if not result.get('alarm'):
+                self.active.pop(name, None)
+            elif state is None or state['stage'] != stage:
+                self.active[name] = dict(stage=stage, last=timestamp, rechecks=0)
+                due.append((name, 0))
+            elif timestamp - state['last'] >= TS_RECHECK_SEC - 1e-6 and state['rechecks'] < TS_MAX_RECHECKS:
+                state['last'], state['rechecks'] = timestamp, state['rechecks'] + 1
+                due.append((name, state['rechecks']))
+        if (release and release.get('status') == 'released' and release.get('alarm')
+                and self.release_at is None and not self.release_done):
+            self.release_at = release['time_sec'] + RELEASE_CHECK_DELAY_SEC
+        if self.release_at is not None and timestamp >= self.release_at - 1e-9:
+            self.release_at, self.release_done = None, True
+            due.append(('release', 0))
+        return due
+
+
+def group_ts_alarms(due, stage, item, destination):
+    """Split the TS alarms due at one sample into checks: alarms about the same sub-goal share one check.
+
+    Before the grasp a position or force alarm has no visible sub-goal: it is recorded once (not asked, like a
+    DINO alarm then) and its re-checks are skipped.
+    """
+    from .prompts import ts_alarm_questions
+    groups = {}
+    for source, recheck in due:
+        goal, questions = ts_alarm_questions(source, stage, item, destination)
+        if questions is None and recheck:
+            continue
+        groups.setdefault(goal if questions else None, []).append((source, recheck))
+    return list(groups.values())
+
+
+def ts_trigger(alarms, timestamp, stage, details=None):
+    return dict(source='ts', time_sec=timestamp, stage=stage, alarms=[a for a, _ in alarms],
+                alarm_names=[TS_ALARM_NAMES.get(a, a) for a, _ in alarms],
+                rechecks=[r for _, r in alarms], details=details or {})
+
+
 class VlmChecker:
     """The base VLM (no LoRA) checks the sub-goal of the alarm's stage on the gripper camera.
 
@@ -83,19 +158,20 @@ class VlmChecker:
                               destination=self.destination, alarm_run=ALARM_RUN,
                               check_offsets_sec=list(CHECK_OFFSETS_SEC), subgoal_threshold=SUBGOAL_THRESHOLD)
 
-    def ask(self, frames, boundaries, alarm_sec):
-        """Check the sub-goal of the stage at alarm_sec.
+    def ask(self, frames, boundaries, alarm_sec, alarm=None):
+        """Check the sub-goal of the stage at alarm_sec (a DINO alarm), or the one TS alarm `alarm` concerns.
 
         frames: time-ordered (timestamp, (source, payload)) gripper-camera frames
         received so far; source is 'message' (a compressed ROS image) or 'image'
         (a PIL image). Returns the check record and the labelled images asked about.
         """
         from rosbag_io import decode_image_message
-        from .prompts import subgoal_questions
+        from .prompts import subgoal_questions, ts_alarm_questions
         stage = current_stage(boundaries, alarm_sec)
-        questions = subgoal_questions(stage, self.item, self.destination)
+        goal, questions = ((stage, subgoal_questions(stage, self.item, self.destination)) if alarm is None else
+                           ts_alarm_questions(alarm, stage, self.item, self.destination))
         if questions is None:
-            return dict(stage=stage, frames=[], camera_topic=self.topic, questions=[], scores=[],
+            return dict(stage=stage, goal_stage=goal, frames=[], camera_topic=self.topic, questions=[], scores=[],
                         subgoal_probability=None, verdict='safe', vlm_sec=0.,
                         answer=f'Stage {stage}: no grasp reported yet, so no sub-goal to check. Safe to continue.'), []
         stamps = [t for t, _ in frames]
@@ -111,20 +187,22 @@ class VlmChecker:
             images.append((label, decode_image_message(*payload) if source == 'message' else payload))
             records.append(dict(label=label, requested_sec=alarm_sec - offset, frame_sec=frame_sec))
         if not images:
-            raise ValueError('No gripper-camera frames were received before the DINO alarm; cannot ask the VLM.')
+            raise ValueError('No gripper-camera frames were received before the alarm; cannot ask the VLM.')
         started = time.monotonic()
         scores = [[self.model.answer_probability(dict(role='user', images=[('Gripper camera image:', image)],
                                                       text=question), options) for _, image in images]
                   for question, options in questions]
         probability = float(np.mean(scores))
         verdict = 'failure' if probability < SUBGOAL_THRESHOLD else 'safe'
-        answer = '\n'.join([f'Stage {stage} sub-goal: {SUBGOALS[stage]}.',
+        answer = '\n'.join([f'Stage {stage}' + (f', checking: {SUBGOALS[goal]}.' if goal != stage else
+                                                f' sub-goal: {SUBGOALS[goal]}.'),
                             *(f"P({options[0]}) of the {'/'.join(options)} question per frame: "
                               + ', '.join(f'{p:.2f}' for p in values) for (_, options), values in zip(questions, scores)),
-                            f'Mean probability that the sub-goal holds: {probability:.2f} '
+                            f'Mean probability that the sub-goal holds: {probability:.3f} '
                             + (f'< {SUBGOAL_THRESHOLD:g}: failure.' if verdict == 'failure'
                                else f'>= {SUBGOAL_THRESHOLD:g}: safe to continue.')])
-        check = dict(stage=stage, frames=records, camera_topic=self.topic, questions=[q for q, _ in questions],
+        check = dict(stage=stage, goal_stage=goal, frames=records, camera_topic=self.topic,
+                     questions=[q for q, _ in questions],
                      scores=scores, subgoal_probability=probability, answer=answer, verdict=verdict,
                      vlm_sec=time.monotonic() - started)
         return check, images
@@ -154,12 +232,21 @@ class CascadeDetector:
         self.vlm_topic = self.checker.topic
         self.excluded = self.dino.excluded | self.gmr.excluded
         self.signal_mode = self.gmr.signal_mode
-        self.signature = dict(protocol='dino_gmr_vlm_subgoal_check_v2', dino=self.dino.signature,
-                              dino_trigger_score='pooled', **self.checker.signature)
+        self.ts_check = bool((config['rynnbrain'].get('ts_check') or {}).get('enabled', False))
+        self.signature = dict(protocol='dino_gmr_ts_vlm_check_v3' if self.ts_check else 'dino_gmr_vlm_subgoal_check_v2',
+                              dino=self.dino.signature, dino_trigger_score='pooled', ts_check=self.ts_check,
+                              **self.checker.signature)
+        if self.ts_check:
+            self.signature.update(ts_recheck_sec=TS_RECHECK_SEC, ts_max_rechecks=TS_MAX_RECHECKS,
+                                  release_check_delay_sec=RELEASE_CHECK_DELAY_SEC)
         self.note = (f'DINO and GMR score the execution together. {ALARM_RUN} consecutive DINO frames above '
                      'threshold (pooled 3x3 score) stop it; the base VLM then checks on the gripper camera the '
                      'sub-goal of the current stage (object held after the grasp, object at the destination after '
-                     'the release). A safe answer resumes the replay. GMR does not trigger checks yet.')
+                     'the release). A safe answer resumes the replay. '
+                     + ('TS alarms (position, force limit, empty grip, release position) also ask the VLM, about '
+                        'the state the alarm concerns, when they start and every '
+                        f'{TS_RECHECK_SEC:g} s while they last; the VLM ignores the alarm unless the image shows a '
+                        'failure.' if self.ts_check else 'GMR does not trigger checks (rynnbrain.ts_check is off).'))
 
     # The replay app reads the GMR stage clock and release result through these.
     @property
@@ -178,7 +265,7 @@ class CascadeDetector:
         self.gmr.signal_mode = self.signal_mode
         self.gmr.reset(bag)
         self.bag = bag
-        self.episodes = AlarmEpisodes()
+        self.episodes, self.ts_episodes = AlarmEpisodes(), TsAlarmEpisodes()
         self.queries, self.vlm_frame_jpegs, self.frames = [], {}, deque(maxlen=FRAME_BUFFER)
         self.halted, self.termination_reason, self.output_dir = False, None, None
 
@@ -203,7 +290,14 @@ class CascadeDetector:
         kind, payload = self.pending
         if kind == 'gmr':
             self.gmr.pending = payload
-            return self.gmr.append(image, timestamp, verify)
+            row, vector, baseline = self.gmr.append(image, timestamp, verify)
+            row['vlm_check'] = None  # Same columns in every GMR row; filled when this sample triggers a check.
+            if self.ts_check and not self.halted:
+                stage = current_stage(self.sampler.clock.boundaries, timestamp)
+                due = self.ts_episodes.update(row['sensors'], stage, timestamp, self.gmr.release_result)
+                if due:
+                    row['vlm_check'] = self.check_ts_alarms(due, timestamp, row)
+            return row, vector, baseline
         topic = payload
         row, vector, baseline = self.cameras[topic].append(image, timestamp, verify)
         row['vlm_check'] = None  # Same columns in every DINO row; filled when this frame triggers a check.
@@ -214,14 +308,36 @@ class CascadeDetector:
         return row, vector, baseline
 
     def check_with_vlm(self, topic, timestamp, row):
-        paused = time.monotonic()
+        """A DINO alarm episode: check the sub-goal of the current stage."""
         boundaries = dict(self.sampler.clock.boundaries)
-        index = len(self.queries)
-        trigger = dict(time_sec=timestamp, camera_topic=topic, stage=current_stage(boundaries, timestamp),
+        trigger = dict(source='dino', time_sec=timestamp, camera_topic=topic, stage=current_stage(boundaries, timestamp),
                        dino_score=row['score_pooled'], dino_threshold=row['threshold_pooled'],
                        consecutive_frames=self.episodes.streaks[topic])
+        return self.ask_vlm(trigger, boundaries)
+
+    def check_ts_alarms(self, due, timestamp, row):
+        """TS alarms due at this GMR sample: one check per sub-goal they concern; stops at a failure."""
+        boundaries = dict(self.sampler.clock.boundaries)
+        stage = current_stage(boundaries, timestamp)
+        query = None
+        for alarms in group_ts_alarms(due, stage, self.checker.item, self.checker.destination):
+            details = {}
+            for source, recheck in alarms:
+                result = (self.gmr.release_result if source == 'release' else row['sensors'].get(source)) or {}
+                details[source] = dict(recheck=recheck, value=result.get('distance'), limit=result.get('threshold'))
+            trigger = ts_trigger(alarms, timestamp, stage, details)
+            query = self.ask_vlm(trigger, boundaries, alarm=alarms[0][0])
+            if query['verdict'] == 'failure':
+                break
+        return query
+
+    def ask_vlm(self, trigger, boundaries, alarm=None):
+        """Pause the replay, ask the VLM, keep the record and the frames, stop on a failure answer."""
+        paused = time.monotonic()
+        index = len(self.queries)
+        timestamp = trigger['time_sec']
         self.update(vlm_status=dict(state='asking', **trigger))
-        check, images = self.checker.ask(self.frames, boundaries, timestamp)
+        check, images = self.checker.ask(self.frames, boundaries, timestamp, alarm=alarm)
         for k, (_, image) in enumerate(images):
             preview = image.copy()
             preview.thumbnail((480, 360))

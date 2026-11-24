@@ -147,3 +147,23 @@ def subgoal_questions(stage: int, item: str, destination: str) -> list[tuple[str
                  f'B) {item_start} lies on a surface of another color.\nC) No {noun} is visible.\n'
                  'Answer with one letter: A, B or C.', ('A', 'B', 'C'))]
     return None
+
+
+# TS alarm -> VLM check. A TS alarm says when to look, not what happened: the VLM answers the same kind of
+# visual question as the vision path, about the state that alarm concerns, and ignores the alarm when the
+# image shows that state is fine. The empty-grip alarm asks whether the object is held even before the grasp
+# marker (the fingers have closed); the release-position alarm asks where the object lies; any other TS alarm
+# (position, force, other GMR sensors) asks the sub-goal of the current stage, and before the grasp, as in
+# the vision path, nothing. Alarm-specific wordings were tested on the recorded bags and on REASSEMBLE
+# (study ts_vlm_fusion v3): a three-choice grasp question ("held / closed on nothing / beside the fingers")
+# stopped 23-33% of correct holds, and "is it stuck?" or "is it pressing on something?" did not separate
+# real failures from harmless contacts. Sensor values in the prompt made the VLM trust the sensor over the
+# image (study v1), so no TS values are given.
+TS_ALARM_GOAL_STAGE = {'gripper_empty': 2, 'release': 3}
+
+
+def ts_alarm_questions(alarm: str, stage: int, item: str, destination: str
+                       ) -> tuple[int, list[tuple[str, tuple[str, ...]]] | None]:
+    """(sub-goal stage, questions) for a check triggered by the TS alarm `alarm` during `stage`."""
+    goal = TS_ALARM_GOAL_STAGE.get(alarm, stage)
+    return goal, subgoal_questions(goal, item, destination)
