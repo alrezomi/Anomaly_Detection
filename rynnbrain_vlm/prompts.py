@@ -167,3 +167,44 @@ def ts_alarm_questions(alarm: str, stage: int, item: str, destination: str
     """(sub-goal stage, questions) for a check triggered by the TS alarm `alarm` during `stage`."""
     goal = TS_ALARM_GOAL_STAGE.get(alarm, stage)
     return goal, subgoal_questions(goal, item, destination)
+
+
+class QuestionSet:
+    """The sub-goal questions the VLM check asks, by sub-goal stage.
+
+    source 'fixed': subgoal_questions with the configured item and destination
+    (rynnbrain.vlm_check.item/destination), decided at SUBGOAL_THRESHOLD.
+    source 'reference': questions the VLM derived from the nominal reference runs
+    (reference_questions.py); each carries the threshold calibrated on those runs.
+    A stage without a derived question falls back to the fixed one.
+    """
+    def __init__(self, item=None, destination=None, derived=None, source='fixed', default_threshold=.5):
+        self.item, self.destination, self.source = item, destination, source
+        self.derived = {int(goal): question for goal, question in (derived or {}).items()}
+        self.default_threshold = default_threshold
+
+    def subgoal(self, goal):
+        """[(question, answer options)] for the sub-goal of `goal`; None before the grasp."""
+        if goal not in (2, 3):
+            return None
+        if goal in self.derived:
+            return [(self.derived[goal]['question'], tuple(self.derived[goal]['options']))]
+        if not (self.item and self.destination):
+            raise ValueError(f'No question for stage {goal}: none was derived from the reference runs and '
+                             'rynnbrain.vlm_check.item/destination are not configured.')
+        return subgoal_questions(goal, self.item, self.destination)
+
+    def for_alarm(self, alarm, stage):
+        """(sub-goal stage, questions) for a DINO alarm (alarm None) or the TS alarm `alarm` during `stage`."""
+        goal = stage if alarm is None else TS_ALARM_GOAL_STAGE.get(alarm, stage)
+        return goal, self.subgoal(goal)
+
+    def threshold(self, goal):
+        return float(self.derived[goal]['threshold']) if goal in self.derived else self.default_threshold
+
+    def identity(self):
+        """What determines the answers (for caches and run signatures)."""
+        return dict(source=self.source, item=self.item, destination=self.destination,
+                    derived={str(goal): dict(question=q['question'], options=list(q['options']),
+                                             threshold=round(float(q['threshold']), 6))
+                             for goal, q in sorted(self.derived.items())})

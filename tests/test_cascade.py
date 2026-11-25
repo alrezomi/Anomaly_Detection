@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from PIL import Image
 
 from rynnbrain_vlm.cascade import AlarmEpisodes, CascadeDetector, TsAlarmEpisodes, VlmChecker
+from rynnbrain_vlm.prompts import QuestionSet
 
 
 def cascade(above, probability=.2, unpooled=None, boundaries=None):
@@ -21,6 +22,7 @@ def cascade(above, probability=.2, unpooled=None, boundaries=None):
     detector.cameras = {'top': SimpleNamespace(append=lambda *_: (next(rows), None, None))}
     checker = detector.checker = VlmChecker.__new__(VlmChecker)
     checker.topic, checker.item, checker.destination = 'gripper', 'a metal surgical instrument', 'a blue surface'
+    checker.questions = QuestionSet(checker.item, checker.destination)
     checker.model = SimpleNamespace(answer_probability=Mock(return_value=probability), max_image_size=640)
     detector.vlm_topic = 'gripper'
     clock = SimpleNamespace(boundaries=boundaries or {1: 0., 2: 15.})

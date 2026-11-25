@@ -19,10 +19,14 @@ each GMR alarm source (position GMR, force safety limit, empty grip, other GMR
 sensors) when its alarm starts and again every TS_RECHECK_SEC while it lasts,
 and the release-position check RELEASE_CHECK_DELAY_SEC after the gripper opened.
 The VLM answers a question about the visible state that alarm concerns
-(prompts.ts_alarm_questions) and the execution stops only if the image shows a
-failure; otherwise the alarm is ignored. The trigger rules (AlarmEpisodes,
+(prompts.QuestionSet.for_alarm) and the execution stops only if the image shows
+a failure; otherwise the alarm is ignored. The trigger rules (AlarmEpisodes,
 TsAlarmEpisodes) and the check (VlmChecker) are shared with the offline
 benchmark in cascade_benchmark.py.
+
+The questions are the fixed ones written for this setup (prompts.subgoal_questions),
+or, with rynnbrain.vlm_check.questions = "reference", questions the VLM derived
+itself from the nominal reference runs (reference_questions.py).
 """
 from collections import defaultdict, deque
 import heapq
@@ -46,6 +50,16 @@ TS_ALARM_NAMES = {'position': 'TCP position (GMR)', 'force': 'force safety limit
 
 def current_stage(boundaries, timestamp):
     return max((stage for stage, start in boundaries.items() if start <= timestamp), default=0)
+
+
+def question_text(question):
+    """A check question as shown to people: without the camera description and the answer-format line."""
+    from .prompts import GRIPPER_CAMERA
+    from .reference_questions import CAMERA
+    for prefix in (GRIPPER_CAMERA, CAMERA):
+        if question.startswith(prefix):
+            question = question[len(prefix):].strip()
+    return ' '.join(line for line in question.splitlines() if not line.startswith('Answer with'))
 
 
 class AlarmEpisodes:
@@ -111,16 +125,15 @@ class TsAlarmEpisodes:
         return due
 
 
-def group_ts_alarms(due, stage, item, destination):
+def group_ts_alarms(due, stage, questions):
     """Split the TS alarms due at one sample into checks: alarms about the same sub-goal share one check.
 
-    Before the grasp a position or force alarm has no visible sub-goal: it is recorded once (not asked, like a
-    DINO alarm then) and its re-checks are skipped.
+    questions: the checker's prompts.QuestionSet. Before the grasp a position or force alarm has no visible
+    sub-goal: it is recorded once (not asked, like a DINO alarm then) and its re-checks are skipped.
     """
-    from .prompts import ts_alarm_questions
-    groups = {}
+    question_set, groups = questions, {}
     for source, recheck in due:
-        goal, questions = ts_alarm_questions(source, stage, item, destination)
+        goal, questions = question_set.for_alarm(source, stage)
         if questions is None and recheck:
             continue
         groups.setdefault(goal if questions else None, []).append((source, recheck))
@@ -136,27 +149,41 @@ def ts_trigger(alarms, timestamp, stage, details=None):
 class VlmChecker:
     """The base VLM (no LoRA) checks the sub-goal of the alarm's stage on the gripper camera.
 
-    Each question of prompts.subgoal_questions is asked about each
-    gripper-camera frame CHECK_OFFSETS_SEC before the alarm; the mean
-    probability of the answer meaning that the sub-goal holds decides.
-    rynnbrain.vlm_check names the camera, how the object and the destination
-    look from it, and optional model overrides.
+    Each sub-goal question is asked about each gripper-camera frame
+    CHECK_OFFSETS_SEC before the alarm; the mean probability of the answer
+    meaning that the sub-goal holds decides. rynnbrain.vlm_check names the
+    camera, which questions to ask (questions: "fixed", the default, uses
+    prompts.subgoal_questions with item and destination, how the object and
+    the destination look from the camera; "reference" uses the questions the
+    VLM derived from the nominal reference runs, reference_questions.py, each
+    with its calibrated threshold) and optional model overrides.
     """
     def __init__(self, config, progress):
         from .model import RynnBrainModel
+        from .prompts import QuestionSet
         vlm = config['rynnbrain']
         settings = vlm.get('vlm_check') or {}
-        missing = [key for key in ('camera_topic', 'item', 'destination') if not settings.get(key)]
+        self.mode = settings.get('questions', 'fixed')
+        if self.mode not in ('fixed', 'reference'):
+            raise ValueError('rynnbrain.vlm_check.questions must be "fixed" or "reference".')
+        required = ('camera_topic', 'item', 'destination') if self.mode == 'fixed' else ('camera_topic',)
+        missing = [key for key in required if not settings.get(key)]
         if missing:
             raise ValueError(f"The VLM check needs rynnbrain.vlm_check.{', '.join(missing)}.")
-        self.topic, self.item, self.destination = settings['camera_topic'], settings['item'], settings['destination']
+        self.topic, self.item, self.destination = settings['camera_topic'], settings.get('item'), settings.get('destination')
         progress('Loading the base VLM (no LoRA) for alarm checks')
         # On Jetson Thor device_map "auto" sees only free, not reclaimable, memory and
         # offloads layers to the CPU; vlm_check.model can pin the model to the GPU.
         self.model = RynnBrainModel({**vlm['model'], 'lora_adapter_path': None, **settings.get('model', {})})
+        self.questions = QuestionSet(self.item, self.destination, default_threshold=SUBGOAL_THRESHOLD)
+        if self.mode == 'reference':
+            from .reference_questions import load_or_derive
+            self.questions = load_or_derive(config, self.model, progress)
         self.signature = dict(vlm_model=vlm['model']['model_id'], vlm_camera=self.topic, item=self.item,
                               destination=self.destination, alarm_run=ALARM_RUN,
                               check_offsets_sec=list(CHECK_OFFSETS_SEC), subgoal_threshold=SUBGOAL_THRESHOLD)
+        if self.mode == 'reference':
+            self.signature['questions'] = self.questions.identity()
 
     def ask(self, frames, boundaries, alarm_sec, alarm=None):
         """Check the sub-goal of the stage at alarm_sec (a DINO alarm), or the one TS alarm `alarm` concerns.
@@ -166,10 +193,9 @@ class VlmChecker:
         (a PIL image). Returns the check record and the labelled images asked about.
         """
         from rosbag_io import decode_image_message
-        from .prompts import subgoal_questions, ts_alarm_questions
         stage = current_stage(boundaries, alarm_sec)
-        goal, questions = ((stage, subgoal_questions(stage, self.item, self.destination)) if alarm is None else
-                           ts_alarm_questions(alarm, stage, self.item, self.destination))
+        goal, questions = self.questions.for_alarm(alarm, stage)
+        threshold = self.questions.threshold(goal)
         if questions is None:
             return dict(stage=stage, goal_stage=goal, frames=[], camera_topic=self.topic, questions=[], scores=[],
                         subgoal_probability=None, verdict='safe', vlm_sec=0.,
@@ -193,18 +219,21 @@ class VlmChecker:
                                                       text=question), options) for _, image in images]
                   for question, options in questions]
         probability = float(np.mean(scores))
-        verdict = 'failure' if probability < SUBGOAL_THRESHOLD else 'safe'
+        verdict = 'failure' if probability < threshold else 'safe'
+        derived = goal in self.questions.derived
         answer = '\n'.join([f'Stage {stage}' + (f', checking: {SUBGOALS[goal]}.' if goal != stage else
                                                 f' sub-goal: {SUBGOALS[goal]}.'),
+                            *(('Question (derived from the reference runs): ' if derived else 'Question: ')
+                              + question_text(question) for question, _ in questions),
                             *(f"P({options[0]}) of the {'/'.join(options)} question per frame: "
                               + ', '.join(f'{p:.2f}' for p in values) for (_, options), values in zip(questions, scores)),
                             f'Mean probability that the sub-goal holds: {probability:.3f} '
-                            + (f'< {SUBGOAL_THRESHOLD:g}: failure.' if verdict == 'failure'
-                               else f'>= {SUBGOAL_THRESHOLD:g}: safe to continue.')])
+                            + (f'< {threshold:.2f}: failure.' if verdict == 'failure'
+                               else f'>= {threshold:.2f}: safe to continue.')])
         check = dict(stage=stage, goal_stage=goal, frames=records, camera_topic=self.topic,
-                     questions=[q for q, _ in questions],
-                     scores=scores, subgoal_probability=probability, answer=answer, verdict=verdict,
-                     vlm_sec=time.monotonic() - started)
+                     questions=[q for q, _ in questions], question_source='reference' if derived else 'fixed',
+                     threshold=threshold, scores=scores, subgoal_probability=probability, answer=answer,
+                     verdict=verdict, vlm_sec=time.monotonic() - started)
         return check, images
 
 
@@ -247,6 +276,11 @@ class CascadeDetector:
                         'the state the alarm concerns, when they start and every '
                         f'{TS_RECHECK_SEC:g} s while they last; the VLM ignores the alarm unless the image shows a '
                         'failure.' if self.ts_check else 'GMR does not trigger checks (rynnbrain.ts_check is off).'))
+        derived = self.checker.questions.derived
+        if derived:
+            self.note += (' Questions derived by the VLM from the nominal reference runs: ' + '; '.join(
+                f"after {'the grasp' if goal == 2 else 'the release'}: \"{question_text(q['question'])}\" "
+                f"(failure below {q['threshold']:.2f})" for goal, q in sorted(derived.items())) + '.')
 
     # The replay app reads the GMR stage clock and release result through these.
     @property
@@ -320,7 +354,7 @@ class CascadeDetector:
         boundaries = dict(self.sampler.clock.boundaries)
         stage = current_stage(boundaries, timestamp)
         query = None
-        for alarms in group_ts_alarms(due, stage, self.checker.item, self.checker.destination):
+        for alarms in group_ts_alarms(due, stage, self.checker.questions):
             details = {}
             for source, recheck in alarms:
                 result = (self.gmr.release_result if source == 'release' else row['sensors'].get(source)) or {}

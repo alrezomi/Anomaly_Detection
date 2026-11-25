@@ -118,6 +118,14 @@ services:
     entrypoint: ["python", "-u", "run_vlm_check_benchmark.py"]
     command: ["--help"]
 
+  # Let the VLM derive the check questions from the nominal reference runs (rynnbrain.vlm_check.questions:
+  # "reference"); the GUI and the benchmark otherwise derive them on first use.
+  # docker compose run --rm vlm-questions [--rebuild]
+  vlm-questions:
+    <<: *rynnbrain-common
+    entrypoint: ["python", "-u", "-m", "rynnbrain_vlm.reference_questions", "--config", "/config/pipeline_config.json"]
+    command: []
+
   # Prepare selected CoP vectors and fit nominal kNN or supervised logistic regression.
   cop-classifier-train:
     <<: *rynnbrain-common

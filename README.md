@@ -1934,6 +1934,44 @@ Use the **Detector** selector before starting an execution:
   setting-1/2 run, 0.2 on ft_nominal). With `enabled: false` (or no `ts_check`
   block) the cascade behaves as before.
 
+  **Questions the VLM derives itself** (`rynnbrain.vlm_check.questions:
+  "reference"`; the default `"fixed"` keeps the questions above). The fixed
+  questions are written for this setup (the object, the destination, white
+  fingers). In reference mode the base VLM writes the check questions per task
+  from the nominal runs the detectors are calibrated on (`nominal_bags`, or
+  `vlm_check.reference_bags`), so a new task or dataset needs no hand-written
+  wording (`rynnbrain_vlm/reference_questions.py`):
+  1. on gripper-camera frames of 6 reference runs it names the object held
+     during stage 2, says where the object is after the release (two
+     phrasings) and describes each moment in one sentence;
+  2. the answers become yes/no questions: "Is <object> held between the
+     gripper fingers?", "Is <object> <where it is>?" and "Does this sentence
+     describe the image correctly? <sentence>";
+  3. each candidate is asked on every reference run the way a live check asks
+     (mean over the frames at, 0.5 s and 1 s before), where the sub-goal holds
+     (during stage 2; after the release) and where it does not hold yet (stage
+     1; while carrying). Its threshold is the one that best separates the two
+     (Youden's J: share of normal checks kept plus share of "not done yet"
+     frames stopped), never above 0.5, and the candidate with the best J
+     (then AUROC) becomes the stage's question with that threshold. A first
+     rule, a threshold below every normal reference check, stopped almost
+     nothing (5 of 37 true alarms on REASSEMBLE) and was replaced.
+
+  Only nominal runs are used, so this step cannot see failures: it rejects
+  wordings that do not tell "done" from "not done yet" (a hallucinated name, a
+  detail of one run), and the benchmark shows whether the chosen ones catch
+  failures. The result, with every candidate's scores and the VLM's
+  descriptions, is saved to
+  `<nominal_cache_dir>/vlm_questions/<vision_memory_name>.json` (or
+  `vlm_check.questions_file`) and reused while the reference runs, camera and
+  model stay the same. The GUI derives it on first use (a few minutes on Thor),
+  or ahead of time with `docker compose run --rm vlm-questions` (`--rebuild` to
+  derive again; `--reselect` applies a changed choice rule to the saved
+  candidate scores without the VLM). The GUI's check text shows the question
+  asked and its threshold. With the fixed questions, `vlm_check.item` and `destination` are
+  required; in reference mode they are only used to score the fixed questions
+  on the same frames, for comparison.
+
   The release check now needs one confirming gripper reading (about 0.1 s):
   single 0.0 messages in nominal runs (ft_nominal 3.28, 3.34) were taken as the
   release. This changed the GMR cache protocol (`causal_stage_1_to_3_gmr_v7`),
@@ -1976,6 +2014,17 @@ Use the **Detector** selector before starting an execution:
   `--metric euclidean` limits it to one DINO metric; `--limit N` to the first N
   bags; `--per-folder N` to the first N bags of each folder (a quick check
   across categories whose answers the full run reuses from the cache).
+  `--all-checks` judges every VLM answer on its own: the replay no longer ends
+  at the first failure answer, so every alarm of the execution gets its check
+  (marked `after_stop` when the live rule would already have stopped), while
+  the per-bag results stay those of the live rule. `alarm_checks.csv` lists
+  every check (trigger, stage, question, probability, answer) with whether its
+  alarm was true: from the recorded Error marker on in a failure bag, false in
+  a normal bag, unclear before the marker (the button is pressed after the
+  failure is seen: empty-grip alarms came 1-4 s before it on grasp-miss and
+  slip bags) or in a failure bag without a marker. `alarm_metrics.csv` and the "Per alarm" table in
+  `SUMMARY.md` count, per alarm kind (DINO, each TS source), true alarms the
+  VLM stopped or missed and false alarms it ignored or wrongly stopped.
   On the saved `pick_place_dino832_v141.2/dino_benchmark/all_folders` run (144
   bags; results in `pick_place_dino832_v157/vlm_check_benchmark`) DINO alone
   alarms on 99% of failures and 79% of normal runs; with the check, 90% of

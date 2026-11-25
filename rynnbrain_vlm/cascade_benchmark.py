@@ -17,6 +17,15 @@ prepares it, default signal mode TCP position + force), TsAlarmEpisodes decides
 when a TS alarm asks the VLM, and DINO and TS checks are asked in time order
 until the first failure answer.
 
+Per alarm (alarm_checks.csv, alarm_metrics.csv): every check of the most
+complete setup with its answer and whether its alarm was true. With
+all_checks, the replay does not end at the first failure answer, so every
+alarm of the execution gets its check (those after the first stop are marked
+after_stop); this measures how often the VLM rightly ignores a false alarm
+and rightly confirms a true one. An alarm is true from the recorded failure
+marker on in a failure bag and false in a normal bag; before the marker, or
+without one, it is unclear (alarm_truth).
+
 Results go to <dino run>/vlm_check/ unless another output directory is given.
 VLM answers are cached in checks.jsonl, keyed by bag, alarm and the exact
 questions, so a rerun resumes where it stopped, both DINO metrics share
@@ -33,12 +42,44 @@ import pandas as pd
 
 from .cascade import (ALARM_RUN, CHECK_OFFSETS_SEC, RELEASE_CHECK_DELAY_SEC, SUBGOAL_THRESHOLD, TS_MAX_RECHECKS,
                       TS_RECHECK_SEC, AlarmEpisodes, TsAlarmEpisodes, VlmChecker, current_stage, group_ts_alarms,
-                      ts_trigger)
+                      question_text, ts_trigger)
 
 SAVED, CHECKED, TS_CHECKED = 'dino_alone', 'dino_vlm_check', 'dino_ts_vlm_check'
 SETUPS = (SAVED, CHECKED)
 COLORS = {SAVED: '#2878b5', CHECKED: '#c87925', TS_CHECKED: '#3a8f5c'}
 LABELS = {SAVED: 'DINO alone', CHECKED: 'DINO + VLM check', TS_CHECKED: 'DINO + TS + VLM check'}
+def alarm_truth(item, time_sec):
+    """'failure' (a true alarm), 'normal' (a false alarm) or 'unclear', from the bag label and failure marker.
+
+    Every alarm in a normal bag is false; in a failure bag an alarm at or after the recorded marker is true. Before
+    the marker it is unclear: the operator presses it after seeing the failure (on the project's grasp-miss and
+    slip bags, empty-grip alarms came 1-4 s before it, once the gripper had already closed on nothing)."""
+    if item['ground_truth_label'] != 'fail':
+        return 'normal'
+    onset = item.get('recorded_failure_time_sec')
+    if onset is None or not np.isfinite(onset):
+        return 'unclear'
+    return 'failure' if time_sec >= onset else 'unclear'
+
+
+def alarm_kind(check):
+    return 'DINO' if check['source'] == 'dino' else 'TS: ' + ' + '.join(check['alarms'].split('+'))
+
+
+def alarm_metrics(checks):
+    """Per alarm kind: how the VLM answered true and false alarms (checks: alarm_checks.csv rows)."""
+    rows = []
+    for kind, group in [*checks.groupby(checks.apply(alarm_kind, axis=1), sort=True), ('All alarms', checks)]:
+        asked = group[group.asked]
+        true, false = asked[asked.alarm_truth.eq('failure')], asked[asked.alarm_truth.eq('normal')]
+        rows.append({'alarm': kind, 'checks': len(group),
+                     'true alarms asked': len(true), 'true: stopped (right)': int(true.verdict.eq('failure').sum()),
+                     'true: ignored (missed)': int(true.verdict.eq('safe').sum()),
+                     'false alarms asked': len(false), 'false: ignored (right)': int(false.verdict.eq('safe').sum()),
+                     'false: stopped (wrong)': int(false.verdict.eq('failure').sum()),
+                     'not asked (before the grasp)': int((~group.asked).sum()),
+                     'unclear': int(asked.alarm_truth.eq('unclear').sum())})
+    return pd.DataFrame(rows)
 
 
 def stage_boundaries(bag, stage_topic):
@@ -81,37 +122,57 @@ def camera_frames(bag, stage_topic, topic, until_sec):
     return frames
 
 
-def question_identity(config):
-    """Everything that determines the VLM's answer, without loading the model."""
+def question_identity(config, questions=None):
+    """Everything that determines the VLM's answer, without loading the model.
+
+    questions: the prompts.QuestionSet; derived questions (and their thresholds) are part of the identity.
+    """
     from time_series_gmr_scripts import run_time_series_test as settings
     vlm = config['rynnbrain']
     check = vlm.get('vlm_check') or {}
-    return dict(check='subgoal_v2', model=vlm['model']['model_id'], camera=check.get('camera_topic'),
-                item=check.get('item'), destination=check.get('destination'), alarm_run=ALARM_RUN,
-                check_offsets_sec=list(CHECK_OFFSETS_SEC), subgoal_threshold=SUBGOAL_THRESHOLD,
-                post_stage3_sec=settings.POST_STAGE3_SEC)
+    identity = dict(check='subgoal_v2', model=vlm['model']['model_id'], camera=check.get('camera_topic'),
+                    item=check.get('item'), destination=check.get('destination'), alarm_run=ALARM_RUN,
+                    check_offsets_sec=list(CHECK_OFFSETS_SEC), subgoal_threshold=SUBGOAL_THRESHOLD,
+                    post_stage3_sec=settings.POST_STAGE3_SEC)
+    if questions is not None and questions.source == 'reference':
+        identity['questions'] = questions.identity()
+    return identity
 
 
-def check_key(identity, bag, episode, boundaries):
-    from .prompts import subgoal_questions
+def question_set(config, progress, checker_class=None):
+    """The checker's questions without loading the VLM when possible: the fixed ones, or the saved derived ones.
+
+    Returns (questions, checker): the checker is loaded only when derived questions must be made first.
+    """
+    from .prompts import QuestionSet
+    check = config['rynnbrain'].get('vlm_check') or {}
+    if check.get('questions', 'fixed') != 'reference':
+        return QuestionSet(check.get('item'), check.get('destination'), default_threshold=SUBGOAL_THRESHOLD), None
+    from .reference_questions import load_questions
+    questions = load_questions(config)
+    if questions is not None:
+        return questions, None
+    checker = (checker_class or VlmChecker)(config, progress)
+    return checker.questions, checker
+
+
+def check_key(identity, bag, episode, boundaries, questions):
     payload = dict(identity=identity, bag=bag, time_sec=round(episode['time_sec'], 6),
                    camera=episode['camera_topic'], boundaries={str(k): round(v, 6) for k, v in boundaries.items()},
-                   questions=subgoal_questions(episode['stage'], identity['item'], identity['destination']))
+                   questions=questions.subgoal(episode['stage']))
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def ts_check_key(identity, bag, event, boundaries):
-    from .prompts import ts_alarm_questions
+def ts_check_key(identity, bag, event, boundaries, questions):
     payload = dict(identity=identity, bag=bag, time_sec=round(event['time_sec'], 6), alarms=event['alarms'],
                    rechecks=event['rechecks'], boundaries={str(k): round(v, 6) for k, v in boundaries.items()},
-                   questions=ts_alarm_questions(event['alarms'][0], event['stage'], identity['item'],
-                                                identity['destination'])[1],
+                   questions=questions.for_alarm(event['alarms'][0], event['stage'])[1],
                    ts_rule=dict(recheck_sec=TS_RECHECK_SEC, max_rechecks=TS_MAX_RECHECKS,
                                 release_delay_sec=RELEASE_CHECK_DELAY_SEC))
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def ts_alarm_events(gmr, bag, item, destination, progress, stop):
+def ts_alarm_events(gmr, bag, questions, progress, stop):
     """The TS alarm checks the live cascade asks in this bag: a causal GMR replay (prepared as in the GUI) and
     TsAlarmEpisodes. Each event is one check (alarms about the same sub-goal at one sample share it)."""
     from rosbag_io import iter_ts_replay_events
@@ -131,7 +192,7 @@ def ts_alarm_events(gmr, bag, item, destination, progress, stop):
             row, _, _ = gmr.append(None, timestamp)
             stage = current_stage(sampler.clock.boundaries, timestamp)
             for alarms in group_ts_alarms(rule.update(row['sensors'], stage, timestamp, gmr.release_result),
-                                          stage, item, destination):
+                                          stage, questions):
                 events.append(ts_trigger(alarms, timestamp, stage))
     return events
 
@@ -164,7 +225,7 @@ class CheckCache:
 
 
 def run(config, dino_run, metrics=None, limit=None, progress=print, output=None, per_folder=None,
-        ts_signal='pose_force'):
+        ts_signal='pose_force', all_checks=False):
     from .run import _slug
     from time_series_gmr_scripts import run_time_series_test as settings
     from vision_dinov2.benchmark_report import metrics_table
@@ -182,9 +243,10 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
     metrics = list(metrics or sorted(frames.metric.unique()))
     output = Path(output) if output else dino_run / 'vlm_check'
     (output / 'frames').mkdir(parents=True, exist_ok=True)
-    identity = question_identity(config)
+    # The VLM is loaded only when an answer is not cached (or derived questions must be made first).
+    questions, checker = question_set(config, progress, VlmChecker)
+    identity = question_identity(config, questions)
     cache = CheckCache(output / 'checks.jsonl')
-    checker = None  # Loaded only when an answer is not cached.
     timelines = {key: group for key, group in frames.groupby(['metric', 'bag_path'])}
     manifest = saved_results[saved_results.metric.eq(metrics[0])]
     evaluated = [row for row in manifest.to_dict('records') if row['status'] == 'ok']
@@ -200,7 +262,7 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
         from time_series_gmr_scripts.online_gmr import GmrOnlineDetector
         gmr = GmrOnlineDetector(config, progress)
         gmr.signal_mode = ts_signal
-    outcomes, statuses = {}, {}
+    outcomes, statuses, alarm_rows = {}, {}, []
     for number, item in enumerate(evaluated, 1):
         bag, name = item['bag_path'], f"{item['folder']}/{item['bag_name']}"
         try:
@@ -216,7 +278,7 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
         if gmr is not None:
             try:
                 # GMR preparation messages (training, missing topics) are shown for the first bag only.
-                ts_events = ts_alarm_events(gmr, bag, identity['item'], identity['destination'],
+                ts_events = ts_alarm_events(gmr, bag, questions,
                                             progress if number == 1 else (lambda _message: None), stop)
             except Exception as error:
                 ts_notes[bag] = str(error)
@@ -229,8 +291,8 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
                 checks, alarm = [], None
                 for event in events:
                     dino = event['source'] == 'dino'
-                    key = (check_key(identity, bag, event, boundaries) if dino else
-                           ts_check_key(identity, bag, event, boundaries))
+                    key = (check_key(identity, bag, event, boundaries, questions) if dino else
+                           ts_check_key(identity, bag, event, boundaries, questions))
                     if key not in cache.records:
                         if checker is None:
                             checker = VlmChecker(config, progress)
@@ -255,9 +317,21 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
                     record = cache.records[key]
                     checks.append(dict(time_sec=event['time_sec'], source=event['source'],
                                        alarms=event.get('alarms'), verdict=record['verdict']))
-                    if record['verdict'] == 'failure':
+                    if setup == setups[-1]:
+                        alarm_rows.append(dict(
+                            metric=metric, folder=item['folder'], bag_path=bag, bag_name=item['bag_name'],
+                            ground_truth_label=item['ground_truth_label'],
+                            recorded_failure_time_sec=item.get('recorded_failure_time_sec'),
+                            time_sec=event['time_sec'], source=event['source'],
+                            alarms='+'.join(event.get('alarms') or ['dino']),
+                            recheck=max(event.get('rechecks') or [0]), stage=record['stage'],
+                            goal_stage=record.get('goal_stage', record['stage']), asked=bool(record.get('questions')),
+                            subgoal_probability=record.get('subgoal_probability'), verdict=record['verdict'],
+                            after_stop=alarm is not None, alarm_truth=alarm_truth(item, event['time_sec'])))
+                    if record['verdict'] == 'failure' and alarm is None:
                         alarm = event['time_sec']
-                        break
+                        if not all_checks:
+                            break
                 outcomes[metric, bag, setup] = dict(episodes=events, checks=checks, alarm=alarm)
                 asked = [c for c in checks if c['source'] == ('dino' if setup == CHECKED else 'ts')]
                 lines.append(f"{metric} {LABELS[setup]}: " + (', '.join(
@@ -294,6 +368,14 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
     table.to_csv(output / 'metrics.csv', index=False)
     for metric in metrics:
         plot_metrics(table[table.metric.eq(metric)], output / f'metrics_{metric}.png', metric, scale, setups)
+    alarm_checks = pd.DataFrame(alarm_rows, columns=[
+        'metric', 'folder', 'bag_path', 'bag_name', 'ground_truth_label', 'recorded_failure_time_sec', 'time_sec',
+        'source', 'alarms', 'recheck', 'stage', 'goal_stage', 'asked', 'subgoal_probability', 'verdict', 'after_stop',
+        'alarm_truth'])
+    alarm_checks.to_csv(output / 'alarm_checks.csv', index=False)
+    per_alarm = pd.concat([alarm_metrics(group).assign(metric=metric)
+                           for metric, group in alarm_checks.groupby('metric')]) if len(alarm_checks) else pd.DataFrame()
+    per_alarm.to_csv(output / 'alarm_metrics.csv', index=False)
     checked = [r for r in cache.records.values() if r['bag'] in statuses]
     asked = [r for r in checked if r.get('questions')]  # Stage 1 alarms are answered without the VLM.
     summary = dict(dino_run=str(dino_run), metrics=metrics, configured_scale=scale, dino_trigger_score='pooled',
@@ -305,11 +387,11 @@ def run(config, dino_run, metrics=None, limit=None, progress=print, output=None,
                    vlm_sec_median=float(np.median([r['vlm_sec'] for r in asked])) if asked else None,
                    setups=list(setups), ts_check=ts_check, ts_signal=ts_signal if ts_check else None,
                    ts_checks=sum(r['alarm'].get('source') == 'ts' for r in checked),
-                   ts_not_replayed=ts_notes,
+                   ts_not_replayed=ts_notes, all_checks=all_checks,
                    limit=limit, per_folder=per_folder, elapsed_sec=time.monotonic() - started,
                    finished_utc=datetime.now(timezone.utc).isoformat())
     (output / 'run.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
-    write_summary(output, table, summary)
+    write_summary(output, table, summary, per_alarm)
     progress(f'Results: {output}')
     return output
 
@@ -354,7 +436,7 @@ def plot_metrics(table, path, metric, scale, setups=SETUPS):
     plt.close(figure)
 
 
-def write_summary(output, table, summary):
+def write_summary(output, table, summary, per_alarm=None):
     lines = ['# DINO + VLM check on a saved DINO benchmark', '',
              f"Saved DINO run: `{summary['dino_run']}` (DINO was not rerun; its saved pooled-score crossings at "
              f"scale {summary['configured_scale']:g} were replayed).", '',
@@ -367,6 +449,11 @@ def write_summary(output, table, summary):
              f"`prompts.py`). Each gripper frame {', '.join(f'{o:g}' for o in CHECK_OFFSETS_SEC)} s before the alarm "
              f"is asked alone; a mean probability below {SUBGOAL_THRESHOLD:g} that the sub-goal holds is the bag "
              'alarm, otherwise the execution continues. Stage 1 alarms have no reached sub-goal and continue.', '',
+             *([f"  Questions derived by the VLM from the nominal reference runs (`reference_questions.py`), used "
+                'instead of the fixed ones above for these stages:', '',
+                *(f"  - stage {goal}: \"{question_text(q['question'])}\" (failure below {q['threshold']:.2f})"
+                  for goal, q in summary['question']['questions']['derived'].items()), '']
+               if summary['question'].get('questions') else []),
              *([f"- **{LABELS[TS_CHECKED]}**: as above, and every TS alarm of the live cascade (GMR signal "
                 f"`{summary['ts_signal']}`: position GMR, force safety limit, empty grip; release position "
                 f"{RELEASE_CHECK_DELAY_SEC:g} s after the opening) asks the VLM when it starts and every "
@@ -404,7 +491,19 @@ def write_summary(output, table, summary):
             evaluated = int(rows[rows.folder.eq(folder)].evaluated_bags.iloc[0])
             lines.append(f'| {folder} | {evaluated} | ' + ' | '.join(cells) + ' |')
         lines.append('')
-    lines += ['Per-bag outcomes: `bag_results.csv` (setup in `operating_point`). Every VLM question, answer and '
+        if per_alarm is not None and len(per_alarm):
+            rows = per_alarm[per_alarm.metric.eq(metric)].drop(columns='metric')
+            lines += [f"### Per alarm ({LABELS[setups[-1]]}" + (', every alarm checked, also after the first stop)'
+                                                                 if summary.get('all_checks') else
+                                                                 ', checks until the first stop only)'), '',
+                      'A true alarm comes at or after the recorded failure marker of a failure bag; a false alarm in a '
+                      'normal bag. Before the marker the failure may already be going on, so those alarms are unclear. '
+                      'Right answers: stop on a true alarm, ignore a false one.', '',
+                      '| ' + ' | '.join(rows.columns) + ' |', '|' + '---|' * len(rows.columns)]
+            lines += ['| ' + ' | '.join(str(v) for v in values) + ' |' for values in rows.itertuples(index=False)]
+            lines.append('')
+    lines += ['Per-alarm checks: `alarm_checks.csv` (summary `alarm_metrics.csv`).',
+              'Per-bag outcomes: `bag_results.csv` (setup in `operating_point`). Every VLM question, answer and '
               'its input frames: `checks.jsonl` and `frames/`. Metrics: `metrics.csv`.',
               'Recall needs failure-labelled bags; when every bag is labelled normal, only false alarms can be measured. '
               'Delay is first alarm minus the recorded failure marker (negative: alarm before the marker).']

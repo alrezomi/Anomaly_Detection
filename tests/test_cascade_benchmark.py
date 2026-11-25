@@ -109,5 +109,46 @@ class CascadeBenchmarkTests(unittest.TestCase):
         self.assertEqual([(e['time_sec'], e['stage']) for e in episodes], [(3., 1), (5., 2), (9., 3)])
 
 
+    def test_every_alarm_is_checked_and_judged_with_all_checks(self):
+        class StopFirst(FakeChecker):
+            def ask(self, frames, boundaries, alarm_sec):
+                FakeChecker.calls.append(alarm_sec)
+                verdict = 'failure' if alarm_sec in (3., 6.5) else 'safe'
+                return dict(stage=benchmark.current_stage(boundaries, alarm_sec), frames=[], questions=['q'],
+                            answer='', verdict=verdict, vlm_sec=1., subgoal_probability=.2 if verdict == 'failure'
+                            else .8), [('Frame 1', Image.new('RGB', (8, 8)))]
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            saved_run(run_dir)
+            frames = [(t / 10, ('image', Image.new('RGB', (8, 8)))) for t in range(0, 140)]
+            for all_checks, asked in ((False, [3., 6.5]), (True, [3., 7., 6.5])):
+                FakeChecker.calls = []
+                with patch.object(benchmark, 'stage_boundaries', return_value={1: 0., 2: 4., 3: 8.}), \
+                     patch.object(benchmark, 'camera_frames', return_value=frames), \
+                     patch.object(benchmark, 'VlmChecker', StopFirst):
+                    output = benchmark.run(CONFIG, run_dir, metrics=['euclidean'], progress=lambda _m: None,
+                                           output=run_dir / f'all_{all_checks}', all_checks=all_checks)
+                self.assertEqual(FakeChecker.calls, asked)
+            results = pd.read_csv(output / 'bag_results.csv')
+            normal = results[(results.operating_point == benchmark.CHECKED) & (results.bag_path == '/data/Nominal/a/n1')]
+            self.assertEqual(normal.first_alarm_time_sec.iloc[0], 3.)  # The bag decision stays the live rule's.
+            checks = pd.read_csv(output / 'alarm_checks.csv')
+            self.assertEqual(list(zip(checks.time_sec, checks.alarm_truth, checks.verdict, checks.after_stop)),
+                             [(3., 'normal', 'failure', False), (7., 'normal', 'safe', True),
+                              (6.5, 'failure', 'failure', False)])
+            overall = pd.read_csv(output / 'alarm_metrics.csv').set_index('alarm').loc['All alarms']
+            self.assertEqual((overall['true: stopped (right)'], overall['false: ignored (right)'],
+                              overall['false: stopped (wrong)']), (1, 1, 1))
+            self.assertIn('Per alarm', (output / 'SUMMARY.md').read_text())
+
+    def test_alarm_truth_follows_the_failure_marker(self):
+        failed = dict(ground_truth_label='fail', recorded_failure_time_sec=10.)
+        self.assertEqual([benchmark.alarm_truth(failed, t) for t in (5., 9.5, 10., 30.)],
+                         ['unclear', 'unclear', 'failure', 'failure'])
+        self.assertEqual(benchmark.alarm_truth(dict(ground_truth_label='normal'), 5.), 'normal')
+        self.assertEqual(benchmark.alarm_truth(dict(ground_truth_label='fail', recorded_failure_time_sec=float('nan')), 5.),
+                         'unclear')
+
+
 if __name__ == '__main__':
     unittest.main()
