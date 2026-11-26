@@ -48,10 +48,28 @@ class FakeModel:
         return (.9 if red else .2) if specific else .6
 
 
+class TaskModel(FakeModel):
+    """FakeModel that records the describing prompts and writes yes/no questions when asked to."""
+    def __init__(self):
+        super().__init__()
+        self.prompts = []
+
+    def generate_nominal(self, turn, generation):
+        self.prompts.append(turn['text'])
+        if 'Write only the question' in turn['text']:
+            return 'Is a red cube between the fingers? Yes.' if 'grasp worked' in turn['text'] else 'Is a red cube on the shelf?'
+        if 'noun phrase' in turn['text'] and "The robot's task" not in turn['text']:
+            return 'A red block.'  # Not told the task, it names the part differently.
+        return super().generate_nominal(turn, generation)
+
+
 class ReferenceQuestionTests(unittest.TestCase):
     def test_descriptions_are_cleaned_into_noun_and_place_phrases(self):
         self.assertEqual(reference.clean('The object is a [black cable] (0, 582), below. More text.'),
-                         'The object is a black cable , below')
+                         'The object is a black cable, below')
+        self.assertEqual(reference.noun_phrase('<usb plug>'), 'the usb plug')  # A name marked in its pointing format.
+        self.assertEqual(reference.yes_no_question('Is the grasped object the [USB plug] <object> <frame> (818, 383), '
+                                                   '(940, 560) </object> ?'), 'Is the grasped object the USB plug?')
         self.assertEqual(reference.noun_phrase('Black plastic part.'), 'the black plastic part')
         self.assertEqual(reference.noun_phrase('A pair of scissors'), 'a pair of scissors')
         self.assertIsNone(reference.noun_phrase('It is a long thin metallic object with two round handles'))
@@ -84,6 +102,7 @@ class ReferenceQuestionTests(unittest.TestCase):
             questions = reference.load_questions(settings)
         chosen = saved['stages']['2']['chosen']
         self.assertFalse(chosen['separates'])
+        self.assertTrue(chosen['guarded'])  # Its threshold keeps 95% of the normal checks.
         self.assertEqual(questions.subgoal(2)[0][0], reference.held_question('a red cube'))
         self.assertEqual(questions.threshold(2), .5)  # No cut separates; capped at the yes/no point.
         fixed = saved['stages']['2']['fixed']
@@ -120,6 +139,52 @@ class ReferenceQuestionTests(unittest.TestCase):
             self.assertEqual(again['stages']['2']['chosen']['question'], saved['stages']['2']['chosen']['question'])
             self.assertEqual(again['reselected_from'], 'reference_questions_v3')
             self.assertEqual(reference.load_questions(settings).threshold(2), .5)
+
+    def test_the_task_sentence_guides_the_descriptions_and_the_vlm_writes_candidate_questions(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(reference, 'reference_frames', side_effect=frames):
+            settings = config(directory)
+            settings['rynnbrain']['vlm_check']['task_instruction'] = 'Pick up the red cube and put it on the shelf'
+            model = TaskModel()
+            saved = reference.derive(settings, model, progress=lambda _m: None)
+            told = [p for p in model.prompts if "The robot's task: Pick up the red cube and put it on the shelf. " in p]
+            self.assertEqual(len(told) * 2, len(model.prompts))  # Described once told the task, once not.
+            written = [c['question'] for c in saved['stages']['2']['candidates'] if c['kind'].startswith('written')]
+            self.assertEqual([question_text(q) for q in written], ['Is a red cube between the fingers?'])
+            self.assertEqual({c['kind'].split()[-1] for c in saved['stages']['3']['candidates']}, {'(task)', '(plain)'})
+            self.assertEqual((saved['signature']['instruction'], saved['object']),
+                             ('Pick up the red cube and put it on the shelf.', 'a red cube'))
+            # The check questions themselves do not state the task (a stated expectation gets repeated back).
+            self.assertFalse(any('task' in c['question'] for st in saved['stages'].values() for c in st['candidates']))
+            self.assertIsNotNone(reference.load_questions(settings))
+            settings['rynnbrain']['vlm_check']['task_instruction'] = 'Something else.'
+            self.assertIsNone(reference.load_questions(settings))  # A new task sentence derives again.
+
+    def test_the_task_description_is_the_default_task_sentence(self):
+        settings = config('/tmp')
+        settings['rynnbrain']['task_description'] = 'Pick the scissor and place it in the basket'
+        self.assertEqual(reference.task_instruction(settings), 'Pick the scissor and place it in the basket.')
+        settings['rynnbrain']['vlm_check']['task_instruction'] = 'Insert the plug.'
+        self.assertEqual(reference.task_instruction(settings), 'Insert the plug.')
+
+    def test_written_questions_must_be_short_yes_no_questions(self):
+        self.assertEqual(reference.yes_no_question('is the ethernet plug in the hole? yes'),
+                         'Is the ethernet plug in the hole?')
+        self.assertIsNone(reference.yes_no_question('What is held between the fingers?'))
+        self.assertIsNone(reference.yes_no_question('Is the [Ethernet plug] <object> <area> (451, 683) in the [hole]'))
+
+    def test_scores_are_cached_so_deriving_again_asks_nothing_new(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(reference, 'reference_frames', side_effect=frames):
+            settings = config(directory)
+            model = FakeModel()
+            model.answer_probability = Mock(side_effect=FakeModel().answer_probability)
+            first = reference.derive(settings, model, progress=lambda _m: None)
+            asked = model.answer_probability.call_count
+            again = reference.derive(settings, model, progress=lambda _m: None)
+            self.assertGreater(asked, 0)
+            self.assertEqual(model.answer_probability.call_count, asked)
+            self.assertEqual(first['stages']['2']['chosen']['question'], again['stages']['2']['chosen']['question'])
 
     def test_a_derived_question_decides_at_its_own_threshold(self):
         checker = VlmChecker.__new__(VlmChecker)

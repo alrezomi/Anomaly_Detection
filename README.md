@@ -1924,7 +1924,12 @@ Use the **Detector** selector before starting an execution:
   the image. Alarm-specific wordings ("three choices: held / closed on nothing /
   beside the fingers", "is it stuck?", "is it pressing on something?") were
   tested and are not used: the first stopped 23-33% of correct holds, the others
-  did not separate real failures from harmless contacts. Study and numbers:
+  did not separate real failures from harmless contacts. At force alarms "Is the
+  robot or <part> stuck?", also with the task sentence first, never answered
+  stuck at 45 REASSEMBLE force moments (0 of 6 failures, AUROC 0.53-0.61, P(not
+  stuck) 0.62 even at 65 N in a failed twist): a still image looks the same
+  whether the part is pressed in or jammed; force and arm position measure
+  "stuck", the image does not (study 6). Study and numbers:
   `evaluation/ts_vlm_fusion/README.md` (study 3). Benchmark on the saved
   `pick_place_dino832_v141.2` run (144 bags, Euclidean): DINO + TS + VLM check
   stops 78 of 81 failures (DINO + VLM check: 73) and 4 of 63 normal runs (1),
@@ -1943,10 +1948,15 @@ Use the **Detector** selector before starting an execution:
   wording (`rynnbrain_vlm/reference_questions.py`):
   1. on gripper-camera frames of 6 reference runs it names the object held
      during stage 2, says where the object is after the release (two
-     phrasings) and describes each moment in one sentence;
+     phrasings), describes each moment in one sentence and writes a yes/no
+     question for each step. It does this twice: told the task in one sentence
+     (`vlm_check.task_instruction`, else `rynnbrain.task_description`; one
+     sentence per task group, e.g. "Pick up the USB plug and insert it into its
+     matching hole on the board.") and not told it;
   2. the answers become yes/no questions: "Is <object> held between the
-     gripper fingers?", "Is <object> <where it is>?" and "Does this sentence
-     describe the image correctly? <sentence>";
+     gripper fingers?", "Is <object> <where it is>?", the questions it wrote,
+     and "Does this sentence describe the image correctly? <sentence>". The
+     task sentence itself never goes into a check question;
   3. each candidate is asked on every reference run the way a live check asks
      (mean over the frames at, 0.5 s and 1 s before), where the sub-goal holds
      (during stage 2; after the release) and where it does not hold yet (stage
@@ -1955,7 +1965,22 @@ Use the **Detector** selector before starting an execution:
      frames stopped), never above 0.5, and the candidate with the best J
      (then AUROC) becomes the stage's question with that threshold. A first
      rule, a threshold below every normal reference check, stopped almost
-     nothing (5 of 37 true alarms on REASSEMBLE) and was replaced.
+     nothing (5 of 37 true alarms on REASSEMBLE) and was replaced. A question
+     that hardly separates (AUROC below 0.75) gets a threshold that keeps 95%
+     of the normal checks: what the VLM cannot verify must not stop normal
+     runs (on BNC, J alone once chose a cut that stopped 77% of the normal
+     releases).
+
+  Told the task, RynnBrain names the parts correctly ("Ethernet plug", "BNC
+  connector", "scissor ... inside the blue basket") instead of "nut", "hinge"
+  or "pipe". But questions in the task's own words were worse checks: on the
+  re-asked checks of the REASSEMBLE insert group they stopped 8 of 37 true
+  alarms (without the task sentence 15), and on 62 of your bags 176 of 439
+  (278). Phrased in the task's terms, the VLM tends to confirm the expected
+  outcome, as with the very first prompt. With both kinds of candidates, the
+  reference check chose a task-sentence wording in only 1 of 10 stages (round
+  peg 3 after the release), so on the re-asked checks the result equals that
+  of the plain wording (`evaluation/ts_vlm_fusion/README.md`, study 6).
 
   Only nominal runs are used, so this step cannot see failures: it rejects
   wordings that do not tell "done" from "not done yet" (a hallucinated name, a
@@ -1963,8 +1988,11 @@ Use the **Detector** selector before starting an execution:
   failures. The result, with every candidate's scores and the VLM's
   descriptions, is saved to
   `<nominal_cache_dir>/vlm_questions/<vision_memory_name>.json` (or
-  `vlm_check.questions_file`) and reused while the reference runs, camera and
-  model stay the same. The GUI derives it on first use (a few minutes on Thor),
+  `vlm_check.questions_file`) and reused while the reference runs, task
+  sentence, camera and model stay the same. Every question's reference scores
+  are also kept in `<question file>_scores.json`, so deriving again (a new
+  task sentence, a changed rule) only asks what is new. The GUI derives it on
+  first use (a few minutes on Thor),
   or ahead of time with `docker compose run --rm vlm-questions` (`--rebuild` to
   derive again; `--reselect` applies a changed choice rule to the saved
   candidate scores without the VLM). The GUI's check text shows the question
