@@ -1939,6 +1939,44 @@ Use the **Detector** selector before starting an execution:
   setting-1/2 run, 0.2 on ft_nominal). With `enabled: false` (or no `ts_check`
   block) the cascade behaves as before.
 
+  **Changing the task: what to edit for the VLM check** (hand-written
+  questions, the default and the recommended setting). Everything
+  task-specific is in these places:
+
+  | What changes | Where | Today |
+  |---|---|---|
+  | The object | `pipeline_config.json` → `rynnbrain.vlm_check.item` | `"a metal surgical instrument"` |
+  | Where it ends up | `pipeline_config.json` → `rynnbrain.vlm_check.destination` | `"a blue surface"` |
+  | The gripper (finger colour or number) | `rynnbrain_vlm/prompts.py` → `GRIPPER_CAMERA` and the stage-2 question in `subgoal_questions` ("the two white fingers") | Hand-E, two white fingers |
+  | What "done" looks like after the release (another kind of task, e.g. inserting instead of placing) | `rynnbrain_vlm/prompts.py` → `subgoal_questions`, stage 3; the matching text `SUBGOALS[3]` in `rynnbrain_vlm/cascade.py` (shown in the GUI) | 3 choices: lies on the destination / on a surface of another colour / not visible |
+  | The camera the VLM looks through | `pipeline_config.json` → `rynnbrain.vlm_check.camera_topic` | flange camera |
+  | The gripper's "closed on nothing" reading (only with another gripper) | `time_series_gmr_scripts/run_time_series_test.py` → `GRIPPER_EMPTY_COUNT` | 248 of 255 |
+
+  For a new object or destination in the same pick-and-place task, `item`
+  and `destination` are all that change. `rynnbrain.task_description` is not
+  used by this check (only by the older VLM modes); keep it in line anyway.
+  Unchanged for any task: stage 1 asks nothing, which alarm asks which
+  question (`TS_ALARM_GOAL_STAGE`: empty grip → the held question, release
+  position → the stage-3 question, position and force → the current stage's
+  question), the threshold 0.5 and the frames 0, 0.5 and 1 s before the
+  alarm.
+
+  How to write `item`, `destination` and new questions (from the tests in
+  `evaluation/ts_vlm_fusion`):
+  - Describe what the gripper camera sees ("a black plastic plug",
+    "a light grey board"), not the part's task name: questions in the task's
+    own words were answered from expectation, not from the image.
+  - Ask only what is visible, never what should be true ("the object should
+    be held"): the VLM repeats a stated expectation back.
+  - Keep the grasp question yes/no: a 3-choice grasp question stopped
+    23–33% of correct holds.
+  - No sensor values in the prompt (the VLM trusts them over the image), and
+    no questions a still image cannot answer ("is it stuck?" never said yes).
+  - Before using a new wording, run it on recorded normal runs
+    (`run_vlm_check_benchmark.py --all-checks`): it must let nearly every
+    normal check continue. Your current questions keep 98% of the normal
+    checks and stop 96% of the true alarms on your 144 bags.
+
   **Questions the VLM derives itself** (`rynnbrain.vlm_check.questions:
   "reference"`; the default `"fixed"` keeps the questions above). The fixed
   questions are written for this setup (the object, the destination, white
